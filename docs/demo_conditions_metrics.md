@@ -161,7 +161,6 @@ functions:
     name: ABS 全力制动
     aliases: [ABS, 防抱死, 全力制动, 紧急制动, 制动距离, 低附制动]
     segmenter: seg_abs_full_brake
-    default_metrics: [yaw_rate_max]
     kb_section: abs_manual
     description: 高/低附着路面的初速全力制动，评价横摆稳定性、制动距离与减速度能力
 
@@ -169,7 +168,6 @@ functions:
     name: TCS 全油门加速
     aliases: [TCS, DTCS, 牵引力控制, 防滑, 全油门加速, 加速时间, 打滑]
     segmenter: seg_tcs_full_throttle
-    default_metrics: [yaw_rate_max]
     profiles: [4WD, 2WD, DTCS, TCS]
     kb_section: tcs_manual
     description: 低附路面起步全油门加速，评价横摆稳定性、加速能力与驱动轮打滑量
@@ -268,6 +266,7 @@ metrics:
     category: stability
     unit: °/s
     inputs: [yaw_rate]
+    tuning_params: [abs_保压降压判据, abs_压力调节频率, tcs_单轮制动干预强度, 前后轴制动力分配]
     description: 事件窗口内横摆角速度绝对值峰值
 
   - key: brake_distance
@@ -275,6 +274,7 @@ metrics:
     category: performance
     unit: m
     inputs: [distance_vbox]
+    tuning_params: [初始夹紧力响应, 增压请求阈值, abs_进入压力门限]
     description: 窗口终止与起始的 vbox 距离之差（v0_kph → v_stop_kph 制动距离）
 
   - key: decel_avg
@@ -282,6 +282,7 @@ metrics:
     category: performance
     unit: m/s²
     inputs: [speed_vbox]
+    tuning_params: [abs_目标滑移率, abs_降压台阶, abs_再介入延迟]
     description: 窗口内车速变化率幅值（恒非负），与平均减速度/平均加速度阈值直接比较
 
   - key: acc_time
@@ -289,6 +290,7 @@ metrics:
     category: performance
     unit: s
     inputs: [speed_vbox]
+    tuning_params: [tcs_扭矩限制阈值, tcs_允许加速度上限, 发动机请求滤波]
     description: 窗口时长，即 v_start_kph → v_target_kph 加速时间
 
   - key: acc_avg
@@ -296,6 +298,7 @@ metrics:
     category: performance
     unit: m/s²
     inputs: [speed_vbox]
+    tuning_params: [tcs_扭矩爬升速率, dtcs_滑移率目标, tcs_干预退出延迟]
     description: 窗口内平均加速度（与 decel_avg 同工具、同为非负幅值，仅阈值方向不同）
 
   - key: slip_max
@@ -303,6 +306,7 @@ metrics:
     category: traction
     unit: km/h
     inputs: [wheelSpeed_FL, wheelSpeed_FR, wheelSpeed_RL, wheelSpeed_RR, speed_vbox]
+    tuning_params: [滑移率报警阈值, tcs_减扭响应梯度, dtcs_进入延迟]
     description: 窗口内 max(四轮轮速) − 实际车速 的最大值（打滑量）
 ```
 

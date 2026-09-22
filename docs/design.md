@@ -10,7 +10,7 @@
 - **客观指标计算**：按功能与工况配置，计算量化指标。
 - **异常识别**：基于可解释规则引擎判定指标状态与异常。
 - **标定指导**：规则引擎给出确定性结论后，由 LLM 结合知识库生成标定方向。
-- **图表展示**：Web 用 ECharts 交互图；报告导出（Markdown/HTML）用 Matplotlib 静态图。
+- **图表展示**：Web 用 ECharts 交互式时序图，支持多测线叠加与异常窗口高亮。
 - **对话式交互**：Web 以聊天为主入口，支持多文件上传、两跳推荐、候选面板、分析结果卡片、时序图。
 
 ### 设计目标
@@ -34,9 +34,9 @@ Function（功能）
   └── Condition（工况 N）
 ```
 
-- **Function**：一组相关测试能力的集合，决定指标域、默认指标集、事件分段模板、阈值档位、知识库章节。
+- **Function**：一组相关测试能力的集合，决定指标域、事件分段模板、阈值档位、知识库章节。
 - **Condition**：一个具体测试脚本，由 `maneuver`、`surface_code`、`params` 唯一确定，必须归属一个功能。
-- **Run-sample**：一次分析中，一个文件内检出的一个事件窗口；复现性对比以 run-sample 为基本单元。
+- **Run-sample**：一次分析中，一个文件内检出的一个事件窗口，是结果卡片与指标判定的基本单元。
 
 ### 2.2 唯一键约定
 
@@ -56,8 +56,7 @@ Function（功能）
 | `key` | 功能键 |
 | `name` | 显示名 |
 | `aliases` | 同义词/别名词表，供离线规则与 LLM 参考 |
-| `segmenter` | 绑定的事件分段模板 |
-| `default_metrics` | 默认启用的指标集 |
+| `segmenter` | 绑定的事件分段模板 key（模板实现以代码注册表提供，见 §6.3） |
 | `profiles` | 可选；该功能支持的档位标签列表，供前端渲染选择面板 |
 | `kb_section` | 知识库手册章节引用 |
 | `description` | 功能说明 |
@@ -146,8 +145,7 @@ brake-agent/
 │   ├── rules/
 │   │   └── engine.py
 │   ├── charts/
-│   │   ├── html.py
-│   │   └── report.py
+│   │   └── html.py
 │   ├── llm/
 │   │   ├── client.py
 │   │   ├── prompts.py
@@ -202,6 +200,8 @@ brake-agent/
 - 缺失信号返回空 `ts`/`values`，不抛异常，由指标/规则层标记 missing。
 - 信号映射全局共享；功能与工况差异只体现在指标集、参数、阈值。
 - 每个 `SignalData` 的 `ts` 统一相对起点偏移，便于跨文件对齐。
+- demo 阶段 Web 入口只开放 MF4（不依赖外部 DBC 文件）；`BLFLoader` 作为内核能力保留，
+  等真实 CAN 数据与 DBC 到位后再接入上传入口。
 
 `SignalData` 契约：
 
@@ -246,11 +246,11 @@ anchor: float
 phases: list[str]
 ```
 
-- 分段模板由功能通过 `segmenter` 绑定，不硬编码到某个动作类型。
+- 分段模板由功能通过 `segmenter` 绑定，模板本身在代码中实现并注册（`events/segment.py` 内
+  `SEGMENTERS: dict[str, Segmenter]`），新增模板 = 新增一个注册函数，不进入 YAML 配置。
 - 无有效事件时返回空窗口，相关指标置 missing。
 - 一个文件可含多条同工况事件，每条为一个 run-sample。
 - 一次分析 = 一个文件 + 一个工况，但可含多条事件。
-- 复现性对比 = 跨文件 × 事件的全部同功能同工况 sample 聚合。
 
 ### 6.4 指标计算层（`metrics/`）
 
@@ -267,8 +267,8 @@ phases: list[str]
   condition: <condition_id>        # scope=condition 时必填
   metric: <metric_key>
   status: abnormal | missing       # 触发的指标状态
-  severity: <severity>             # 严重度，由规则定义
-  fault_domain: <domain>
+  severity: <severity>             # info | low | high | critical（枚举见 §9.4）
+  fault_domain: <domain>           # 枚举见 §9.4
   kb_ref: <section_id>
   message: <可读结论>
 ```
@@ -293,8 +293,7 @@ phases: list[str]
 
 - `html.py`：将选定信号时间序列转成 ECharts option JSON。
   - 支持多测线叠加、缩放、悬停、异常窗口高亮。
-- `report.py`：Matplotlib 静态图 + Markdown/HTML 报告。
-  - info 指标在报告中单列，不计入合格率/异常率。
+- 本期无静态图/报告导出，Markdown/HTML 报告与 PDF/Excel 导出列入 §15 后续扩展。
 
 ### 6.7 编排流水线（`pipeline.py`）
 
@@ -312,20 +311,9 @@ load(file)
   → AnalysisResult
 ```
 
-复现性对比：
-
-- `pipeline.compare_group(samples, function_key, condition_id)`
-- `samples` 是该功能下该工况的全部 run-sample。
-
-聚合：
-
-- 逐指标 `run_stats`：均值、中位数、标准差、极差、CV%。
-- 叠画相同信号曲线，按 anchor 对齐。
-- 指标分组柱状图、CV% 条形图。
-- 对明显离群样本标 outlier。
-- 产出 `GroupResult`。
-
 `AnalysisResult` 一次生成，Web 各视图共用；LLM 生成可选，缺 Key 时跳过。
+
+复现性对比本期不实现，列入 §15 后续扩展。
 
 ### 6.8 LLM 服务（`llm/`）
 
@@ -337,6 +325,7 @@ load(file)
 
 - 基于证据输出标定方向；
 - 写明修改哪个可标定量、方向、预期影响、风险；
+- 可标定量只能取自该指标 `tuning_params` 声明的参数（为空时可参考知识库手册），不得编造；
 - 区分“确定规则结论”与“建议性判断”；
 - 结构化 JSON 输出 `calibration_actions[]`；
 - 不得基于 info 指标单独下“异常”结论，只能作为佐证或趋势描述。
@@ -384,6 +373,15 @@ load(file)
 - **Session**：绑定一个数据文件，缓存信号与各工况分析结果。
 - **Chat**：一次人机对话，含 `files`、`messages`、`selected_function`、`selected_condition`、`selected_profile`。
 
+生命周期与回收：
+
+- 每个 Chat 占用独立前端 URL（`/chat/{cid}`），刷新/直达均可恢复到对应对话；
+  打开根路径时默认跳转到最近一个 Chat，无 Chat 时自动新建。
+  实现走 hash 路由（`/#/chat/{cid}`），服务端静态托管无需 history fallback。
+- `DELETE /api/chats/{cid}` 级联删除该 Chat 的全部内存对象：messages、files、
+  每文件的 Session（含信号缓存与分析结果缓存）、关联 traces。
+- 仅内存存储，服务重启即全部丢失，不做持久化。
+
 消息 kind：
 
 - `text`
@@ -409,7 +407,7 @@ load(file)
 | POST | `/api/chats/{cid}/select` | 统一选择接口：`target_type=function` 或 `condition` |
 | GET | `/api/analyses/{analysis_id}` | 单事件样本分析结果 |
 | GET | `/api/analyses/{id}/timeseries` | 事件窗口内信号时序 |
-| POST | `/api/groups` | 复现性对比统计 |
+| GET | `/api/kb` | 知识库只读浏览（手册 section + 案例清单） |
 | GET | `/api/debug/traces` | 调试 trace 列表 |
 | GET | `/api/debug/traces/{tid}` | 单条 trace 详情 |
 | GET | `/debug` | 调试页 |
@@ -445,6 +443,8 @@ load(file)
 - 点「+」多选文件。
 - 文件仅暂存在输入区上方，不立即上传。
 - 点发送时先批量上传，再发送文本。
+- demo 阶段仅接受 `.mf4`，其余扩展名前端拒绝并提示；`signals_mf4.yaml` 由服务端固定，
+  用户不提供映射配置。BLF/DBC 能力在内核中已实现，接入真实数据时再开放上传。
 
 **② 第一跳：功能选择**
 
@@ -474,7 +474,8 @@ load(file)
 ### 8.3 结果展示
 
 - 分析结果卡片按 run-sample 分行。
-- 每行显示：文件名、事件序号、状态 badge、查看图表、数据链接。
+- 每行显示：文件名、事件序号、查看图表、数据链接。**不做行级聚合状态 badge**——
+  指标状态在展开明细中逐个展示，每行只显示各指标自身的状态 chip。
 - 状态配色：`ok` 绿 / `abnormal` 红 / `missing` 灰 / `info` 蓝。
 - 点“查看图表”拉取事件窗口时序，ECharts 多信号叠画。
 - 已上传文件在顶部 chips 展示，可移除。
@@ -492,13 +493,13 @@ load(file)
 ### 9.1 分层
 
 ```text
-functions.yaml   ← 功能清单：分段模板、默认指标、档位列表、知识库章节
+functions.yaml   ← 功能清单：分段模板 key、档位列表、知识库章节
      │ 引用
      ▼
 conditions.yaml  ← 按 function_key 索引的工况清单：动作/路面/参数 + 指标 list
      │ 引用
      ▼
-metrics.yaml     ← 指标模板：工具绑定、category、unit
+metrics.yaml     ← 指标模板：工具绑定、category、unit、tuning_params
      │ 引用
      ▼
 signals_*.yaml   ← 逻辑信号角色 → 物理信号映射
@@ -511,8 +512,7 @@ functions:
   - key: <function_key>
     name: <功能名>
     aliases: [<同义词>, ...]
-    segmenter: <segmenter_key>
-    default_metrics: [<metric_key>, ...]
+    segmenter: <segmenter_key>       # 实现在 events/segment.py 代码注册表中
     profiles: [<profile_a>, <profile_b>, ...]   # 可选；该功能支持的档位标签
     kb_section: <section_id>
     description: <说明>
@@ -598,10 +598,28 @@ metrics:
     category: <category>
     unit: <unit>
     inputs: [<signal_role>, ...]
+    tuning_params: [<param_key>, ...]
     description: <说明>
 ```
 
 不再包含 `better` 字段，方向由 `ok_range` 表达。
+
+`tuning_params` 是**指标 → 可标定量的粗映射**（必填，可为空列表）。demo 阶段仅以字符串
+列出参数名，不引入独立配置文件；它随指标条目一起注入 prompt，约束 LLM 只能在这些参数
+里给标定方向，避免自由编造不存在的标定量。接入真实标定库后再升级为带单位、当前值域
+的结构化定义。
+
+规则枚举：
+
+```yaml
+severity: info | low | high | critical
+fault_domain: stability | brake_performance | traction | powertrain_interaction | data_quality
+```
+
+- `info`：结论性说明，不计入异常。
+- `low`：数据质量或可忽略偏差。
+- `high`：明确影响性能的偏差，需标定调整。
+- `critical`：安全问题（如横摆失控），必须优先处理。
 
 ### 9.5 rules.yaml
 
@@ -1028,11 +1046,13 @@ python -m uvicorn web.main:app --port 8000
 
 ### 后续扩展
 
-- 更多格式：ASC/ARXML。
+- 复现性对比：跨文件 × 事件的同工况 sample 聚合统计与叠画（本期已移除）。
+- 报告导出：Matplotlib 静态图 + Markdown/HTML 报告，进而 PDF/Excel。
+- 更多格式：ASC/ARXML；开放 BLF 上传（含用户自备 DBC）。
 - 车型 profile 中心化管理。
+- `tuning_params` 升级为结构化标定库（带单位、当前值、值域）。
 - 知识库管理后台。
 - 批量/脚本化扫描。
-- 导出 PDF/Excel 报告。
 - 异步任务化。
 
 ### 已排除项
