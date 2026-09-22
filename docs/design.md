@@ -2,7 +2,7 @@
 
 ## 1. 项目概述
 
-构建一个面向制动系统测试数据的分析与标定指导 Agent，支持 CLI 与 Web 两种入口。
+构建一个面向制动系统测试数据的分析与标定指导 Agent，Web 为唯一入口。
 
 ### 核心能力
 
@@ -10,13 +10,13 @@
 - **客观指标计算**：按功能与工况配置，计算量化指标。
 - **异常识别**：基于可解释规则引擎判定指标状态与异常。
 - **标定指导**：规则引擎给出确定性结论后，由 LLM 结合知识库生成标定方向。
-- **图表展示**：Web 用 ECharts 交互图，报告/CLI 用 Matplotlib 静态图。
+- **图表展示**：Web 用 ECharts 交互图；报告导出（Markdown/HTML）用 Matplotlib 静态图。
 - **对话式交互**：Web 以聊天为主入口，支持多文件上传、两跳推荐、候选面板、分析结果卡片、时序图。
 
 ### 设计目标
 
 - **可解释性与稳定性**：指标与异常判定由确定性规则完成；LLM 只做意图解析、候选推荐、语言化标定建议。
-- **CLI / Web 共享内核**：核心分析逻辑独立成包；CLI 与 Web 只是薄壳。
+- **内核独立**：核心分析逻辑独立成包，Web API 只是薄壳；便于单测、复用与替换入口。
 - **工具化**：指标实现为可复用纯函数工具，便于单测、替换与追溯。
 - **可降级**：无 LLM Key 或网络失败时，离线确定性路由仍可跑通完整链路。
 - **可扩展**：新增功能、工况、指标、档位的成本仅为配置行数，不是逻辑复杂度。
@@ -68,7 +68,7 @@ Function（功能）
 
 ```text
 Presentation
-  CLI / Web 前端
+  Web 前端
         │
         ▼
 Web API（FastAPI）
@@ -78,7 +78,7 @@ Agent 编排引擎
   多轮对话 / 工具路由 / 两跳推荐
         │
         ▼
-Analysis Core（CLI 与 Web 共享）
+Analysis Core
   Loader / 事件分段 / 指标引擎 / 规则引擎 / 图表 / LLM 服务
         │
         ├── configs/functions.yaml
@@ -91,7 +91,7 @@ Analysis Core（CLI 与 Web 共享）
 
 约束：
 
-- Web 与 CLI 都经由 `agent/` 编排引擎。
+- 前端请求全部经由 `agent/` 编排引擎。
 - LLM 只负责意图解析、候选推荐、语言化标定建议。
 - 客观指标与异常判定完全由确定性内核完成。
 - 无 LLM Key 或网络失败时，离线确定性路由仍可跑通完整链路。
@@ -107,7 +107,6 @@ Analysis Core（CLI 与 Web 共享）
 | 数值计算 | numpy、pandas/scipy | 指标计算 |
 | Web 后端 | FastAPI + uvicorn | REST API、静态托管 |
 | Web 前端 | Vue 3 + ECharts | 对话式 UI、图表 |
-| CLI | click / typer | 命令入口 |
 | 规则引擎 | 自研规则 DSL / Pydantic 规则表 | 异常判定 |
 | LLM | openai SDK，OpenAI Compatible base_url | 标定建议生成 |
 | 配置 | pydantic-settings + python-dotenv + pyyaml | 配置加载与校验 |
@@ -159,8 +158,6 @@ brake-agent/
 │   │   └── tools.py
 │   ├── pipeline.py
 │   └── schemas.py
-├── cli/
-│   └── main.py
 ├── web/
 │   ├── main.py
 │   ├── store.py
@@ -328,7 +325,7 @@ load(file)
 - 对明显离群样本标 outlier。
 - 产出 `GroupResult`。
 
-`AnalysisResult` 一次生成，CLI/Web 共用；LLM 生成可选，缺 Key 时跳过。
+`AnalysisResult` 一次生成，Web 各视图共用；LLM 生成可选，缺 Key 时跳过。
 
 ### 6.8 LLM 服务（`llm/`）
 
@@ -351,7 +348,7 @@ load(file)
 
 ### 6.9 对话式编排引擎（`agent/`）
 
-Web 与 CLI 都经由 `agent/` 编排。
+所有对话请求都经由 `agent/` 编排。
 
 工具集：
 
@@ -1004,13 +1001,6 @@ OPENAI_MODEL
 ENABLE_RAG=false
 ```
 
-CLI：
-
-```bash
-brake analyze -f <data_file> -p <signals_config> -c <condition_id> [--profile <profile>]
-brake compare -c <condition_id> -f <run1> -f <run2> ... [--profile <profile>]
-```
-
 Web：
 
 ```bash
@@ -1020,7 +1010,6 @@ python -m uvicorn web.main:app --port 8000
 依赖分组：
 
 - `core`
-- `cli`
 - `web`
 - `llm`
 
