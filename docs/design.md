@@ -537,18 +537,15 @@ functions:
       # 通用条目：所有档位通用
       - key: <metric_key_a>
         ok_range: [<lo>, <hi>]
-        apply_abs: false
         params: {<tool_param>: <value>}
 
       # 单边下界
       - key: <metric_key_b>
         ok_range: [<lo>, null]
-        apply_abs: false
 
-      # 单边上界，取绝对值后比较
+      # 单边上界
       - key: <metric_key_c>
         ok_range: [null, <hi>]
-        apply_abs: true
 
       # 特定档位条目
       - key: <metric_key_d>
@@ -572,7 +569,6 @@ functions:
     metrics:
       - key: <metric_key_f>
         ok_range: [<lo>, <hi>]
-        apply_abs: false
 ```
 
 字段说明：
@@ -581,7 +577,6 @@ functions:
 | --- | --- | --- |
 | `key` | 是 | 指标键 |
 | `ok_range` | 否 | `[lo, hi]`，`null` 表示该侧无界；省略表示无硬性规定 |
-| `apply_abs` | 否 | 默认 `false`；`true` 表示先对指标值取绝对值再比较 |
 | `profile` | 否 | 档位标签；省略表示通用条目 |
 | `params` | 否 | 传给指标工具的参数 |
 
@@ -592,6 +587,8 @@ functions:
 - 每个工况的阈值与判定条件完全自包含。
 - `surface_code` 仅作工况元数据，不驱动任何阈值继承。
 - 边界统一为闭区间 `[lo, hi]`，即 `lo <= v <= hi` 为 ok。
+- 判定值即工具输出的 `value`，引擎不做取绝对值等符号加工；需要绝对值语义
+  （如横摆峰值、减速度幅值）由工具自身输出保证。
 - 同一 `metric_key` 可有多条条目，通过 `profile` 区分档位。
 - 若同 `metric_key` 既有通用条目又有 profile 条目，profile 精确匹配优先，无匹配回退通用。
 
@@ -695,8 +692,6 @@ class MetricResult:
     status: str               # ok | abnormal | missing | info
     raw: dict
     ok_range: tuple | None    # 实际使用的区间
-    apply_abs: bool
-    value_used: float | None  # 取绝对值后的判定值
     profile: str | None       # 实际使用的档位
 ```
 
@@ -762,9 +757,8 @@ def _classify(value: float | None, entry: dict) -> str:
         return "missing"
     if "ok_range" not in entry:
         return "info"
-    v = abs(value) if entry.get("apply_abs") else value
     lo, hi = entry["ok_range"]
-    ok = (lo is None or v >= lo) and (hi is None or v <= hi)
+    ok = (lo is None or value >= lo) and (hi is None or value <= hi)
     return "ok" if ok else "abnormal"
 ```
 
@@ -795,8 +789,7 @@ def compute_metrics(
                 name=tmpl.name, category=tmpl.category,
                 value=None, unit=tmpl.unit, ts_range=None,
                 status="missing", raw={},
-                ok_range=None, apply_abs=False,
-                value_used=None, profile=profile,
+                ok_range=None, profile=profile,
             ))
             continue
 
@@ -818,8 +811,6 @@ def compute_metrics(
             ts_range=(window.t_start, window.t_end),
             status=status, raw=raw,
             ok_range=entry.get("ok_range"),
-            apply_abs=bool(entry.get("apply_abs")),
-            value_used=(abs(value) if value is not None and entry.get("apply_abs") else value),
             profile=entry.get("profile"),
         ))
     return results
@@ -831,6 +822,8 @@ def compute_metrics(
 
 - 输入：`(signals, condition, window, params)`
 - 输出：`dict`，主值放在 `"value"` 键，其余中间量自由放置。
+- `value` 即最终判定值，引擎不做符号加工；绝对值语义（幅值、峰值类指标）
+  由工具输出保证（如 `max_abs` 返回绝对值峰值、`speed_slope` 返回变化率幅值）。
 - 无信号或无法计算时返回 `{"value": None}`，不抛异常。
 
 这样引擎无需硬编码工具名到主值字段的映射。

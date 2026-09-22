@@ -55,7 +55,7 @@ condition_id 命名约定：`{function}_{maneuver}_{surface}_{v0}kph`。表中�
 
 需求里存在两个**相互独立**的档位维度：
 
-- 驱动形式：`4WD` / `2WD` —— 只作用于**加速度指标**（2.2、2.3）；
+- 驱动形式：`4WD` / `2WD` —— 只作用于**平均加速度指标**（2.2、2.3）；
 - 控制模式：`DTCS` / `TCS` —— 只作用于**打滑量指标**（2.2、2.3）。
 
 落位规则：
@@ -88,37 +88,38 @@ condition_id 命名约定：`{function}_{maneuver}_{surface}_{v0}kph`。表中�
 | --- | --- | --- | --- | --- |
 | `yaw_rate_max` | `max_abs` | °/s | `yaw_rate` | 窗口内 \|yaw_rate\| 最大值 |
 | `brake_distance` | `signal_span` | m | `distance_vbox` | 窗口内距离增量 = `d(t_end) − d(t_start)` |
-| `decel_avg` | `speed_slope` | m/s² | `speed_vbox` | 窗口速度变化率 `(v_end − v_start)/(t_end − t_start)`，制动为负，`apply_abs: true` 后按正值比较 |
+| `decel_avg` | `speed_slope` | m/s² | `speed_vbox` | 窗口速度变化率幅值 `\|v_end − v_start\|/(t_end − t_start)`，恒非负 |
 | `acc_time` | `window_duration` | s | `speed_vbox` | 窗口时长 `t_end − t_start` |
-| `acc_avg` | `speed_slope` | m/s² | `speed_vbox` | 同 `decel_avg` 工具，加速为正，`apply_abs: true` 兜住符号 |
+| `acc_avg` | `speed_slope` | m/s² | `speed_vbox` | 同 `decel_avg`，恒非负 |
 | `slip_max` | `wheel_slip_max` | km/h | `wheelSpeed_FL/FR/RL/RR`, `speed_vbox` | 窗口内 `max(四轮轮速) − speed_vbox` 的最大值 |
 
 工具契约与 design.md §10.7 一致：`(signals, condition, window, params) -> {"value": ...}`，
 缺信号或窗口退化（`t_end <= t_start`）返回 `{"value": None}`，由引擎判 missing。
-`speed_slope` 内部完成 km/h→m/s 换算；`wheel_slip_max` 保持 km/h，与阈值同单位。
+`value` 即最终判定值，引擎不做符号加工：`max_abs` / `speed_slope` 输出幅值（恒非负），
+`wheel_slip_max` 保持 km/h，与阈值同单位；`speed_slope` 内部完成 km/h→m/s 换算。
 
 工况 → 指标映射（含阈值，闭区间语义 `lo <= v <= hi` 为 ok）：
 
-| condition_id | metric_key | ok_range | apply_abs | profile |
-| --- | --- | --- | --- | --- |
-| `abs_..._dry_asphalt_100kph` | `yaw_rate_max` | `[null, 5]` | true | – |
-| | `brake_distance` | `[null, 40]` | false | – |
-| `abs_..._wet_basalt_60kph` | `yaw_rate_max` | `[null, 5]` | true | – |
-| | `decel_avg` | `[1.5, null]` | true | – |
-| `abs_..._wet_tile_50kph` | `yaw_rate_max` | `[null, 5]` | true | – |
-| | `decel_avg` | `[0.8, null]` | true | – |
-| `tcs_..._dry_asphalt_0to100kph` | `yaw_rate_max` | `[null, 5]` | true | – |
-| | `acc_time` | `[null, 10]` | false | – |
-| `tcs_..._wet_basalt_0to60kph` | `yaw_rate_max` | `[null, 5]` | true | – |
-| | `acc_avg` | `[1.6, null]` | true | `4WD` |
-| | `acc_avg` | `[0.8, null]` | true | `2WD` |
-| | `slip_max` | `[null, 36]` | false | `DTCS` |
-| | `slip_max` | `[null, 54]` | false | `TCS` |
-| `tcs_..._wet_tile_0to50kph` | `yaw_rate_max` | `[null, 5]` | true | – |
-| | `acc_avg` | `[0.8, null]` | true | `4WD` |
-| | `acc_avg` | `[0.4, null]` | true | `2WD` |
-| | `slip_max` | `[null, 36]` | false | `DTCS` |
-| | `slip_max` | `[null, 54]` | false | `TCS` |
+| condition_id | metric_key | ok_range | profile |
+| --- | --- | --- | --- |
+| `abs_..._dry_asphalt_100kph` | `yaw_rate_max` | `[null, 5]` | – |
+| | `brake_distance` | `[null, 40]` | – |
+| `abs_..._wet_basalt_60kph` | `yaw_rate_max` | `[null, 5]` | – |
+| | `decel_avg` | `[1.5, null]` | – |
+| `abs_..._wet_tile_50kph` | `yaw_rate_max` | `[null, 5]` | – |
+| | `decel_avg` | `[0.8, null]` | – |
+| `tcs_..._dry_asphalt_0to100kph` | `yaw_rate_max` | `[null, 5]` | – |
+| | `acc_time` | `[null, 10]` | – |
+| `tcs_..._wet_basalt_0to60kph` | `yaw_rate_max` | `[null, 5]` | – |
+| | `acc_avg` | `[1.6, null]` | `4WD` |
+| | `acc_avg` | `[0.8, null]` | `2WD` |
+| | `slip_max` | `[null, 36]` | `DTCS` |
+| | `slip_max` | `[null, 54]` | `TCS` |
+| `tcs_..._wet_tile_0to50kph` | `yaw_rate_max` | `[null, 5]` | – |
+| | `acc_avg` | `[0.8, null]` | `4WD` |
+| | `acc_avg` | `[0.4, null]` | `2WD` |
+| | `slip_max` | `[null, 36]` | `DTCS` |
+| | `slip_max` | `[null, 54]` | `TCS` |
 
 ## 5. 事件分段模板
 
@@ -187,8 +188,8 @@ abs:
       v_stop_kph: 0.8
       pedal_arm_pct: 80
     metrics:
-      - {key: yaw_rate_max,   ok_range: [null, 5],  apply_abs: true}
-      - {key: brake_distance, ok_range: [null, 40], apply_abs: false}
+      - {key: yaw_rate_max,   ok_range: [null, 5]}
+      - {key: brake_distance, ok_range: [null, 40]}
 
   - id: abs_full_brake_wet_basalt_60kph
     name: ABS 洒水玄武岩 60kph 全力制动
@@ -199,8 +200,8 @@ abs:
       v_stop_kph: 0.8
       pedal_arm_pct: 80
     metrics:
-      - {key: yaw_rate_max, ok_range: [null, 5],   apply_abs: true}
-      - {key: decel_avg,    ok_range: [1.5, null], apply_abs: true}
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: decel_avg,    ok_range: [1.5, null]}
 
   - id: abs_full_brake_wet_tile_50kph
     name: ABS 洒水瓷砖 50kph 全力制动
@@ -211,8 +212,8 @@ abs:
       v_stop_kph: 0.8
       pedal_arm_pct: 80
     metrics:
-      - {key: yaw_rate_max, ok_range: [null, 5],   apply_abs: true}
-      - {key: decel_avg,    ok_range: [0.8, null], apply_abs: true}
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: decel_avg,    ok_range: [0.8, null]}
 
 tcs:
   - id: tcs_full_throttle_dry_asphalt_0to100kph
@@ -224,8 +225,8 @@ tcs:
       v_target_kph: 100
       pedal_arm_pct: 95
     metrics:
-      - {key: yaw_rate_max, ok_range: [null, 5],   apply_abs: true}
-      - {key: acc_time,     ok_range: [null, 10],  apply_abs: false}
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: acc_time,     ok_range: [null, 10]}
 
   - id: tcs_full_throttle_wet_basalt_0to60kph
     name: TCS 洒水玄武岩 0→60kph 全油门加速
@@ -236,11 +237,11 @@ tcs:
       v_target_kph: 60
       pedal_arm_pct: 95
     metrics:
-      - {key: yaw_rate_max, ok_range: [null, 5],   apply_abs: true}
-      - {key: acc_avg,      ok_range: [1.6, null], apply_abs: true, profile: 4WD}
-      - {key: acc_avg,      ok_range: [0.8, null], apply_abs: true, profile: 2WD}
-      - {key: slip_max,     ok_range: [null, 36],  apply_abs: false, profile: DTCS}
-      - {key: slip_max,     ok_range: [null, 54],  apply_abs: false, profile: TCS}
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: acc_avg,      ok_range: [1.6, null], profile: 4WD}
+      - {key: acc_avg,      ok_range: [0.8, null], profile: 2WD}
+      - {key: slip_max,     ok_range: [null, 36], profile: DTCS}
+      - {key: slip_max,     ok_range: [null, 54], profile: TCS}
 
   - id: tcs_full_throttle_wet_tile_0to50kph
     name: TCS 洒水瓷砖 0→50kph 全油门加速
@@ -251,11 +252,11 @@ tcs:
       v_target_kph: 50
       pedal_arm_pct: 95
     metrics:
-      - {key: yaw_rate_max, ok_range: [null, 5],   apply_abs: true}
-      - {key: acc_avg,      ok_range: [0.8, null], apply_abs: true, profile: 4WD}
-      - {key: acc_avg,      ok_range: [0.4, null], apply_abs: true, profile: 2WD}
-      - {key: slip_max,     ok_range: [null, 36],  apply_abs: false, profile: DTCS}
-      - {key: slip_max,     ok_range: [null, 54],  apply_abs: false, profile: TCS}
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: acc_avg,      ok_range: [0.8, null], profile: 4WD}
+      - {key: acc_avg,      ok_range: [0.4, null], profile: 2WD}
+      - {key: slip_max,     ok_range: [null, 36], profile: DTCS}
+      - {key: slip_max,     ok_range: [null, 54], profile: TCS}
 ```
 
 ### 6.3 configs/metrics.yaml
@@ -281,7 +282,7 @@ metrics:
     category: performance
     unit: m/s²
     inputs: [speed_vbox]
-    description: 窗口内车速变化率，制动为负；apply_abs 后与减速度阈值比较
+    description: 窗口内车速变化率幅值（恒非负），与平均减速度/平均加速度阈值直接比较
 
   - key: acc_time
     tool: window_duration
@@ -295,7 +296,7 @@ metrics:
     category: performance
     unit: m/s²
     inputs: [speed_vbox]
-    description: 窗口内平均加速度（与 decel_avg 同工具，判据方向不同）
+    description: 窗口内平均加速度（与 decel_avg 同工具、同为非负幅值，仅阈值方向不同）
 
   - key: slip_max
     tool: wheel_slip_max
@@ -356,8 +357,8 @@ BLF 侧（`signals_blf.yaml`）待真实 DBC 到位后填写 `[dbc_alias, msg_id
 
 | # | 项目 | 定稿 |
 | --- | --- | --- |
-| ① | 平均减速度（1.2 / 1.3） | 单位 **m/s²**；由 `speed_slope` 在 [v0_kph, v_stop_kph] 窗口上算 Δv/Δt，`apply_abs: true` |
-| ② | 加速度（2.2 / 2.3） | 定义为**平均加速度**，单位 m/s²，非 1s 滑动峰值；同用 `speed_slope`，metric_key 更名 `acc_avg` |
+| ① | 平均减速度（1.2 / 1.3） | 单位 **m/s²**；由 `speed_slope` 在 [v0_kph, v_stop_kph] 窗口上算 `\|Δv\|/Δt`，输出即幅值 |
+| ② | 平均加速度（2.2 / 2.3） | 定义为**平均加速度**，单位 m/s²，非 1s 滑动峰值；同用 `speed_slope`，metric_key 为 `acc_avg` |
 | ③ | 打滑量 | 定稿：**max(四轮轮速) − speed_vbox 的窗口最大值**，单位 km/h；与驱动形式无关 |
 | ④ | 制动距离（1.1） | 起点 = `speed_vbox` **下降穿越工况标称初速 v0_kph**（100 kph 工况即使实际从 ~105 kph 才踩刹车，也从 100 kph 起算）；终点 = **下降穿越 0.8 kph**；两交叉点均线性插值；值为窗口内 `distance_vbox` 增量 |
 | ⑤ | 加速时间（2.1） | 起点 = `speed_vbox` **上升穿越 0.8 kph**，终点 = 上升穿越 `v_target_kph`，线性插值；值为窗口时长 |
