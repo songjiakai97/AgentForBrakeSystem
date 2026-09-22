@@ -206,6 +206,32 @@ brake-agent/
 - 信号映射全局共享；功能与工况差异只体现在指标集、参数、阈值。
 - 每个 `SignalData` 的 `ts` 统一相对起点偏移，便于跨文件对齐。
 
+`SignalData` 契约：
+
+```python
+@dataclass
+class SignalData:
+    ts: np.ndarray                       # 相对 start_timestamp 偏移后的时间轴（秒）
+    values: np.ndarray                   # 数值序列（float32）
+    choices: Optional[dict] = None       # {raw_int: 枚举字符串}，非枚举通道为 None
+    description: str = ""
+    unit: str = ""
+    start_timestamp: float = 0.0         # 全局最早时间戳，ts 已相对它偏移
+```
+
+说明：
+
+- `start_timestamp` 为该文件所有已命中信号的全局最早时间戳；所有信号的 `ts` 统一减去它，保证同一文件内跨信号对齐，`ts[0]` 即相对秒。
+- 枚举/字符串通道：物理值为文本时，`values` 存原始整数编码，`choices` 提供 `{raw: label}` 反查；数值通道 `choices = None`。
+- 未命中候选的通道仍出现在结果字典中，`ts`/`values` 为空数组，供下游标记 missing。
+
+Loader 实现：
+
+- `MF4Loader(signal_maps)`：基于 asammdf，按 `candidates` 顺序用 `mdf.whereis` 解析首个命中通道；`raw=False` 取物理值，文本采样再以 `raw=True` 回取编码值构造 `choices`。
+- `BLFLoader(dbc_files, signal_maps)`：基于 python-can `BLFReader` + cantools 解码。`candidates` 为三元组 `[dbc_alias, msg_id, signal_name]`；`msg_id` 字符串约定：`"0x123"` 标准帧、`"0x123x"` 扩展帧、裸 int 按标准帧兼容处理。单次遍历文件，按 (frame_id, is_extended, channel) 建帧索引，逐帧解码后抽取各信号。
+
+配置 Schema 见 §9.6。
+
 ### 6.3 事件分段与时间窗（`events/segment.py`）
 
 接口：
@@ -597,6 +623,46 @@ metrics:
   kb_ref: <section_id>
   message: <结论>
 ```
+
+### 9.6 signals_*.yaml
+
+#### signals_mf4.yaml
+
+```yaml
+signal_maps:
+  <逻辑名称>:
+    description: <字符串，可选>
+    unit: <字符串，可选>
+    candidates:
+      - <候选通道名1>
+      - <候选通道名2>
+      - ...
+```
+
+- `candidates` 为 MF4 中的物理通道名，按顺序尝试，首个 `whereis` 命中即采用。
+- 全部候选未命中：该逻辑信号返回空 `ts`/`values`，不报错。
+
+#### signals_blf.yaml
+
+```yaml
+dbc_files:
+  <dbc_alias>:
+    path: <dbc 文件路径>
+    channel: <int，CAN 通道号>
+
+signal_maps:
+  <逻辑名称>:
+    description: <字符串，可选>
+    unit: <字符串，可选>
+    candidates:
+      - [<dbc_alias>, <msg_id>, <signal_name>]
+      - ...
+```
+
+- `dbc_files`：CAN 报文库清单；`path` 指向 `.dbc` 文件，`channel` 为该 DBC 对应的 CAN 通道号，用于帧索引匹配。
+- `candidates` 每条为三元组 `[dbc_alias, msg_id, signal_name]`，按顺序解析，首个在 DBC 中可解析的即采用。
+- `msg_id` 约定：字符串 `"0x123"` 标准帧、`"0x123x"`（十六进制 + `x` 后缀）扩展帧、裸 int 按标准帧兼容处理。
+- 三元组解析失败（alias 不存在、frame_id 查不到、signal 不在报文中）尝试下一候选；全部失败返回空 `ts`/`values`，不报错。
 
 ---
 
