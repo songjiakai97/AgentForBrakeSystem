@@ -1,8 +1,8 @@
 # 工况指标规格（ABS / TCS Demo 范围）
 
 > 本文是 `docs/design.md` 的落地补充：给出首批功能/工况的实际判定指标、信号逻辑名、
-> 指标语义与配置草案。后续生成 demo 时，§6 的 YAML 草案可原样落入 `configs/`，
-> 语义歧义先看 §7 的标注。
+> 指标语义与配置草案。后续生成 demo 时，§6 的 YAML 草案可原样落入 `configs/`。
+> 原歧义项已于 2026-09-22 确认，结论见 §7。
 
 ## 1. 原始需求
 
@@ -12,8 +12,8 @@
 | 1.2 | ABS 洒水玄武岩 60kph 全力制动 | 最大横摆角速度 < ±5°/s；平均减速度 >= 1.5 |
 | 1.3 | ABS 洒水瓷砖 50kph 全力制动 | 最大横摆角速度 < ±5°/s；平均减速度 >= 0.8 |
 | 2.1 | TCS 干沥青 0→100kph 全油门加速 | 最大横摆角速度 < ±5°/s；加速时间 <= 10s |
-| 2.2 | TCS 洒水玄武岩 0→60kph 全油门加速 | 最大横摆角速度 < ±5°/s；加速度 >= 1.6（四驱）/ 0.8（两驱）；打滑量 <= 36（DTCS）/ 54（TCS） |
-| 2.3 | TCS 洒水瓷砖 0→50kph 全油门加速 | 最大横摆角速度 < ±5°/s；加速度 >= 0.8（四驱）/ 0.4（两驱）；打滑量 <= 36（DTCS）/ 54（TCS） |
+| 2.2 | TCS 洒水玄武岩 0→60kph 全油门加速 | 最大横摆角速度 < ±5°/s；平均加速度 >= 1.6（四驱）/ 0.8（两驱）；打滑量 <= 36（DTCS）/ 54（TCS） |
+| 2.3 | TCS 洒水瓷砖 0→50kph 全油门加速 | 最大横摆角速度 < ±5°/s；平均加速度 >= 0.8（四驱）/ 0.4（两驱）；打滑量 <= 36（DTCS）/ 54（TCS） |
 
 ## 2. 信号逻辑名
 
@@ -26,8 +26,8 @@
 | `Ax` | 纵向加速度 | m/s² |
 | `ABS_Active` | ABS 激活信号，0 未激活 / 1 激活 | – |
 | `TCS_Active` | TCS 激活信号，0 未激活 / 1 激活 | – |
-| `BrakePedalPos` | 制动踏板深度 | 0~100 |
-| `ThrottlePedalPos` | 油门踏板深度 | 0~100 |
+| `BrakePedalPos` | 制动踏板深度 | % |
+| `ThrottlePedalPos` | 油门踏板深度 | % |
 
 ## 3. 功能与工况清单
 
@@ -40,7 +40,7 @@
 
 ### 3.2 Condition
 
-condition_id 命名约定：`{function}_{maneuver}_{surface}_{v0}kph`。
+condition_id 命名约定：`{function}_{maneuver}_{surface}_{v0}kph`。表中仅列关键速度参数，完整 `params`（`v_stop_kph` / `v_start_kph` / `pedal_arm_pct`）见 §5 与 §6.2。
 
 | condition_id | 名称 | maneuver | surface_code | params |
 | --- | --- | --- | --- | --- |
@@ -63,10 +63,10 @@ condition_id 命名约定：`{function}_{maneuver}_{surface}_{v0}kph`。
 1. 档位标签只用单维词，不拼 `4WD_TCS` 复合标签。多档位条目通过**重复条目**表达（design.md §9.3 允许同一 key 多条 profile 条目），两维同时受约束时逐组合展开，例如：
 
    ```yaml
-   - {key: acc_1s_max, ok_range: [1.6, null], profile: 4WD}
-   - {key: acc_1s_max, ok_range: [0.8, null], profile: 2WD}
-   - {key: slip_max,  ok_range: [null, 36], profile: DTCS}
-   - {key: slip_max,  ok_range: [null, 54], profile: TCS}
+   - {key: acc_avg,    ok_range: [1.6, null], profile: 4WD}
+   - {key: acc_avg,    ok_range: [0.8, null], profile: 2WD}
+   - {key: slip_max,   ok_range: [null, 36], profile: DTCS}
+   - {key: slip_max,   ok_range: [null, 54], profile: TCS}
    ```
 
 2. 未声明 profile 的指标条目（通用条目）在任何档位下都生效——横摆角速度即如此。
@@ -80,14 +80,22 @@ condition_id 命名约定：`{function}_{maneuver}_{surface}_{v0}kph`。
 
 ## 4. 指标定义（metrics.yaml 级）
 
+统一约定：速度交叉点（v0、0.8 kph、v_target）的**线性插值定位由 segmenter 完成**，
+写入 `EventWindow` 的 `t_start`/`t_end`；指标工具只在给定窗口内做纯计算，不再自行找交叉点。
+这样每个交叉点只插值一次，且各指标共享同一致时间窗。
+
 | metric_key | 工具 | 单位 | 输入信号 | 取值语义 |
 | --- | --- | --- | --- | --- |
-| `yaw_rate_max` | `max_abs` | °/s | `yaw_rate` | 窗口内 \|yaw_rate\| 的最大值（`apply_abs: true`，判定取绝对值） |
-| `brake_distance` | `distance_span` | m | `distance_vbox` | 窗口内 distance_vbox 的增量（末值 − 首值） |
-| `decel_avg` | `mean_over_window` | m/s² | `Ax` | 窗口内 \|Ax\| 的时间平均（减速段 Ax 为负，取绝对值后比较） |
-| `acc_time` | `rise_time` | s | `speed_vbox` | 段起点（油门全按下）至车速首次达到 `v_target_kph` 的用时 |
-| `acc_1s_max` | `sliding_mean_max` | m/s² | `Ax`, `speed_vbox` | 窗口内 1s 滑动平均 Ax 的最大值（见 §7-②） |
-| `slip_max` | `wheel_slip_max` | km/h | `wheelSpeed_*`, `speed_vbox` | max(各轮轮速) − speed_vbox 的窗口最大值（见 §7-③） |
+| `yaw_rate_max` | `max_abs` | °/s | `yaw_rate` | 窗口内 \|yaw_rate\| 最大值 |
+| `brake_distance` | `signal_span` | m | `distance_vbox` | 窗口内距离增量 = `d(t_end) − d(t_start)` |
+| `decel_avg` | `speed_slope` | m/s² | `speed_vbox` | 窗口速度变化率 `(v_end − v_start)/(t_end − t_start)`，制动为负，`apply_abs: true` 后按正值比较 |
+| `acc_time` | `window_duration` | s | `speed_vbox` | 窗口时长 `t_end − t_start` |
+| `acc_avg` | `speed_slope` | m/s² | `speed_vbox` | 同 `decel_avg` 工具，加速为正，`apply_abs: true` 兜住符号 |
+| `slip_max` | `wheel_slip_max` | km/h | `wheelSpeed_FL/FR/RL/RR`, `speed_vbox` | 窗口内 `max(四轮轮速) − speed_vbox` 的最大值 |
+
+工具契约与 design.md §10.7 一致：`(signals, condition, window, params) -> {"value": ...}`，
+缺信号或窗口退化（`t_end <= t_start`）返回 `{"value": None}`，由引擎判 missing。
+`speed_slope` 内部完成 km/h→m/s 换算；`wheel_slip_max` 保持 km/h，与阈值同单位。
 
 工况 → 指标映射（含阈值，闭区间语义 `lo <= v <= hi` 为 ok）：
 
@@ -102,25 +110,45 @@ condition_id 命名约定：`{function}_{maneuver}_{surface}_{v0}kph`。
 | `tcs_..._dry_asphalt_0to100kph` | `yaw_rate_max` | `[null, 5]` | true | – |
 | | `acc_time` | `[null, 10]` | false | – |
 | `tcs_..._wet_basalt_0to60kph` | `yaw_rate_max` | `[null, 5]` | true | – |
-| | `acc_1s_max` | `[1.6, null]` | false | `4WD` |
-| | `acc_1s_max` | `[0.8, null]` | false | `2WD` |
+| | `acc_avg` | `[1.6, null]` | true | `4WD` |
+| | `acc_avg` | `[0.8, null]` | true | `2WD` |
 | | `slip_max` | `[null, 36]` | false | `DTCS` |
 | | `slip_max` | `[null, 54]` | false | `TCS` |
 | `tcs_..._wet_tile_0to50kph` | `yaw_rate_max` | `[null, 5]` | true | – |
-| | `acc_1s_max` | `[0.8, null]` | false | `4WD` |
-| | `acc_1s_max` | `[0.4, null]` | false | `2WD` |
+| | `acc_avg` | `[0.8, null]` | true | `4WD` |
+| | `acc_avg` | `[0.4, null]` | true | `2WD` |
 | | `slip_max` | `[null, 36]` | false | `DTCS` |
 | | `slip_max` | `[null, 54]` | false | `TCS` |
 
 ## 5. 事件分段模板
 
-| segmenter key | 绑定功能 | 起点 | anchor | 终点 |
-| --- | --- | --- | --- | --- |
-| `seg_abs_full_brake` | abs | `BrakePedalPos >= 80` 的首个时刻 | 同起点 | 车速降至 ≈ 0（`speed_vbox < 1`） |
-| `seg_tcs_full_throttle` | tcs | 起步（`speed_vbox < 1`）且 `ThrottlePedalPos >= 95` 的首个时刻 | 同起点 | `speed_vbox >= v_target_kph` 或有效事件内首次回落 |
+交叉点定位一律在 `speed_vbox` 上对相邻样本做线性插值，故窗口端点是亚采样精度的。
 
-- 起点判据的阈值（80 / 95 / 1 km/h）为工程默认值，demo 阶段可在 params 覆盖。
-- `ABS_Active` / `TCS_Active` 不参与分段，作为窗口内激活校验的证据信号（见 rules）。
+| segmenter key | 绑定功能 | `t_start` | `t_end` | anchor |
+| --- | --- | --- | --- | --- |
+| `seg_abs_full_brake` | abs | `speed_vbox` 下降沿穿越 `v0_kph` 的时刻 | `speed_vbox` 下降沿穿越 `v_stop_kph`（默认 0.8）的时刻 | `t_start` |
+| `seg_tcs_full_throttle` | tcs | `speed_vbox` 上升沿穿越 `v_start_kph`（默认 0.8）的时刻 | `speed_vbox` 上升沿穿越 `v_target_kph` 的时刻 | `t_start` |
+
+事件搜索范围（判"这一段是不是一个有效事件"）用踏板信号，但最终窗口由速度交叉点裁剪：
+
+- abs：在 `BrakePedalPos >= pedal_arm_pct`（默认 80%）持续为真的区间内，搜索 v0 → v_stop 的下降穿越对。
+- tcs：在 `ThrottlePedalPos >= pedal_arm_pct`（默认 95%）且 `speed_vbox` 单调上升的区间内，搜索 v_start → v_target 的上升穿越对。
+
+边界行为：
+
+- 交叉点任一找不到 → 不产出该 `EventWindow`（或产出后窗口退化），相关指标 missing，规则命中 `data_quality`。
+- v0 通常对应 100 kph 工况，但实测常从 105 kph 开始踩刹车；因此 `v0_kph` 取**工况标称初速**（100/60/50），从该点起算，不取数据段起点。
+- 同一文件内可检出多个事件，每个为一个 run-sample。
+
+参数默认值集中在此，工况 `params` 可覆盖：
+
+| params key | 默认 | 说明 |
+| --- | --- | --- |
+| `v_stop_kph` | 0.8 | 制动终止速度 |
+| `v_start_kph` | 0.8 | 加速起始速度 |
+| `pedal_arm_pct` | abs 80 / tcs 95 | 踏板激活判据，单位 % |
+
+`ABS_Active` / `TCS_Active` 不参与分段与指标计算，作为激活校验的证据信号（后续可作为 info 类指标扩展）。
 
 ## 6. 配置草案
 
@@ -156,8 +184,10 @@ abs:
     surface_code: dry_asphalt
     params:
       v0_kph: 100
+      v_stop_kph: 0.8
+      pedal_arm_pct: 80
     metrics:
-      - {key: yaw_rate_max,  ok_range: [null, 5],  apply_abs: true}
+      - {key: yaw_rate_max,   ok_range: [null, 5],  apply_abs: true}
       - {key: brake_distance, ok_range: [null, 40], apply_abs: false}
 
   - id: abs_full_brake_wet_basalt_60kph
@@ -166,8 +196,10 @@ abs:
     surface_code: wet_basalt
     params:
       v0_kph: 60
+      v_stop_kph: 0.8
+      pedal_arm_pct: 80
     metrics:
-      - {key: yaw_rate_max, ok_range: [null, 5], apply_abs: true}
+      - {key: yaw_rate_max, ok_range: [null, 5],   apply_abs: true}
       - {key: decel_avg,    ok_range: [1.5, null], apply_abs: true}
 
   - id: abs_full_brake_wet_tile_50kph
@@ -176,8 +208,10 @@ abs:
     surface_code: wet_tile
     params:
       v0_kph: 50
+      v_stop_kph: 0.8
+      pedal_arm_pct: 80
     metrics:
-      - {key: yaw_rate_max, ok_range: [null, 5], apply_abs: true}
+      - {key: yaw_rate_max, ok_range: [null, 5],   apply_abs: true}
       - {key: decel_avg,    ok_range: [0.8, null], apply_abs: true}
 
 tcs:
@@ -186,36 +220,42 @@ tcs:
     maneuver: full_throttle
     surface_code: dry_asphalt
     params:
+      v_start_kph: 0.8
       v_target_kph: 100
+      pedal_arm_pct: 95
     metrics:
-      - {key: yaw_rate_max, ok_range: [null, 5],  apply_abs: true}
-      - {key: acc_time,     ok_range: [null, 10], apply_abs: false}
+      - {key: yaw_rate_max, ok_range: [null, 5],   apply_abs: true}
+      - {key: acc_time,     ok_range: [null, 10],  apply_abs: false}
 
   - id: tcs_full_throttle_wet_basalt_0to60kph
     name: TCS 洒水玄武岩 0→60kph 全油门加速
     maneuver: full_throttle
     surface_code: wet_basalt
     params:
+      v_start_kph: 0.8
       v_target_kph: 60
+      pedal_arm_pct: 95
     metrics:
-      - {key: yaw_rate_max, ok_range: [null, 5], apply_abs: true}
-      - {key: acc_1s_max, ok_range: [1.6, null], profile: 4WD}
-      - {key: acc_1s_max, ok_range: [0.8, null], profile: 2WD}
-      - {key: slip_max,   ok_range: [null, 36], profile: DTCS}
-      - {key: slip_max,   ok_range: [null, 54], profile: TCS}
+      - {key: yaw_rate_max, ok_range: [null, 5],   apply_abs: true}
+      - {key: acc_avg,      ok_range: [1.6, null], apply_abs: true, profile: 4WD}
+      - {key: acc_avg,      ok_range: [0.8, null], apply_abs: true, profile: 2WD}
+      - {key: slip_max,     ok_range: [null, 36],  apply_abs: false, profile: DTCS}
+      - {key: slip_max,     ok_range: [null, 54],  apply_abs: false, profile: TCS}
 
   - id: tcs_full_throttle_wet_tile_0to50kph
     name: TCS 洒水瓷砖 0→50kph 全油门加速
     maneuver: full_throttle
     surface_code: wet_tile
     params:
+      v_start_kph: 0.8
       v_target_kph: 50
+      pedal_arm_pct: 95
     metrics:
-      - {key: yaw_rate_max, ok_range: [null, 5], apply_abs: true}
-      - {key: acc_1s_max, ok_range: [0.8, null], profile: 4WD}
-      - {key: acc_1s_max, ok_range: [0.4, null], profile: 2WD}
-      - {key: slip_max,   ok_range: [null, 36], profile: DTCS}
-      - {key: slip_max,   ok_range: [null, 54], profile: TCS}
+      - {key: yaw_rate_max, ok_range: [null, 5],   apply_abs: true}
+      - {key: acc_avg,      ok_range: [0.8, null], apply_abs: true, profile: 4WD}
+      - {key: acc_avg,      ok_range: [0.4, null], apply_abs: true, profile: 2WD}
+      - {key: slip_max,     ok_range: [null, 36],  apply_abs: false, profile: DTCS}
+      - {key: slip_max,     ok_range: [null, 54],  apply_abs: false, profile: TCS}
 ```
 
 ### 6.3 configs/metrics.yaml
@@ -230,32 +270,32 @@ metrics:
     description: 事件窗口内横摆角速度绝对值峰值
 
   - key: brake_distance
-    tool: distance_span
+    tool: signal_span
     category: performance
     unit: m
     inputs: [distance_vbox]
-    description: 事件窗口内 vbox 距离增量（制动距离）
+    description: 窗口终止与起始的 vbox 距离之差（v0_kph → v_stop_kph 制动距离）
 
   - key: decel_avg
-    tool: mean_over_window
+    tool: speed_slope
     category: performance
     unit: m/s²
-    inputs: [Ax]
-    description: 事件窗口内纵向加速度绝对值的时间平均（平均减速度）
+    inputs: [speed_vbox]
+    description: 窗口内车速变化率，制动为负；apply_abs 后与减速度阈值比较
 
   - key: acc_time
-    tool: rise_time
+    tool: window_duration
     category: performance
     unit: s
     inputs: [speed_vbox]
-    description: 段起点至车速首次达到工况目标速度的用时
+    description: 窗口时长，即 v_start_kph → v_target_kph 加速时间
 
-  - key: acc_1s_max
-    tool: sliding_mean_max
+  - key: acc_avg
+    tool: speed_slope
     category: performance
     unit: m/s²
-    inputs: [Ax, speed_vbox]
-    description: 窗口内 1s 滑动平均纵向加速度的最大值
+    inputs: [speed_vbox]
+    description: 窗口内平均加速度（与 decel_avg 同工具，判据方向不同）
 
   - key: slip_max
     tool: wheel_slip_max
@@ -264,6 +304,9 @@ metrics:
     inputs: [wheelSpeed_FL, wheelSpeed_FR, wheelSpeed_RL, wheelSpeed_RR, speed_vbox]
     description: 窗口内 max(四轮轮速) − 实际车速 的最大值（打滑量）
 ```
+
+`Ax`、`ABS_Active`、`TCS_Active` 已在 signals 中定义但本期无指标绑定：`Ax` 与
+`speed_slope` 的积分口径等价，故未重复设指标；两个激活信号留作规则佐证与图表叠加。
 
 ### 6.4 configs/rules.yaml
 
@@ -279,9 +322,9 @@ metrics:
 - {id: abs_decel_abnormal, scope: condition, function: abs, condition: abs_full_brake_wet_basalt_60kph,   metric: decel_avg,      status: abnormal, severity: high, fault_domain: brake_performance, kb_ref: abs_manual, message: 低附平均减速度不足，放宽 ABS 压力降幅/延长降压窗口}
 - {id: abs_decel_tile_abnormal, scope: condition, function: abs, condition: abs_full_brake_wet_tile_50kph, metric: decel_avg,     status: abnormal, severity: high, fault_domain: brake_performance, kb_ref: abs_manual, message: 瓷砖面减速度不足，降低介入压力台阶并检查轮速判据灵敏度}
 - {id: tcs_time_abnormal,  scope: condition, function: tcs, condition: tcs_full_throttle_dry_asphalt_0to100kph, metric: acc_time,  status: abnormal, severity: high, fault_domain: powertrain_interaction, kb_ref: tcs_manual, message: 0-100 加速时间超限，检查 TCS 是否过早限制扭矩}
-- {id: tcs_acc_abnormal,   scope: condition, function: tcs, condition: tcs_full_throttle_wet_basalt_0to60kph,   metric: acc_1s_max, status: abnormal, severity: high, fault_domain: traction, kb_ref: tcs_manual, message: 玄武岩加速能力不足，提高允许滑移率目标}
+- {id: tcs_acc_abnormal,   scope: condition, function: tcs, condition: tcs_full_throttle_wet_basalt_0to60kph,   metric: acc_avg, status: abnormal, severity: high, fault_domain: traction, kb_ref: tcs_manual, message: 玄武岩加速能力不足，提高允许滑移率目标}
 - {id: tcs_slip_abnormal,  scope: condition, function: tcs, condition: tcs_full_throttle_wet_basalt_0to60kph,   metric: slip_max,   status: abnormal, severity: high, fault_domain: traction, kb_ref: tcs_manual, message: 玄武岩打滑量超限，收紧扭矩爬升或提前滑移干预}
-- {id: tcs_acc_tile_abnormal, scope: condition, function: tcs, condition: tcs_full_throttle_wet_tile_0to50kph, metric: acc_1s_max, status: abnormal, severity: high, fault_domain: traction, kb_ref: tcs_manual, message: 瓷砖加速能力不足，提高允许滑移率目标}
+- {id: tcs_acc_tile_abnormal, scope: condition, function: tcs, condition: tcs_full_throttle_wet_tile_0to50kph, metric: acc_avg, status: abnormal, severity: high, fault_domain: traction, kb_ref: tcs_manual, message: 瓷砖加速能力不足，提高允许滑移率目标}
 - {id: tcs_slip_tile_abnormal, scope: condition, function: tcs, condition: tcs_full_throttle_wet_tile_0to50kph, metric: slip_max,  status: abnormal, severity: high, fault_domain: traction, kb_ref: tcs_manual, message: 瓷砖打滑量超限，收紧扭矩爬升或提前滑移干预}
 ```
 
@@ -301,28 +344,38 @@ signal_maps:
   Ax:              {description: 纵向加速度,    unit: m/s2,  candidates: [Ax]}
   ABS_Active:      {description: ABS 激活,      unit: "",    candidates: [ABS_Active]}
   TCS_Active:      {description: TCS 激活,      unit: "",    candidates: [TCS_Active]}
-  BrakePedalPos:   {description: 制动踏板深度,  unit: "",    candidates: [BrakePedalPos]}
-  ThrottlePedalPos: {description: 油门踏板深度, unit: "",    candidates: [ThrottlePedalPos]}
+  BrakePedalPos:   {description: 制动踏板深度,  unit: "%",   candidates: [BrakePedalPos]}
+  ThrottlePedalPos: {description: 油门踏板深度, unit: "%",   candidates: [ThrottlePedalPos]}
 ```
 
 BLF 侧（`signals_blf.yaml`）待真实 DBC 到位后填写 `[dbc_alias, msg_id, signal_name]` 映射，逻辑名保持不变。
 
-## 7. 语义歧义标注（生成 demo 前确认）
+## 7. 指标口径确认结论（2026-09-22）
 
-| # | 位置 | 歧义 | 本文档采用 |
-| --- | --- | --- | --- |
-| ① | 1.2/1.3「平均减速度」 | 未给单位 | **m/s²**（按时间均值 Δv/Δt；若按距离均方根 v₀²/2d 口径需另定工具）；若实为 g 单位，阈值改为 `[0.153] / [0.082]` |
-| ② | 2.2/2.3「加速度」 | 瞬时还是平均 | **1s 滑动平均 Ax 的最大值**；若应为窗口均值，直接换绑 `decel_avg` 工具 |
-| ③ | 2.2/2.3「打滑量」 | 参照哪个轮、名义速度怎么算 | **max(四轮轮速) − speed_vbox 的窗口最大值**，与车型驱动形式无关；若只统计驱动轮，params 加 `axle: front/rear` |
-| ④ | 1.1「制动距离 <= 40m」 | 起点是踩踏板还是车辆停稳 | `distance_vbox` 在 [踏板判据点, 停稳] 窗口内的增量 |
-| ⑤ | 2.1「加速时间 <= 10s」 | 从起步计时还是含反应时间 | 从段起点（油门全判据按下）计时至首次达到 100 km/h |
-| ⑥ | 单位换算 | 车速 km/h、加速度 m/s² 并存 | 打滑量以 km/h 计（轮速−车速）；涉及运动学的工具内部统一换算 m/s |
-| ⑦ | 两维 profile | 单 profile 标量 vs 两维同时生效 | 见 §3.3-3：demo 引擎实现子串匹配，配置保持单维标签 |
+原歧义项已全部确认，以下为定稿口径：
+
+| # | 项目 | 定稿 |
+| --- | --- | --- |
+| ① | 平均减速度（1.2 / 1.3） | 单位 **m/s²**；由 `speed_slope` 在 [v0_kph, v_stop_kph] 窗口上算 Δv/Δt，`apply_abs: true` |
+| ② | 加速度（2.2 / 2.3） | 定义为**平均加速度**，单位 m/s²，非 1s 滑动峰值；同用 `speed_slope`，metric_key 更名 `acc_avg` |
+| ③ | 打滑量 | 定稿：**max(四轮轮速) − speed_vbox 的窗口最大值**，单位 km/h；与驱动形式无关 |
+| ④ | 制动距离（1.1） | 起点 = `speed_vbox` **下降穿越工况标称初速 v0_kph**（100 kph 工况即使实际从 ~105 kph 才踩刹车，也从 100 kph 起算）；终点 = **下降穿越 0.8 kph**；两交叉点均线性插值；值为窗口内 `distance_vbox` 增量 |
+| ⑤ | 加速时间（2.1） | 起点 = `speed_vbox` **上升穿越 0.8 kph**，终点 = 上升穿越 `v_target_kph`，线性插值；值为窗口时长 |
+| ⑥ | 单位换算 | 打滑量保持 km/h；`speed_slope` 内部 km/h→m/s 换算后再除时间 |
+| ⑦ | 两维 profile | 配置保持单维标签，引擎 pick 侧做子串匹配（见 §3.3-3） |
+
+踏板信号 `BrakePedalPos` / `ThrottlePedalPos` 单位为 **%**（0~100 即 0%~100%），
+只用于事件有效性判据（§5），不进入指标数值计算。
 
 ## 8. Demo 验收口径
 
-1. 六工况各造 1 条合成数据（MF4）：含正常样本 + 每条指标越限样本，端到端跑
+1. 六工况各造 1 条合成 MF4 数据：正常样本 + 每条指标越限样本各一份，端到端跑
    `brake analyze`，状态判定与 §4 表一致。
-2. 2.2 用 `--profile 4WD` / `2WD` / `DTCS` / `TCS` 各跑一次，验证 pick 回退与 §3.3 两维匹配。
-3. 无 `OPENAI_API_KEY` 环境下六工况全部跑通（纯规则链路）。
-4. 信号缺失注入（删除 yaw_rate 通道）→ 状态 missing、规则命中 data_quality。
+2. 合成数据须覆盖 §5 的交叉点场景：ABS 数据初速高于标称 v0（如 105 kph 起踩），
+   验证制动距离确实从 v0_kph 插值点起算而非数据起点；TCS 数据含起步前的静止段，
+   验证计时起点为 0.8 kph 上升穿越。
+3. 2.2 用 `--profile 4WD` / `2WD` / `DTCS` / `TCS` 各跑一次，验证 pick 回退与 §3.3 两维匹配。
+4. 无 `OPENAI_API_KEY` 环境下六工况全部跑通（纯规则链路）。
+5. 信号缺失注入（删除 `yaw_rate` 通道）→ 状态 missing、规则命中 `data_quality`。
+6. 交叉点不可达注入（车速从未到 100 kph 或从未降到 0.8 kph）→ 窗口退化、指标 missing。
+
