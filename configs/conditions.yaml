@@ -1,0 +1,83 @@
+# 工况清单（design.md §9.3 / demo_conditions_metrics.md §6.2）
+# 顶层按 function_key 索引；metrics 为条目 list，profile 省略即通用条目。
+# 判定值 = 工具输出的 value，引擎不做符号加工；闭区间 lo <= v <= hi 为 ok。
+
+abs:
+  - id: abs_full_brake_dry_asphalt_100kph
+    name: ABS 干沥青 100kph 全力制动
+    maneuver: full_brake
+    surface_code: dry_asphalt
+    params:
+      v0_kph: 100
+      v_stop_kph: 0.8
+      pedal_arm_pct: 80
+    metrics:
+      - {key: yaw_rate_max,   ok_range: [null, 5]}
+      - {key: brake_distance, ok_range: [null, 40]}
+
+  - id: abs_full_brake_wet_basalt_60kph
+    name: ABS 洒水玄武岩 60kph 全力制动
+    maneuver: full_brake
+    surface_code: wet_basalt
+    params:
+      v0_kph: 60
+      v_stop_kph: 0.8
+      pedal_arm_pct: 80
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: decel_avg,    ok_range: [1.5, null]}
+
+  - id: abs_full_brake_wet_tile_50kph
+    name: ABS 洒水瓷砖 50kph 全力制动
+    maneuver: full_brake
+    surface_code: wet_tile
+    params:
+      v0_kph: 50
+      v_stop_kph: 0.8
+      pedal_arm_pct: 80
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: decel_avg,    ok_range: [0.8, null]}
+
+tcs:
+  - id: tcs_full_throttle_dry_asphalt_0to100kph
+    name: TCS 干沥青 0→100kph 全油门加速
+    maneuver: full_throttle
+    surface_code: dry_asphalt
+    params:
+      v_start_kph: 0.8
+      v_target_kph: 100
+      pedal_arm_pct: 95
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: acc_time,     ok_range: [null, 10]}
+
+  - id: tcs_full_throttle_wet_basalt_0to60kph
+    name: TCS 洒水玄武岩 0→60kph 全油门加速
+    maneuver: full_throttle
+    surface_code: wet_basalt
+    params:
+      v_start_kph: 0.8
+      v_target_kph: 60
+      pedal_arm_pct: 95
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: acc_avg,      ok_range: [1.6, null], profile: 4WD}
+      - {key: acc_avg,      ok_range: [0.8, null], profile: 2WD}
+      - {key: slip_max,     ok_range: [null, 36],  profile: DTCS}
+      - {key: slip_max,     ok_range: [null, 54],  profile: TCS}
+
+  - id: tcs_full_throttle_wet_tile_0to50kph
+    name: TCS 洒水瓷砖 0→50kph 全油门加速
+    maneuver: full_throttle
+    surface_code: wet_tile
+    params:
+      v_start_kph: 0.8
+      v_target_kph: 50
+      pedal_arm_pct: 95
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: acc_avg,      ok_range: [0.8, null], profile: 4WD}
+      - {key: acc_avg,      ok_range: [0.4, null], profile: 2WD}
+      - {key: slip_max,     ok_range: [null, 36],  profile: DTCS}
+      - {key: slip_max,     ok_range: [null, 54],  profile: TCS}

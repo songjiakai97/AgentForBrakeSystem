@@ -1,0 +1,20 @@
+# 异常规则（design.md §9.5 / demo_conditions_metrics.md §6.4）
+# 基于指标状态触发，不重复比较阈值；先功能级后工况级，同指标工况级覆盖功能级。
+# severity: info | low | high | critical
+# fault_domain: stability | brake_performance | traction | powertrain_interaction | data_quality
+
+# 功能级：两功能共用同一组稳定性判定
+- {id: abs_yaw_abnormal,   scope: function, function: abs, metric: yaw_rate_max, status: abnormal, severity: critical,  fault_domain: stability,     kb_ref: abs_manual,  message: 制动过程横摆超限，车辆稳定性不足，检查前后轴制动力分配与介入时序}
+- {id: abs_yaw_missing,    scope: function, function: abs, metric: yaw_rate_max, status: missing,  severity: low,       fault_domain: data_quality, kb_ref: abs_manual,  message: yaw_rate 信号缺失，稳定性判定不成立}
+- {id: tcs_yaw_abnormal,   scope: function, function: tcs, metric: yaw_rate_max, status: abnormal, severity: critical,  fault_domain: stability,     kb_ref: tcs_manual,  message: 加速过程横摆超限，检查单轮制动干预与驱动扭矩爬升速率}
+- {id: tcs_yaw_missing,    scope: function, function: tcs, metric: yaw_rate_max, status: missing,  severity: low,       fault_domain: data_quality, kb_ref: tcs_manual,  message: yaw_rate 信号缺失，稳定性判定不成立}
+
+# 工况级：指标异常 → 具体标定域结论
+- {id: abs_dist_abnormal,  scope: condition, function: abs, condition: abs_full_brake_dry_asphalt_100kph, metric: brake_distance, status: abnormal, severity: high, fault_domain: brake_performance, kb_ref: abs_manual, message: 高附着制动距离超限，检查增压响应与初始夹紧力}
+- {id: abs_decel_abnormal, scope: condition, function: abs, condition: abs_full_brake_wet_basalt_60kph,   metric: decel_avg,      status: abnormal, severity: high, fault_domain: brake_performance, kb_ref: abs_manual, message: 低附平均减速度不足，放宽 ABS 压力降幅/延长降压窗口}
+- {id: abs_decel_tile_abnormal, scope: condition, function: abs, condition: abs_full_brake_wet_tile_50kph, metric: decel_avg,     status: abnormal, severity: high, fault_domain: brake_performance, kb_ref: abs_manual, message: 瓷砖面减速度不足，降低介入压力台阶并检查轮速判据灵敏度}
+- {id: tcs_time_abnormal,  scope: condition, function: tcs, condition: tcs_full_throttle_dry_asphalt_0to100kph, metric: acc_time,  status: abnormal, severity: high, fault_domain: powertrain_interaction, kb_ref: tcs_manual, message: 0-100 加速时间超限，检查 TCS 是否过早限制扭矩}
+- {id: tcs_acc_abnormal,   scope: condition, function: tcs, condition: tcs_full_throttle_wet_basalt_0to60kph,   metric: acc_avg, status: abnormal, severity: high, fault_domain: traction, kb_ref: tcs_manual, message: 玄武岩加速能力不足，提高允许滑移率目标}
+- {id: tcs_slip_abnormal,  scope: condition, function: tcs, condition: tcs_full_throttle_wet_basalt_0to60kph,   metric: slip_max,   status: abnormal, severity: high, fault_domain: traction, kb_ref: tcs_manual, message: 玄武岩打滑量超限，收紧扭矩爬升或提前滑移干预}
+- {id: tcs_acc_tile_abnormal, scope: condition, function: tcs, condition: tcs_full_throttle_wet_tile_0to50kph, metric: acc_avg, status: abnormal, severity: high, fault_domain: traction, kb_ref: tcs_manual, message: 瓷砖加速能力不足，提高允许滑移率目标}
+- {id: tcs_slip_tile_abnormal, scope: condition, function: tcs, condition: tcs_full_throttle_wet_tile_0to50kph, metric: slip_max,  status: abnormal, severity: high, fault_domain: traction, kb_ref: tcs_manual, message: 瓷砖打滑量超限，收紧扭矩爬升或提前滑移干预}

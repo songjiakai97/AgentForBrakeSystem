@@ -1,0 +1,16 @@
+# MF4 信号映射（design.md §9.6 / demo_conditions_metrics.md §6.5）
+# demo：物理通道名 = 逻辑名（合成数据按此命名写入 MF4）
+# 接入真实数据时，只需在 candidates 前面追加真实通道名
+signal_maps:
+  speed_vbox:      {description: vbox 实际车速, unit: km/h, candidates: [speed_vbox]}
+  distance_vbox:   {description: vbox 距离,     unit: m,    candidates: [distance_vbox]}
+  wheelSpeed_FL:   {description: 左前轮速,      unit: km/h, candidates: [wheelSpeed_FL]}
+  wheelSpeed_FR:   {description: 右前轮速,      unit: km/h, candidates: [wheelSpeed_FR]}
+  wheelSpeed_RL:   {description: 左后轮速,      unit: km/h, candidates: [wheelSpeed_RL]}
+  wheelSpeed_RR:   {description: 右后轮速,      unit: km/h, candidates: [wheelSpeed_RR]}
+  yaw_rate:        {description: 横摆角速度,    unit: deg/s, candidates: [yaw_rate]}
+  Ax:              {description: 纵向加速度,    unit: m/s2,  candidates: [Ax]}
+  ABS_Active:      {description: ABS 激活,      unit: "",    candidates: [ABS_Active]}
+  TCS_Active:      {description: TCS 激活,      unit: "",    candidates: [TCS_Active]}
+  BrakePedalPos:   {description: 制动踏板深度,  unit: "%",   candidates: [BrakePedalPos]}
+  ThrottlePedalPos: {description: 油门踏板深度, unit: "%",   candidates: [ThrottlePedalPos]}

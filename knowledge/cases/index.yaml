@@ -1,0 +1,10 @@
+# 历史案例索引（关键词过滤；demo 占位）
+cases:
+  - case_id: CASE-2026-ABS-001
+    file: CASE-2026-ABS-001.yaml
+    function: abs
+    keywords: [制动距离, 干沥青, 增压响应, 夹紧力]
+  - case_id: CASE-2026-TCS-001
+    file: CASE-2026-TCS-001.yaml
+    function: tcs
+    keywords: [打滑量, 玄武岩, 扭矩爬升, DTCS]

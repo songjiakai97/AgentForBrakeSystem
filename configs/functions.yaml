@@ -1,0 +1,20 @@
+# 功能清单（design.md §9.2）
+# profiles 支持两种写法：
+#   - 平铺标签列表：[4WD, 2WD]
+#   - 维度串（同维度用 | 分隔）：["4WD|2WD", "DTCS|TCS"]
+#     维度串仅用于前端按维度渲染下拉；校验与索引使用展平后的标签。
+functions:
+  - key: abs
+    name: ABS 全力制动
+    aliases: [ABS, 防抱死, 全力制动, 紧急制动, 制动距离, 低附制动]
+    segmenter: seg_abs_full_brake
+    kb_section: abs_manual
+    description: 高/低附着路面的初速全力制动，评价横摆稳定性、制动距离与减速度能力
+
+  - key: tcs
+    name: TCS 全油门加速
+    aliases: [TCS, DTCS, 牵引力控制, 防滑, 全油门加速, 加速时间, 打滑]
+    segmenter: seg_tcs_full_throttle
+    profiles: ["4WD|2WD", "DTCS|TCS"]
+    kb_section: tcs_manual
+    description: 低附路面起步全油门加速，评价横摆稳定性、加速能力与驱动轮打滑量

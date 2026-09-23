@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Trace 调试 · Brake Agent</title>
+<style>
+body{margin:0;font-family:ui-monospace,Menlo,monospace;background:#0f172a;color:#e2e8f0;font-size:12px}
+header{padding:10px 16px;border-bottom:1px solid #1e293b;display:flex;gap:12px;align-items:center}
+h1{font-size:14px;margin:0;color:#38bdf8}
+.wrap{display:flex;height:calc(100vh - 49px)}
+.list{width:340px;border-right:1px solid #1e293b;overflow:auto}
+.item{padding:8px 12px;border-bottom:1px solid #1e293b;cursor:pointer}
+.item:hover,.item.sel{background:#1e293b}
+.item .t{color:#94a3b8}
+.detail{flex:1;overflow:auto;padding:14px}
+pre{white-space:pre-wrap;word-break:break-all;background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:10px;max-height:40vh;overflow:auto}
+.k{color:#7dd3fc}
+button{background:#334155;border:none;color:#e2e8f0;border-radius:6px;padding:4px 10px;cursor:pointer}
+.err{color:#fca5a5}
+</style></head>
+<body>
+<header><h1>LLM Trace（仅内存，最近 500 条）</h1>
+<input id="chatf" placeholder="按 chat_id 过滤" style="background:#0b1220;border:1px solid #334155;color:#e2e8f0;border-radius:6px;padding:4px 8px">
+<button onclick="load()">刷新</button>
+<a href="/" style="color:#38bdf8">← 返回对话</a></header>
+<div class="wrap"><div class="list" id="list"></div><div class="detail" id="detail">← 选择一条 trace</div></div>
+<script>
+let traces=[];
+async function load(){
+  const f=document.getElementById('chatf').value.trim();
+  const r=await fetch('/api/debug/traces'+(f?`?chat_id=${f}`:''));
+  traces=await r.json();
+  document.getElementById('list').innerHTML=traces.map((t,i)=>
+    `<div class="item" onclick="show(${i})"><div>${t.trace_id} · ${t.model} · round ${t.round}</div>
+     <div class="t">${new Date((t.ts||0)*1000).toLocaleTimeString()} ${t.chat_id} [${t.finish_reason}]</div>
+     <div class="t">${(t.user_text||'').slice(0,40)}</div></div>`).join('')||'<div class="item">暂无 trace（离线路由不产生 trace；配置 OPENAI_API_KEY 后由 LLM 链路写入）</div>';
+}
+function show(i){
+  const t=traces[i];
+  document.querySelectorAll('.item').forEach((e,j)=>e.classList.toggle('sel',j===i));
+  const d=document.getElementById('detail');
+  d.innerHTML=`<b>${t.trace_id}</b> ${t.error?`<span class="err">ERROR: ${t.error}</span>`:''}
+  <div class="k">user_text</div><pre>${esc(t.user_text)}</pre>
+  <div class="k">request messages</div><pre>${esc(JSON.stringify(t.request,null,1))}</pre>
+  <div class="k">reply</div><pre>${esc(JSON.stringify(t.reply,null,1))}</pre>
+  <div class="k">tools executed</div><pre>${esc(JSON.stringify(t.tools,null,1))}</pre>`;
+}
+function esc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;')}
+load();setInterval(()=>{if(!document.hidden)load();},5000);
+</script></body></html>

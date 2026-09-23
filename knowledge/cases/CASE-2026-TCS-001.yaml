@@ -1,0 +1,24 @@
+case_id: CASE-2026-TCS-001
+meta:
+  vehicle: {platform: DEMO-P1, drivetrain: AWD, mode: DTCS}
+  date: 2026-04-02
+  engineer: 示例工程师
+function: tcs
+condition: tcs_full_throttle_wet_basalt_0to60kph
+profile: DTCS
+run_count: 4
+anomaly:
+  metric: slip_max
+  observed: 41.5
+  unit: km/h
+  status: abnormal
+root_cause_hypothesis: 起步扭矩爬升速率过快，滑移干预进入延迟 120 ms 内打滑量冲高
+tuning_actions:
+  - param: tcs_扭矩爬升速率
+    direction: decrease
+    delta: -10%
+    effect: 削减起步打滑峰值
+    risk: 0-60 加速时间增加约 0.3 s，需平衡
+validation: {metric: slip_max, after: 31.2}
+outcome: {status: resolved, note: 打滑达标，加速时间仍满足限值}
+learnings: DTCS 模式打滑超限优先收紧扭矩侧，制动干预为辅

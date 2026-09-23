@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>制动测试分析 Agent · Demo</title>
+<script src="https://unpkg.com/vue@3.4.38/dist/vue.global.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<style>
+:root{--bg:#0f172a;--panel:#1e293b;--panel2:#26344a;--text:#e2e8f0;--muted:#94a3b8;--accent:#38bdf8;--ok:#22c55e;--abn:#ef4444;--miss:#64748b;--info:#3b82f6;}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden}
+#app{display:flex;height:100vh}
+.sidebar{width:230px;border-right:1px solid #334155;display:flex;flex-direction:column;background:#0b1220}
+.sidebar h1{font-size:14px;padding:14px 16px;margin:0;color:var(--accent);border-bottom:1px solid #1e293b}
+.chatlist{flex:1;overflow:auto;padding:8px}
+.chatitem{padding:9px 10px;border-radius:8px;font-size:13px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;color:var(--muted)}
+.chatitem:hover{background:var(--panel)}
+.chatitem.active{background:var(--panel);color:var(--text)}
+.chatitem .del{opacity:0;font-size:12px;color:var(--abn);padding:2px 6px}
+.chatitem:hover .del{opacity:1}
+.newchat{margin:10px;padding:9px;border-radius:8px;border:1px dashed #334155;background:transparent;color:var(--accent);cursor:pointer;font-size:13px}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.topbar{padding:10px 16px;border-bottom:1px solid #1e293b;font-size:12px;color:var(--muted);display:flex;gap:10px;align-items:center}
+.badge{padding:2px 8px;border-radius:10px;font-size:11px}
+.badge.offline{background:#33415a;color:#cbd5e1}
+.badge.llm{background:#064e3b;color:#6ee7b7}
+.msgs{flex:1;overflow:auto;padding:18px 8%}
+.msg{margin-bottom:14px;display:flex;flex-direction:column}
+.msg.user{align-items:flex-end}
+.msg .bubble{max-width:86%;padding:10px 14px;border-radius:12px;font-size:14px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+.msg.user .bubble{background:#0369a1;color:#f0f9ff}
+.msg.assistant .bubble{background:var(--panel)}
+.msg.error .bubble{background:#3f1d1d;color:#fecaca;border:1px solid #7f1d1d}
+.role{font-size:11px;color:var(--muted);margin-bottom:3px}
+/* panels */
+.panel{background:var(--panel);border:1px solid #334155;border-radius:12px;padding:10px;max-width:86%}
+.optrow{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;cursor:pointer;font-size:13px}
+.optrow:hover{background:var(--panel2)}
+.optrow .idx{width:20px;height:20px;border-radius:6px;background:#334155;display:flex;align-items:center;justify-content:center;font-size:11px;flex:none}
+.optrow .score{margin-left:auto;color:var(--muted);font-size:11px}
+.panel .hint{font-size:12px;color:var(--muted);padding:4px 10px}
+.profileSel{display:flex;gap:8px;padding:8px 10px;align-items:center;flex-wrap:wrap}
+.profileSel select{background:#0b1220;color:var(--text);border:1px solid #334155;border-radius:6px;padding:5px 8px;font-size:13px}
+.pfBtn{background:var(--accent);color:#0b1220;border:none;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer;font-weight:600}
+.otherOpt{display:flex;gap:6px;padding:8px 10px;border-top:1px solid #1e293b;margin-top:6px}
+.otherOpt input{flex:1;background:#0b1220;border:1px solid #334155;color:var(--text);border-radius:6px;padding:6px 9px;font-size:12px}
+.otherOpt button{background:#334155;border:none;color:var(--text);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer}
+/* analysis card */
+.acard{background:var(--panel);border:1px solid #334155;border-radius:12px;padding:12px;max-width:92%;font-size:13px}
+.acard .head{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+.acard .head b{font-size:13px}
+.runrow{border-top:1px solid #1e293b;padding:8px 2px}
+.runrow .meta{color:var(--muted);font-size:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.chip{padding:2px 9px;border-radius:10px;font-size:11px;cursor:pointer}
+.chip.ok{background:#052e16;color:#86efac}.chip.abnormal{background:#450a0a;color:#fca5a5}
+.chip.missing{background:#1e293b;color:#94a3b8}.chip.info{background:#172554;color:#93c5fd}
+.detail{background:#0b1220;border-radius:8px;padding:10px;margin-top:8px;font-size:12px}
+.mline{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed #1e293b;gap:8px;flex-wrap:wrap}
+.verdict{margin-top:8px}
+.verdict .v{background:#1e293b;border-left:3px solid var(--abn);padding:6px 10px;border-radius:0 6px 6px 0;margin-top:5px;font-size:12px}
+.verdict .v.missing{border-color:var(--miss)}
+.verdict .v .sev{font-size:10px;color:var(--muted)}
+.suggest{margin-top:10px;background:#0b1220;border:1px solid #14532d;border-radius:8px;padding:10px;font-size:12px}
+.suggest h4{margin:0 0 6px;font-size:12px;color:#4ade80}
+.suggest .act{padding:4px 0;border-bottom:1px dashed #1e293b}
+.btnMini{background:#334155;border:none;color:#cbd5e1;border-radius:6px;padding:3px 10px;font-size:11px;cursor:pointer}
+/* composer */
+.composer{border-top:1px solid #1e293b;padding:10px 8% 14px;background:#0b1220}
+.pending{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.fchip{background:var(--panel);border:1px solid #334155;border-radius:14px;padding:3px 10px;font-size:12px;display:flex;gap:6px;align-items:center}
+.fchip button{background:none;border:none;color:var(--abn);cursor:pointer;font-size:12px;padding:0}
+.uploaded{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.inputrow{display:flex;gap:8px;align-items:flex-end}
+.addbtn{width:38px;height:38px;border-radius:50%;border:1px solid #334155;background:var(--panel);color:var(--accent);font-size:20px;cursor:pointer;flex:none}
+textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:10px;color:var(--text);padding:9px 12px;font-size:14px;resize:none;height:38px;max-height:110px;font-family:inherit}
+.sendbtn{background:var(--accent);border:none;color:#0b1220;border-radius:10px;padding:9px 18px;font-size:14px;font-weight:600;cursor:pointer}
+.sendbtn:disabled{opacity:.4}
+.chartbox{position:fixed;inset:4vh 6vw;background:var(--bg);border:1px solid #334155;border-radius:14px;z-index:50;display:flex;flex-direction:column}
+.chartbox .cb-head{display:flex;justify-content:space-between;padding:10px 16px;border-bottom:1px solid #1e293b;font-size:13px}
+.chartbox .cb-body{flex:1;min-height:0}
+.chartbox select{background:var(--panel);color:var(--text);border:1px solid #334155;border-radius:6px;padding:3px 8px;font-size:12px}
+.empty{color:var(--muted);font-size:13px;text-align:center;margin-top:18vh;line-height:2}
+</style>
+</head>
+<body>
+<div id="app" v-cloak>
+  <div class="sidebar">
+    <h1>制动测试分析 Agent</h1>
+    <div class="chatlist">
+      <div v-for="c in chats" :key="c.chat_id" class="chatitem" :class="{active: c.chat_id===chatId}" @click="openChat(c.chat_id)">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{c.title}}</span>
+        <span class="del" @click.stop="delChat(c.chat_id)">删除</span>
+      </div>
+    </div>
+    <button class="newchat" @click="newChat">+ 新建对话</button>
+  </div>
+
+  <div class="main">
+    <div class="topbar">
+      <span class="badge" :class="meta.engine">{{meta.engine==='llm' ? ('LLM: '+(meta.model||'')) : '离线模式（规则链路）'}}</span>
+      <span v-if="chat" style="margin-left:auto;font-size:11px">
+        工况: {{ chat.selected_condition || '—' }} <span v-if="chat.selected_profile">· 档位 {{chat.selected_profile}}</span>
+      </span>
+      <a href="/debug" target="_blank" style="color:var(--muted);font-size:11px">debug</a>
+    </div>
+
+    <div class="msgs" ref="msgs">
+      <div v-if="!chat" class="empty">加载中…</div>
+      <div v-else-if="!chat.messages.length" class="empty">
+        上传 .mf4 数据文件，然后描述要分析的目标，例如：<br>
+        「干沥青 100kph 全力制动的制动距离怎么样」<br>「玄武岩 0-60 全油门加速打滑超限了吗」
+      </div>
+      <div v-for="m in chat.messages" :key="m.message_id" class="msg" :class="[m.role, m.kind==='error'?'error':'']">
+        <div class="role">{{m.role==='user'?'我':'Agent'}} · {{m.kind}}</div>
+
+        <!-- text / error -->
+        <div v-if="m.kind==='text'||m.kind==='error'" class="bubble">{{m.content}}</div>
+
+        <!-- attachment note -->
+        <div v-else-if="m.kind==='attachment'" class="bubble">📎 {{m.content}}</div>
+
+        <!-- target options -->
+        <div v-else-if="m.kind==='target_options'" class="panel">
+          <div class="hint">{{m.content}}</div>
+          <template v-if="m.data.hop==='function'||m.data.hop==='condition'">
+            <div v-for="(c,i) in m.data.candidates" :key="c.key" class="optrow" @click="choose(m.data,c)">
+              <span class="idx">{{i+1}}</span><span>{{c.name}}</span>
+              <span class="score" v-if="c.score">{{c.score.toFixed(1)}}</span>
+            </div>
+          </template>
+          <template v-else-if="m.data.hop==='profile'">
+            <div class="profileSel">
+              <template v-for="(dim,di) in dimsOf(m)" :key="di">
+                <select v-model="pfSel[m.message_id][di]">
+                  <option v-for="p in dim" :key="p" :value="p">{{p}}</option>
+                </select>
+              </template>
+              <button class="pfBtn" @click="chooseProfile(m)">确认分析</button>
+            </div>
+          </template>
+          <div class="otherOpt">
+            <input v-model="otherText[m.message_id]" placeholder="其他选项：手动描述目标，回车重新推荐" @keyup.enter="otherGo(m)">
+            <button @click="otherGo(m)">发送</button>
+          </div>
+        </div>
+
+        <!-- analysis result -->
+        <div v-else-if="m.kind==='analysis_result'" class="acard">
+          <div class="head"><b>{{m.data.condition_name}}</b>
+            <span v-if="m.data.profile" class="chip missing">档位 {{m.data.profile}}</span>
+            <span v-if="m.data.degraded" class="chip missing">仅规则结论</span>
+            <span style="margin-left:auto;font-size:11px;color:var(--muted)">{{m.data.sample_count}} 个事件样本</span>
+          </div>
+          <div v-for="s in m.data.samples" :key="s.sample_id" class="runrow">
+            <div class="meta">
+              <span>📄 {{s.file_name}} · run {{s.run_index}}</span>
+              <span v-if="s.window && !isNaN(s.window.t_start)">窗口 [{{fmt(s.window.t_start)}}, {{fmt(s.window.t_end)}}] s（{{dur(s.window)}}s）</span>
+              <span v-else style="color:var(--miss)">无有效事件窗口</span>
+              <button class="btnMini" @click="showChart(s, m)">查看图表</button>
+            </div>
+            <div class="chips">
+              <span v-for="x in s.metrics" :key="x.key" class="chip" :class="x.status" @click="toggle(s.sample_id+':'+m.message_id)">
+                {{x.name}}: {{val(x)}}
+              </span>
+            </div>
+            <div v-if="opened[s.sample_id+':'+m.message_id]" class="detail">
+              <div v-for="x in s.metrics" :key="x.key" class="mline">
+                <span>{{x.name}} <span class="chip" :class="x.status" style="cursor:default">{{x.status}}</span></span>
+                <span>{{val(x)}} {{x.unit}} <span style="color:var(--muted)">限值 {{range(x)}}{{x.profile?(' · '+x.profile):''}}</span></span>
+              </div>
+              <div class="verdict" v-if="s.verdicts.length">
+                <div v-for="v in s.verdicts" :key="v.rule_id" class="v" :class="{missing:v.status==='missing'}">
+                  [{{v.severity}}/{{v.fault_domain}}] {{v.message}}
+                  <div class="sev">{{v.metric_name}}：{{v.direction}} · 规则 {{v.rule_id}}</div>
+                </div>
+              </div>
+              <div v-else class="verdict"><div class="v" style="border-color:var(--ok)">全部指标达标，无规则命中</div></div>
+            </div>
+            <div v-if="m.data.llm_suggestion" class="suggest">
+              <h4>LLM 标定建议（区分于规则结论）</h4>
+              <div>{{m.data.llm_suggestion.summary}}</div>
+              <div v-for="(a,i) in (m.data.llm_suggestion.calibration_actions||[])" :key="i" class="act">
+                {{a.param}} → <b>{{a.direction}}</b>（{{a.metric}}）：{{a.expected_effect}} <span style="color:var(--muted)">风险: {{a.risk}}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="bubble">{{m.content}}</div>
+      </div>
+      <div v-if="busy" class="msg assistant"><div class="role">Agent</div><div class="bubble">分析中…</div></div>
+    </div>
+
+    <div class="composer">
+      <div class="uploaded" v-if="chat && chat.files.length">
+        <span v-for="f in chat.files" :key="f.file_id" class="fchip">✅ {{f.name}}
+          <button @click="delFile(f.file_id)">✕</button></span>
+      </div>
+      <div class="pending" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px" v-if="samples.length">
+        <span style="font-size:11px;color:var(--muted);align-self:center">合成样例:</span>
+        <span v-for="s in samples.slice(0,8)" :key="s" class="fchip" style="color:#7dd3fc;cursor:pointer" @click="loadSample(s)" title="点击载入到本对话">⬇ {{s.replace('.mf4','')}}</span>
+      </div>
+      <div class="pending" v-if="pending.length">
+        <span v-for="(p,i) in pending" :key="i" class="fchip">📎 {{p.name}}<button @click="pending.splice(i,1)">✕</button></span>
+      </div>
+      <div class="inputrow">
+        <button class="addbtn" @click="$refs.file.click()" title="仅支持 .mf4">+</button>
+        <input ref="file" type="file" accept=".mf4" multiple style="display:none" @change="pickFiles">
+        <textarea v-model="draft" placeholder="描述要分析的功能/工况，如：干沥青 100kph 全力制动" @keydown.enter.exact.prevent="send"></textarea>
+        <button class="sendbtn" :disabled="busy" @click="send">发送</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="chartbox" v-if="chartData" @keydown.esc="chartData=null">
+    <div class="cb-head">
+      <span>{{chartTitle}} — 事件窗口时序（滚轮缩放 / 拖拽平移）</span>
+      <span>
+        <select v-model="chartSig" @change="renderSeries">
+          <option value="">全部测线</option>
+          <option v-for="s in chartSeries" :key="s.name" :value="s.name">{{s.name}}</option>
+        </select>
+        <button class="btnMini" style="margin-left:10px" @click="chartData=null">关闭 ✕</button>
+      </span>
+    </div>
+    <div class="cb-body" ref="chartEl"></div>
+  </div>
+</div>
+
+<script>
+const { createApp } = Vue;
+createApp({
+  data(){ return {
+    meta:{engine:'offline'}, chats:[], chat:null, chatId:'',
+    draft:'', pending:[], busy:false, samples:[],
+    otherText:{}, pfSel:{}, opened:{},
+    chartData:null, chartTitle:'', chartSig:'', chartSeries:[], chartFull:null, _chart:null,
+  }},
+  computed:{},
+  async mounted(){
+    try{ this.meta = await (await fetch('/api/meta')).json(); }catch(e){}
+    try{ this.samples = await (await fetch('/api/samples')).json(); }catch(e){}
+    await this.loadChats();
+    const h = location.hash.match(/^#\/chat\/(\w+)/);
+    if(h && this.chats.some(c=>c.chat_id===h[1])) this.openChat(h[1]);
+    else if(this.chats.length) this.openChat(this.chats[0].chat_id);
+    else await this.newChat();
+  },
+  methods:{
+    fmt(t){ return t==null?'—':Number(t).toFixed(2); },
+    dur(w){ return w? (w.t_end-w.t_start).toFixed(2):'0'; },
+    val(x){ if(x.value==null) return '—'; return Number(x.value).toFixed(2); },
+    range(x){ if(!x.ok_range) return '无限值'; const[lo,hi]=x.ok_range;
+      if(lo!=null&&hi!=null)return `${lo}~${hi}`; if(lo!=null)return `≥${lo}`; return `≤${hi}`; },
+    chunkDims(ps){ const half=Math.ceil(ps.length/2); return [ps.slice(0,half),ps.slice(half)].filter(a=>a.length); },
+    nav(cid){ location.hash = '#/chat/'+cid; },
+    async loadChats(){ this.chats = await (await fetch('/api/chats')).json(); },
+    async newChat(){
+      const c = await (await fetch('/api/chats',{method:'POST'})).json();
+      await this.loadChats(); this.openChat(c.chat_id);
+    },
+    async openChat(cid){
+      this.chatId=cid; this.nav(cid);
+      this.chat = await (await fetch('/api/chats/'+cid)).json();
+      (this.chat.messages||[]).forEach(m=>{
+        if(m.kind==='target_options'){
+          if(!(m.message_id in this.otherText)) this.otherText[m.message_id]='';
+          if(m.data.hop==='profile' && !(m.message_id in this.pfSel)){
+            const dims=m.data.profile_dims||this.chunkDims(m.data.profiles||m.data.target?.profiles||[]);
+            this.pfSel[m.message_id]=dims.map(d=>d[0]);
+          }
+        }});
+      this.$nextTick(this.scroll);
+    },
+    async delChat(cid){
+      if(!confirm('删除该对话及其全部文件、消息与分析缓存？')) return;
+      const r = await (await fetch('/api/chats/'+cid,{method:'DELETE'})).json();
+      await this.loadChats();
+      if(cid===this.chatId){
+        if(r.next_chat) this.openChat(r.next_chat);
+        else if(this.chats.length) this.openChat(this.chats[0].chat_id);
+        else await this.newChat();
+      }
+    },
+    async delFile(fid){
+      await fetch(`/api/chats/${this.chatId}/files/${fid}`,{method:'DELETE'});
+      await this.openChat(this.chatId);
+    },
+    async loadSample(s){
+      const r=await fetch('/api/samples/'+s);
+      if(!r.ok){ alert('样例下载失败'); return; }
+      const b=await r.blob();
+      this.pending.push(new File([b],s,{type:'application/octet-stream'}));
+    },
+    pickFiles(ev){
+      const fs=[...ev.target.files];
+      for(const f of fs){
+        if(!f.name.toLowerCase().endsWith('.mf4')){ alert(`demo 仅接受 .mf4 文件：${f.name} 已忽略`); continue; }
+        this.pending.push(f);
+      }
+      ev.target.value='';
+    },
+    async uploadPending(){
+      if(!this.pending.length) return true;
+      const fd=new FormData();
+      this.pending.forEach(f=>fd.append('files',f));
+      const r=await fetch(`/api/chats/${this.chatId}/files`,{method:'POST',body:fd});
+      if(!r.ok){ const e=await r.json(); alert(e.detail||'上传失败'); return false; }
+      this.pending=[];
+      await this.openChat(this.chatId);
+      return true;
+    },
+    async send(){
+      const text=this.draft.trim();
+      if(!text && !this.pending.length) return;
+      if(this.busy) return;
+      this.busy=true;
+      try{
+        if(!(await this.uploadPending())) return;
+        if(!text) { await this.openChat(this.chatId); return; }
+        this.draft='';
+        this.chat.messages.push({message_id:'tmp_u'+Date.now(),role:'user',kind:'text',content:text});
+        this.$nextTick(this.scroll);
+        const r=await fetch(`/api/chats/${this.chatId}/messages`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+        if(!r.ok){ const e=await r.json(); this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:e.detail||'请求失败'}); }
+        else { const d=await r.json(); d.messages.forEach(m=>this.pushMsg(m)); }
+        await this.loadChats();
+      } finally { this.busy=false; this.$nextTick(this.scroll); }
+    },
+    pushMsg(m){
+      this.chat.messages.push(m);
+      if(m.kind==='target_options'){
+        this.otherText[m.message_id]='';
+        if(m.data.hop==='profile'){
+          const dims=m.data.profile_dims||this.chunkDims(m.data.profiles||m.data.target?.profiles||[]);
+          this.pfSel[m.message_id]=dims.map(d=>d[0]);
+        }
+      }
+    },
+    async choose(rec,c){
+      if(rec.hop==='function') return this.select('function',c.key);
+      return this.select('condition',c.key,null);
+    },
+    dimsOf(m){
+      const d=m.data||{};
+      if(d.profile_dims&&d.profile_dims.length)
+        return d.profile_dims.filter(x=>x&&x.length);
+      const ps=d.profiles||(d.target&&d.target.profiles)||[];
+      return ps.length?this.chunkDims(ps):[];
+    },
+    async select(t,key,profile){
+      this.busy=true;
+      try{
+        const r=await fetch(`/api/chats/${this.chatId}/select`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_type:t,target_key:key,profile:profile})});
+        const d=await r.json();
+        if(!r.ok){ this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:d.detail||'操作失败'}); }
+        else {
+          // 移除上一个 profile 面板的回执，仅追加
+          (d.messages||[]).forEach(m=>this.pushMsg(m));
+        }
+        await this.openChatKeepScroll();
+      } finally{ this.busy=false; }
+    },
+    async chooseProfile(m){
+      const sel=this.pfSel[m.message_id]||[];
+      const profile=sel.filter(Boolean).join('|');
+      const key=m.data.target?.key || (m.data.candidates&&m.data.candidates[0]&&m.data.candidates[0].key);
+      if(!key){ alert('缺少工况 key'); return; }
+      await this.select('condition',key,profile);
+    },
+    async otherGo(m){
+      const t=(this.otherText[m.message_id]||'').trim();
+      if(!t) return;
+      this.otherText[m.message_id]='';
+      this.busy=true;
+      try{
+        const r=await fetch(`/api/chats/${this.chatId}/messages`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t})});
+        const d=await r.json();
+        (d.messages||[]).forEach(x=>this.pushMsg(x));
+        await this.openChatKeepScroll();
+      } finally{ this.busy=false; }
+    },
+    async openChatKeepScroll(){
+      const el=this.$refs.msgs; const at=el?el.scrollTop:0;
+      this.chat = await (await fetch('/api/chats/'+this.chatId)).json();
+      await this.loadChats();
+      this.$nextTick(()=>{ if(el) el.scrollTop=at; this.scroll(); });
+    },
+    scroll(){ const el=this.$refs.msgs; if(el) el.scrollTop=el.scrollHeight; },
+    toggle(sid,key){ const k=sid+':'+this._curMid(sid); this.opened[k]=!this.opened[k]; },
+    _curMid(){ return 'all'; },
+    async showChart(s){
+      this.chartTitle=`${s.file_name} · ${this.chat&&this.chat.selected_condition?s.condition_name||'':''} run ${s.run_index}`;
+      const r=await fetch(`/api/analyses/${s.sample_id}/timeseries`);
+      if(!r.ok){ alert((await r.json()).detail||'无法获取时序'); return; }
+      this.chartData=await r.json();
+      this.chartSeries=this.chartData.series||[];
+      this.chartSig='';
+      this.$nextTick(()=>{ this.renderSeries(); });
+    },
+    renderSeries(){
+      const el=this.$refs.chartEl||this.$refs.chartEl;
+      if(!el||!this.chartData) return;
+      if(!this._chart) this._chart=echarts.init(el,null,{renderer:'canvas'});
+      const series=this.chartSig? this.chartSeries.filter(s=>s.name===this.chartSig):this.chartSeries;
+      const opt=this.chartData.chart_option||{};
+      const data=series.map((s,i)=>({name:s.name,type:'line',showSymbol:false,large:true,data:s.data,
+        markArea: i===0?(opt.series&&opt.series[0]&&opt.series[0].markArea)||undefined:undefined}));
+      this._chart.setOption({
+        animation:false,
+        title:opt.title, tooltip:opt.tooltip, legend:{type:'scroll',bottom:0,data:series.map(s=>s.name)},
+        grid:{left:60,right:60,top:40,bottom:55},
+        xAxis:{type:'value',name:'s'},
+        yAxis:{type:'value',scale:true},
+        dataZoom:[{type:'inside'},{type:'slider',bottom:26,height:14}],
+        series:data,
+      },true);
+      this._chart.resize();
+    },
+  },
+  watch:{
+    '$route':()=>{}
+  }
+}).mount('#app');
+window.addEventListener('hashchange',()=>{
+  const h=location.hash.match(/^#\/chat\/(\w+)/);
+  const app=window.__vue_app__; // no-op hook placeholder
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,57 @@
+# 指标模板（design.md §9.4 / demo_conditions_metrics.md §6.3）
+# tuning_params 为「指标 → 可标定量」粗映射，占位命名，接入真实标定库后替换。
+
+metrics:
+  - key: yaw_rate_max
+    name: 最大横摆角速度
+    tool: max_abs
+    category: stability
+    unit: °/s
+    inputs: [yaw_rate]
+    tuning_params: [abs_保压降压判据, abs_压力调节频率, tcs_单轮制动干预强度, 前后轴制动力分配]
+    description: 事件窗口内横摆角速度绝对值峰值
+
+  - key: brake_distance
+    name: 制动距离
+    tool: signal_span
+    category: performance
+    unit: m
+    inputs: [distance_vbox]
+    tuning_params: [初始夹紧力响应, 增压请求阈值, abs_进入压力门限]
+    description: 窗口终止与起始的 vbox 距离之差（v0_kph → v_stop_kph 制动距离）
+
+  - key: decel_avg
+    name: 平均减速度
+    tool: speed_slope
+    category: performance
+    unit: m/s²
+    inputs: [speed_vbox]
+    tuning_params: [abs_目标滑移率, abs_降压台阶, abs_再介入延迟]
+    description: 窗口内车速变化率幅值（恒非负），与平均减速度阈值直接比较
+
+  - key: acc_time
+    name: 加速时间
+    tool: window_duration
+    category: performance
+    unit: s
+    inputs: [speed_vbox]
+    tuning_params: [tcs_扭矩限制阈值, tcs_允许加速度上限, 发动机请求滤波]
+    description: 窗口时长，即 v_start_kph → v_target_kph 加速时间
+
+  - key: acc_avg
+    name: 平均加速度
+    tool: speed_slope
+    category: performance
+    unit: m/s²
+    inputs: [speed_vbox]
+    tuning_params: [tcs_扭矩爬升速率, dtcs_滑移率目标, tcs_干预退出延迟]
+    description: 窗口内平均加速度（与 decel_avg 同工具、同为非负幅值，仅阈值方向不同）
+
+  - key: slip_max
+    name: 最大打滑量
+    tool: wheel_slip_max
+    category: traction
+    unit: km/h
+    inputs: [wheelSpeed_FL, wheelSpeed_FR, wheelSpeed_RL, wheelSpeed_RR, speed_vbox]
+    tuning_params: [滑移率报警阈值, tcs_减扭响应梯度, dtcs_进入延迟]
+    description: 窗口内 max(四轮轮速) − 实际车速 的最大值（打滑量）

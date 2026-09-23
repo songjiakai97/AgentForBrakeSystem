@@ -1,0 +1,17 @@
+# core
+numpy
+scipy
+pyyaml
+asammdf
+cantools
+python-can
+
+# web
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+httpx
+
+# llm（可选，无 Key 环境不装也能跑通）
+# openai
