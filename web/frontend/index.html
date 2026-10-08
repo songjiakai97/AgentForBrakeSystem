@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>制动测试分析 Agent · Demo</title>
-<script src="https://unpkg.com/vue@3.4.38/dist/vue.global.prod.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<script src="./vendor/vue.global.prod.js"></script>
+<script src="./vendor/echarts.min.js"></script>
+<script src="./vendor/marked.min.js"></script>
+<script src="./vendor/purify.min.js"></script>
 <style>
 :root{--bg:#0f172a;--panel:#1e293b;--panel2:#26344a;--text:#e2e8f0;--muted:#94a3b8;--accent:#38bdf8;--ok:#22c55e;--abn:#ef4444;--miss:#64748b;--info:#3b82f6;}
 *{box-sizing:border-box}
@@ -101,6 +101,26 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
 .chartbox .cb-body{flex:1;min-height:0}
 .chartbox select{background:var(--panel);color:var(--text);border:1px solid #334155;border-radius:6px;padding:3px 8px;font-size:12px}
 .empty{color:var(--muted);font-size:13px;text-align:center;margin-top:18vh;line-height:2}
+/* steps：工具调用/编排过程（可折叠） */
+.steps{background:#0b1220;border:1px solid #233248;border-radius:10px;max-width:86%;font-size:12px;overflow:hidden}
+.steps-head{padding:7px 12px;cursor:pointer;color:var(--muted);display:flex;gap:8px;align-items:center}
+.steps-head:hover{color:var(--text)}
+.steps-head .tag{font-size:10px;border:1px solid #334155;border-radius:8px;padding:1px 7px;color:#7dd3fc}
+.steps-body{border-top:1px dashed #1e293b;padding:6px 12px 9px}
+.step-row{display:flex;gap:8px;align-items:baseline;padding:3px 0;flex-wrap:wrap}
+.step-row .dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none;position:relative;top:-1px}
+.step-row.run .dot{background:var(--info)} .step-row.ok .dot{background:var(--ok)}
+.step-row.warn .dot{background:#f59e0b} .step-row.error .dot{background:var(--abn)}
+.step-row b{font-weight:600;color:#cbd5e1}
+.step-row .det{color:var(--muted);font-size:11px}
+/* 流式思考/正文 */
+.think{background:#0b1220;border:1px dashed #334155;border-radius:10px;max-width:86%;padding:7px 12px;font-size:12px}
+.think-head{cursor:pointer;color:#7dd3fc;display:flex;gap:6px;align-items:center}
+.think-body{margin-top:6px;color:var(--muted);white-space:normal;max-height:220px;overflow:auto;font-size:12.5px}
+.bubble.streaming{border:1px solid #38bdf8}
+.gchk{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px}
+.gchk label{display:flex;gap:4px;align-items:center;cursor:pointer;color:var(--muted)}
+.gchk label.on{color:var(--text)}
 </style>
 </head>
 <body>
@@ -127,16 +147,31 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
 
     <div class="msgs" ref="msgs">
       <div v-if="!chat" class="empty">加载中…</div>
-      <div v-else-if="!chat.messages.length" class="empty">
+      <template v-else>
+      <div v-if="!chat.messages.length" class="empty">
         上传 .mf4 数据文件，然后描述要分析的目标，例如：<br>
         「干沥青 100kph 全力制动的制动距离怎么样」<br>「玄武岩 0-60 全油门加速打滑超限了吗」
       </div>
       <div v-for="m in chat.messages" :key="m.message_id" class="msg" :class="[m.role, m.kind==='error'?'error':'']">
         <div class="role">{{m.role==='user'?'我':'Agent'}} · {{m.kind}}</div>
 
+        <!-- steps：工具调用/编排过程，默认折叠 -->
+        <div v-if="m.kind==='steps'" class="steps">
+          <div class="steps-head" @click="toggleOpen('st:'+m.message_id)">
+            <span>{{openState['st:'+m.message_id] ? '▾' : '▸'}}</span>
+            <span class="tag">过程</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{(m.data&&m.data.items||[]).length}} 步</span>
+          </div>
+          <div class="steps-body" v-if="openState['st:'+m.message_id]">
+            <div v-for="(r,ri) in (m.data&&m.data.items)||[]" :key="ri" class="step-row" :class="r.status">
+              <span class="dot"></span><b>{{r.label}}</b><span class="det">{{r.detail}}</span>
+            </div>
+          </div>
+        </div>
+
         <!-- text / error：Agent 文本按 Markdown 渲染，用户消息与错误保持纯文本 -->
-        <div v-if="m.kind==='text'||m.kind==='error'" class="bubble"
-             :class="{md: m.role==='assistant' && m.kind==='text'}">
+        <div v-else-if="m.kind==='text'||m.kind==='error'" class="bubble"
+             :class="{md: m.role==='assistant' && m.kind==='text', streaming: m.kind==='text' && m.meta && m.meta.streaming}">
           <span v-if="m.role==='assistant' && m.kind==='text'" v-html="md(m.content)"></span>
           <template v-else>{{m.content}}</template>
         </div>
@@ -223,7 +258,21 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
 
         <div v-else class="bubble">{{m.content}}</div>
       </div>
-      <div v-if="busy" class="msg assistant"><div class="role">Agent</div><div class="bubble">分析中…</div></div>
+
+      <!-- 流式过程：思考（可折叠）+ 正文逐字 -->
+      <div v-if="live.engine" class="msg assistant">
+        <div class="role">Agent · {{live.engine}}{{live.done?'':' · 进行中'}}</div>
+        <div v-if="live.reasoning" class="think">
+          <div class="think-head" @click="live.showThink=!live.showThink">
+            <span>{{live.showThink ? '▾' : '▸'}}</span><span>💭 思考过程（{{live.reasoning.length}} 字）</span>
+          </div>
+          <div class="think-body md" v-if="live.showThink" v-html="md(live.reasoning)"></div>
+        </div>
+        <div v-if="live.content" class="bubble md streaming" v-html="md(live.content)"></div>
+      </div>
+      <div v-if="busy && !live.content && !live.reasoning && live.engine" class="msg assistant"><div class="role">Agent</div><div class="bubble">处理中…</div></div>
+      <div v-else-if="busy && !live.engine" class="msg assistant"><div class="role">Agent</div><div class="bubble">分析中…</div></div>
+      </template>
     </div>
 
     <div class="composer">
@@ -247,16 +296,16 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
     </div>
   </div>
 
-  <div class="chartbox" v-if="chartData" @keydown.esc="chartData=null">
+  <div class="chartbox" v-if="chartData">
     <div class="cb-head">
-      <span>{{chartTitle}} — 事件窗口时序（滚轮缩放 / 拖拽平移）</span>
-      <span>
-        <select v-model="chartSig" @change="renderSeries">
-          <option value="">全部测线</option>
-          <option v-for="s in chartSeries" :key="s.name" :value="s.name">{{s.name}}</option>
-        </select>
-        <button class="btnMini" style="margin-left:10px" @click="chartData=null">关闭 ✕</button>
+      <span>{{chartTitle}} — 多行子图 · 共享时间轴（滚轮缩放 / 拖拽平移）</span>
+      <span class="gchk">
+        <label v-for="g in chartGroups" :key="g.index" :class="{on: !chartHidden.includes(g.index)}">
+          <input type="checkbox" :checked="!chartHidden.includes(g.index)" @change="toggleGroup(g.index)">
+          {{g.label}}<span style="color:var(--muted)">（{{g.signals.length}}）</span>
+        </label>
       </span>
+      <button class="btnMini" @click="closeChart">关闭 ✕</button>
     </div>
     <div class="cb-body" ref="chartEl"></div>
   </div>
@@ -264,14 +313,15 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
 
 <script>
 const { createApp } = Vue;
+const blankLive = () => ({engine:'', reasoning:'', content:'', showThink:true, done:false});
 createApp({
   data(){ return {
     meta:{engine:'offline'}, chats:[], chat:null, chatId:'',
     draft:'', pending:[], busy:false, samples:[],
-    otherText:{}, pfSel:{}, opened:{},
-    chartData:null, chartTitle:'', chartSig:'', chartSeries:[], chartFull:null, _chart:null,
+    otherText:{}, pfSel:{}, opened:{}, openState:{},
+    live: blankLive(),
+    chartData:null, chartTitle:'', chartGroups:[], chartHidden:[], chartFull:null, _chart:null,
   }},
-  computed:{},
   async mounted(){
     try{ this.meta = await (await fetch('/api/meta')).json(); }catch(e){}
     try{ this.samples = await (await fetch('/api/samples')).json(); }catch(e){}
@@ -284,7 +334,7 @@ createApp({
   methods:{
     md(t){
       if(!t) return '';
-      // marked 只做解析，DOMPurify 兜底：任一 CDN 缺失则退回转义纯文本，
+      // marked 只做解析，DOMPurify 兜底：库缺失则退回转义纯文本，
       // 绝不用 v-html 渲染未经净化的内容
       if(typeof marked==='undefined' || typeof DOMPurify==='undefined') return this.plain(t);
       try{
@@ -293,6 +343,7 @@ createApp({
     },
     plain(t){ return String(t).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])).replace(/\n/g,'<br>'); },
     consumed(m){ return !!(m.meta && m.meta.consumed); },
+    toggleOpen(k){ this.openState[k] = !this.openState[k]; },
     fmt(t){ return t==null?'—':Number(t).toFixed(2); },
     dur(w){ if(!w||w.t_start==null||w.t_end==null) return '0'; const d=w.t_end-w.t_start;
       return isFinite(d)? d.toFixed(2):'0'; },
@@ -306,17 +357,20 @@ createApp({
       const c = await (await fetch('/api/chats',{method:'POST'})).json();
       await this.loadChats(); this.openChat(c.chat_id);
     },
-    async openChat(cid){
-      this.chatId=cid; this.nav(cid);
-      this.chat = await (await fetch('/api/chats/'+cid)).json();
-      (this.chat.messages||[]).forEach(m=>{
+    initPanelState(msgs){
+      (msgs||[]).forEach(m=>{
         if(m.kind==='target_options'){
           if(!(m.message_id in this.otherText)) this.otherText[m.message_id]='';
-          if(m.data.hop==='profile' && !(m.message_id in this.pfSel)){
-            const dims=m.data.profile_dims||this.chunkDims(m.data.profiles||m.data.target?.profiles||[]);
+          if(m.data && m.data.hop==='profile' && !(m.message_id in this.pfSel)){
+            const dims=m.data.profile_dims||this.chunkDims(m.data.profiles||(m.data.target&&m.data.target.profiles)||[]);
             this.pfSel[m.message_id]=dims.map(d=>d[0]);
           }
         }});
+    },
+    async openChat(cid){
+      this.chatId=cid; this.nav(cid);
+      this.chat = await (await fetch('/api/chats/'+cid)).json();
+      this.initPanelState(this.chat.messages);
       this.$nextTick(this.scroll);
     },
     async delChat(cid){
@@ -357,6 +411,67 @@ createApp({
       await this.openChat(this.chatId);
       return true;
     },
+    // ------------------------------------------------ SSE 事件流
+    pushMsg(m){
+      // 服务端权威消息：替换同 id（steps 会原地追加），否则追加
+      const arr=this.chat.messages;
+      const i=m.message_id?arr.findIndex(x=>x.message_id===m.message_id):-1;
+      if(i>=0) arr.splice(i,1,m); else arr.push(m);
+      if(m.kind==='target_options'){
+        this.otherText[m.message_id]='';
+        if(m.data&&m.data.hop==='profile'){
+          const dims=m.data.profile_dims||this.chunkDims(m.data.profiles||(m.data.target&&m.data.target.profiles)||[]);
+          this.pfSel[m.message_id]=dims.map(d=>d[0]);
+        }
+      }
+    },
+    onEvent(name, data){
+      if(name==='delta'){
+        const ch=data.channel;
+        if(ch==='meta') this.live.engine=data.engine||'offline';
+        else if(ch==='reasoning') this.live.reasoning+=data.text;
+        else if(ch==='content') this.live.content+=data.text;
+        else if(ch==='reset'){ this.live.reasoning=''; this.live.content=''; }
+      } else if(name==='message'){
+        const m=data;
+        // 正文已流式给出的文本消息：落库版本接手展示，live 气泡让位
+        if(m.kind==='text' && m.role==='assistant' && this.live.content && m.meta && m.meta.streamed)
+          this.live.content='';
+        this.pushMsg(m);
+      } else if(name==='done'){
+        this.live.done=true;
+      }
+      this.$nextTick(this.scroll);
+    },
+    async streamSend(text){
+      // 返回 {ok, httpError?}：内部消费事件流；网络中断时不落半轮状态
+      this.live = blankLive();
+      const r = await fetch(`/api/chats/${this.chatId}/messages/stream`,
+        {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+      if(!r.ok){
+        let detail='请求失败'; try{ detail=(await r.json()).detail||detail; }catch(e){}
+        return {ok:false, detail};
+      }
+      const reader=r.body.getReader(), dec=new TextDecoder();
+      let buf='';
+      for(;;){
+        const {value, done} = await reader.read();
+        if(done) break;
+        buf += dec.decode(value, {stream:true});
+        let k;
+        while((k=buf.indexOf('\n\n'))>=0){
+          const frame=buf.slice(0,k); buf=buf.slice(k+2);
+          let ev='message', payload='';
+          for(const line of frame.split('\n')){
+            if(line.startsWith('event:')) ev=line.slice(6).trim();
+            else if(line.startsWith('data:')) payload+=line.slice(5).trim();
+          }
+          if(!payload) continue;
+          try{ this.onEvent(ev, JSON.parse(payload)); }catch(e){}
+        }
+      }
+      return {ok:true};
+    },
     async send(){
       const text=this.draft.trim();
       if(!text && !this.pending.length) return;
@@ -366,23 +481,15 @@ createApp({
         if(!(await this.uploadPending())) return;
         if(!text) { await this.openChat(this.chatId); return; }
         this.draft='';
-        this.chat.messages.push({message_id:'tmp_u'+Date.now(),role:'user',kind:'text',content:text});
+        this.chat.messages.push({message_id:'tmp_u'+Date.now(),role:'user',kind:'text',content:text,meta:{}});
         this.$nextTick(this.scroll);
-        const r=await fetch(`/api/chats/${this.chatId}/messages`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
-        if(!r.ok){ const e=await r.json(); this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:e.detail||'请求失败'}); }
-        else { const d=await r.json(); d.messages.forEach(m=>this.pushMsg(m)); }
-        await this.loadChats();
-      } finally { this.busy=false; this.$nextTick(this.scroll); }
-    },
-    pushMsg(m){
-      this.chat.messages.push(m);
-      if(m.kind==='target_options'){
-        this.otherText[m.message_id]='';
-        if(m.data.hop==='profile'){
-          const dims=m.data.profile_dims||this.chunkDims(m.data.profiles||m.data.target?.profiles||[]);
-          this.pfSel[m.message_id]=dims.map(d=>d[0]);
+        const res = await this.streamSend(text);
+        if(!res.ok){
+          this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:res.detail,meta:{}});
         }
-      }
+        await this.loadChats();
+        await this.openChatKeepScroll();
+      } finally { this.busy=false; this.live=blankLive(); this.$nextTick(this.scroll); }
     },
     async choose(m,c){
       const rec=m.data;
@@ -407,7 +514,7 @@ createApp({
       try{
         const r=await fetch(`/api/chats/${this.chatId}/select`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_type:t,target_key:key,profile:profile})});
         const d=await r.json();
-        if(!r.ok){ this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:d.detail||'操作失败'}); }
+        if(!r.ok){ this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:d.detail||'操作失败',meta:{}}); }
         else {
           (d.messages||[]).forEach(x=>this.pushMsg(x));
         }
@@ -417,71 +524,96 @@ createApp({
     async chooseProfile(m){
       const sel=this.pfSel[m.message_id]||[];
       const profile=sel.filter(Boolean).join('|');
-      const key=m.data.target?.key || (m.data.candidates&&m.data.candidates[0]&&m.data.candidates[0].key);
+      const key=(m.data.target&&m.data.target.key) || (m.data.candidates&&m.data.candidates[0]&&m.data.candidates[0].key);
       if(!key){ alert('缺少工况 key'); return; }
-      const label=`${(m.data.target&&m.data.target.name)||key}（${profile}）`;
+      const label=((m.data.target&&m.data.target.name)||key)+`（${profile}）`;
       await this.select('condition',key,profile,m,label);
     },
     async otherGo(m){
       const t=(this.otherText[m.message_id]||'').trim();
       if(!t || this.busy) return;
       this.otherText[m.message_id]='';
-      // 改用手打目标：本面板作废（服务端 _run 同样会标记 consumed）
+      // 改用手打目标：本面板作废（服务端本轮开始同样会标记 consumed）
       m.meta = Object.assign({}, m.meta, {consumed:true});
       this.busy=true;
       try{
-        const r=await fetch(`/api/chats/${this.chatId}/messages`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t})});
-        const d=await r.json();
-        (d.messages||[]).forEach(x=>this.pushMsg(x));
+        this.chat.messages.push({message_id:'tmp_u'+Date.now(),role:'user',kind:'text',content:t,meta:{}});
+        const res = await this.streamSend(t);
+        if(!res.ok) this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:res.detail,meta:{}});
         await this.openChatKeepScroll();
-      } finally{ this.busy=false; }
+      } finally{ this.busy=false; this.live=blankLive(); }
     },
     async openChatKeepScroll(){
       const el=this.$refs.msgs; const at=el?el.scrollTop:0;
       this.chat = await (await fetch('/api/chats/'+this.chatId)).json();
+      this.initPanelState(this.chat.messages);
       await this.loadChats();
       this.$nextTick(()=>{ if(el) el.scrollTop=at; this.scroll(); });
     },
     scroll(){ const el=this.$refs.msgs; if(el) el.scrollTop=el.scrollHeight; },
     toggle(sid,key){ const k=sid+':'+this._curMid(sid); this.opened[k]=!this.opened[k]; },
     _curMid(){ return 'all'; },
+    // ------------------------------------------------ 图表：多 grid 共享 x 轴
     async showChart(s){
-      this.chartTitle=`${s.file_name} · ${this.chat&&this.chat.selected_condition?s.condition_name||'':''} run ${s.run_index}`;
+      this.chartTitle=`${s.file_name} · run ${s.run_index}`;
       const r=await fetch(`/api/analyses/${s.sample_id}/timeseries`);
       if(!r.ok){ alert((await r.json()).detail||'无法获取时序'); return; }
-      this.chartData=await r.json();
-      this.chartSeries=this.chartData.series||[];
-      this.chartSig='';
+      const data = await r.json();
+      this.chartData=Vue.markRaw(data);
+      const opt=data.chart_option||{};
+      this.chartGroups=(opt._groups)||[];
+      this.chartHidden=[];
+      // ECharts 会向传入 setOption 的对象写入 __ec_inner_ 内部符号：
+      // 渲染用一份、按组显隐重建用另一份干净深拷贝，避免二次注入报错
+      this.chartFull=Vue.markRaw(JSON.parse(JSON.stringify(opt)));
       this.$nextTick(()=>{ this.renderSeries(); });
     },
+    toggleGroup(i){
+      const k=this.chartHidden.indexOf(i);
+      if(k>=0) this.chartHidden.splice(k,1); else this.chartHidden.push(i);
+      if(!this._chart||this._chart.isDisposed()) return;
+      // 显隐走 legend.selected（merge 更新）：不重建 grid/轴，避开多 grid notMerge 崩溃
+      const sel={};
+      const hidden=new Set(this.chartHidden);
+      (this.chartGroups||[]).forEach(g=>{
+        g.signals.forEach(s=>{ sel[s]=!hidden.has(g.index); });
+      });
+      this._chart.setOption({legend:{selected:sel}});
+    },
+    closeChart(){
+      this.chartData=null;
+      if(this._chart && !this._chart.isDisposed()) this._chart.dispose();
+      this._chart=null;
+    },
     renderSeries(){
-      const el=this.$refs.chartEl||this.$refs.chartEl;
-      if(!el||!this.chartData) return;
-      if(!this._chart) this._chart=echarts.init(el,null,{renderer:'canvas'});
-      const series=this.chartSig? this.chartSeries.filter(s=>s.name===this.chartSig):this.chartSeries;
-      const opt=this.chartData.chart_option||{};
-      const data=series.map((s,i)=>({name:s.name,type:'line',showSymbol:false,large:true,data:s.data,
-        markArea: i===0?(opt.series&&opt.series[0]&&opt.series[0].markArea)||undefined:undefined}));
-      this._chart.setOption({
-        animation:false,
-        title:opt.title, tooltip:opt.tooltip, legend:{type:'scroll',bottom:0,data:series.map(s=>s.name)},
-        grid:{left:60,right:60,top:40,bottom:55},
-        xAxis:{type:'value',name:'s'},
-        yAxis:{type:'value',scale:true},
-        dataZoom:[{type:'inside'},{type:'slider',bottom:26,height:14}],
-        series:data,
-      },true);
+      const el=this.$refs.chartEl;
+      if(!el||!this.chartData||!this.chartFull) return;
+      if(this._chart && !this._chart.isDisposed()) this._chart.dispose();
+      this._chart=Vue.markRaw(echarts.init(el,null,{renderer:'canvas'}));
+      // 服务端已排好多 grid/共享 x：原样渲染，显隐交给 legend.selected
+      const opt=JSON.parse(JSON.stringify(this.chartFull));
+      const sel={};
+      const hidden=new Set(this.chartHidden);
+      (this.chartGroups||[]).forEach(g=>{
+        g.signals.forEach(s=>{ sel[s]=!hidden.has(g.index); });
+      });
+      opt.legend={show:false, data:(opt.series||[]).map(s=>s.name), selected:sel, type:'scroll'};
+      opt.textStyle={color:'#e2e8f0'};
+      opt.backgroundColor='transparent';
+      (opt.xAxis||[]).forEach(ax=>{
+        ax.axisLine={lineStyle:{color:'#334155'}};
+        ax.axisLabel=Object.assign({}, ax.axisLabel, {color:'#94a3b8'});
+      });
+      (opt.yAxis||[]).forEach(ax=>{
+        ax.nameTextStyle=Object.assign({}, ax.nameTextStyle, {color:'#94a3b8'});
+        ax.axisLabel=Object.assign({}, ax.axisLabel, {color:'#94a3b8'});
+      });
+      (opt.series||[]).forEach(s=>{ s.lineStyle=Object.assign({width:1.2}, s.lineStyle); });
+      this._chart.setOption(opt, true);
       this._chart.resize();
     },
-  },
-  watch:{
-    '$route':()=>{}
   }
 }).mount('#app');
-window.addEventListener('hashchange',()=>{
-  const h=location.hash.match(/^#\/chat\/(\w+)/);
-  const app=window.__vue_app__; // no-op hook placeholder
-});
 </script>
 </body>
 </html>

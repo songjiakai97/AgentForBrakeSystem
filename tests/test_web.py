@@ -194,6 +194,10 @@ def test_sse_stream(client):
         assert resp.status_code == 200
         body = "".join(resp.iter_text())
     assert "event: message" in body and "event: done" in body
+    # 过程可见：meta/reasoning delta + steps 消息
+    assert 'event: delta' in body and '"channel": "meta"' in body
+    assert '"channel": "reasoning"' in body
+    assert '"kind": "steps"' in body
 
 
 def test_panel_becomes_receipt_after_click(client):
@@ -212,7 +216,8 @@ def test_panel_becomes_receipt_after_click(client):
     # 点选面板项 → 面板在存储层被消费，并记录点了什么
     r2 = client.post(f"/api/chats/{cid}/select",
                      json={"target_type": "condition", "target_key": key}).json()
-    assert [m["kind"] for m in r2["messages"]] == ["analysis_result"]
+    kinds = [m["kind"] for m in r2["messages"]]
+    assert "analysis_result" in kinds and "steps" in kinds, r2
     stored = client.get(f"/api/chats/{cid}").json()["messages"]
     done = next(m for m in stored if m["message_id"] == pid)
     assert done["meta"]["consumed"] is True
@@ -240,6 +245,51 @@ def test_message_run_consumes_panels(client):
     stored = client.get(f"/api/chats/{cid}").json()["messages"]
     old = next(m for m in stored if m["message_id"] == pid)
     assert old["meta"].get("consumed") is True
+
+
+def test_steps_and_chart_groups(client):
+    """过程消息落库 + timeseries 按 chart_layout 输出多行共享 x 的分组。"""
+    chat = client.post("/api/chats").json()
+    cid = chat["chat_id"]
+    _upload(client, cid, "abs_dry100_dist_abn.mf4")
+    key = "abs_full_brake_dry_asphalt_100kph"
+    r = client.post(f"/api/chats/{cid}/select",
+                    json={"target_type": "condition", "target_key": key}).json()
+    steps = [m for m in r["messages"] if m["kind"] == "steps"]
+    assert steps
+    rows = steps[0]["data"]["items"]
+    assert any("run_analysis_on_files" in x["label"] for x in rows)
+    assert all(set(x) == {"label", "detail", "status"} for x in rows)
+    # 同一轮的两条 steps 事件其实是同一条消息（原地追加）
+    assert client.get(f"/api/chats/{cid}").json()  # 存储可正常读回
+
+    msg = [m for m in r["messages"] if m["kind"] == "analysis_result"][0]
+    sid = msg["data"]["samples"][0]["sample_id"]
+    body = client.get(f"/api/analyses/{sid}/timeseries").json()
+    groups = body["groups"]
+    labels = [g["label"] for g in groups]
+    assert "车速 / 轮速" in labels
+    # 同组信号共用一个 y 轴：车速+四轮速应聚在一行
+    speed_g = next(g for g in groups if g["label"] == "车速 / 轮速")
+    assert "speed_vbox" in speed_g["signals"] and "wheelSpeed_FL" in speed_g["signals"]
+    opt = body["chart_option"]
+    n = len(groups)
+    assert len(opt["grid"]) == n == len(opt["xAxis"]) == len(opt["yAxis"])
+    # 共享 x：所有行的量程锁定一致
+    mins = {ax["min"] for ax in opt["xAxis"]}
+    maxs = {ax["max"] for ax in opt["xAxis"]}
+    assert len(mins) == 1 and len(maxs) == 1
+    assert all(s.get("markArea") for s in opt["series"] if s["name"] == "speed_vbox")
+
+
+def test_chart_layout_validation():
+    from brake_analyzer.configs import AppConfigs, load_configs  # noqa: F401
+
+    cfg = load_configs(os.path.join(ROOT, "configs"))
+    assert cfg.chart_layout and cfg.chart_layout[0].label == "车速 / 轮速"
+    # 未入组的逻辑信号自动补为独立行
+    placed = {s for g in cfg.chart_layout for s in g.signals}
+    assert "distance_vbox" in placed
 
 
 def test_debug_pages(client):

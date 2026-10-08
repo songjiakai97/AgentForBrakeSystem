@@ -325,10 +325,12 @@ def api_analysis_timeseries(analysis_id: str, signal: Optional[str] = Query(None
     if is_valid(sample.window):
         window = (sample.window.t_start, sample.window.t_end)
     names = [signal] if signal else None
-    payload = timeseries_payload(sess.signals, window=window, series_names=names)
+    layout = CFG.chart_layout if not names else None
+    payload = timeseries_payload(sess.signals, window=window, series_names=names, layout=layout)
     payload["file_name"] = sample.file_name
     payload["chart_option"] = build_chart_option(
         sess.signals, window=window, series_names=names,
+        layout=layout,
         highlight_status=("abnormal" if any(m.status == "abnormal" for m in sample.metrics)
                           else "missing" if any(m.status == "missing" for m in sample.metrics)
                           else "ok"),

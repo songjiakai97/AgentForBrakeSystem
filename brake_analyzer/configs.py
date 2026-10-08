@@ -109,7 +109,15 @@ def _profile_tokens(profile: str) -> List[str]:
     return out
 
 
-# ---------------------------------------------------------------- 加载器
+# ---------------------------------------------------------------- 运行时配置对象
+
+@dataclass
+class ChartGroup:
+    """图表一行子图：同单位信号共用 y 轴（signals_mf4.yaml chart_layout）。"""
+    label: str
+    unit: str
+    signals: List[str]
+
 
 @dataclass
 class AppConfigs:
@@ -120,6 +128,7 @@ class AppConfigs:
     metrics: Dict[str, MetricTemplate] = field(default_factory=dict)
     rules: List[RuleConfig] = field(default_factory=list)
     signal_maps: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    chart_layout: List[ChartGroup] = field(default_factory=list)
 
     # ---- 查询辅助 ----
     def function(self, key: str) -> Optional[FunctionConfig]:
@@ -161,6 +170,35 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             raise ConfigError(f"信号 {name} 缺少非空 candidates 列表")
     cfg.signal_maps = signal_maps
     logical_names = set(signal_maps)
+
+    # chart_layout：一行子图 = 一组同单位信号（可选段，缺失时图表按单位自动分组）
+    layout_raw = sig_raw.get("chart_layout") if isinstance(sig_raw, dict) else None
+    if layout_raw is not None:
+        if not isinstance(layout_raw, list) or not layout_raw:
+            raise ConfigError("signals_mf4.yaml 的 chart_layout 必须是非空列表")
+        placed: set = set()
+        groups: List[ChartGroup] = []
+        for i, g in enumerate(layout_raw):
+            if not isinstance(g, dict):
+                raise ConfigError(f"chart_layout[{i}] 必须是映射: {g}")
+            sigs = [str(s) for s in (g.get("signals") or [])]
+            if not sigs:
+                raise ConfigError(f"chart_layout[{i}] 缺少非空 signals")
+            unknown = [s for s in sigs if s not in logical_names]
+            if unknown:
+                raise ConfigError(f"chart_layout[{i}] 引用未定义信号: {unknown}")
+            dup = [s for s in sigs if s in placed]
+            if dup:
+                raise ConfigError(f"chart_layout 信号重复分组: {dup}")
+            placed.update(sigs)
+            groups.append(ChartGroup(label=str(g.get("label") or sigs[0]),
+                                     unit=str(g.get("unit") or ""), signals=sigs))
+        # 未编排的信号各自成组，保证图表不静默丢通道
+        for name in signal_maps:
+            if name not in placed:
+                groups.append(ChartGroup(label=name, unit=str(signal_maps[name].get("unit") or ""),
+                                         signals=[name]))
+        cfg.chart_layout = groups
 
     # ---- functions.yaml ----
     fn_raw = _load_yaml(os.path.join(config_dir, "functions.yaml"))

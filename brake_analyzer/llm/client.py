@@ -32,6 +32,7 @@ class LlmReply:
     tool_calls: List[dict] = field(default_factory=list)   # {id,name,arguments(dict)}
     finish_reason: str = "stop"
     error: Optional[str] = None
+    reasoning: str = ""    # 思维链（部分兼容端点提供 reasoning_content）
 
 
 class TraceStore:
@@ -123,6 +124,90 @@ class LlmClient:
             tool_calls, chat_id, user_text, round_no, finish=finish,
         )
         return reply
+
+    # ------------------------------------------------------------ 流式 chat
+    def chat_stream(self, messages: List[dict], tools: Optional[List[dict]] = None,
+                    chat_id: str = "", user_text: str = "", round_no: int = 1,
+                    temperature: float = 0.2, max_tokens: int = 1600):
+        """流式对话：yield 事件 dict，最后必发一个 {"type":"finish","reply":LlmReply}。
+
+        事件：
+        - {"type":"delta","channel":"content"|"reasoning","text":str}
+        - {"type":"finish","reply":LlmReply}   # reply.error 非空表示失败
+        """
+        if not self.available:
+            yield {"type": "finish", "reply": LlmReply(error="llm_unavailable")}
+            return
+        try:
+            stream = self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=tools or None,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+        except Exception as e:
+            self._trace(messages, None, [], chat_id, user_text, round_no, error=str(e))
+            yield {"type": "finish", "reply": LlmReply(error=f"llm_error: {e}")}
+            return
+
+        content_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        calls: dict = {}          # index -> {id,name,arguments}
+        finish = "stop"
+        try:
+            for chunk in stream:
+                if not getattr(chunk, "choices", None):
+                    continue
+                ch = chunk.choices[0]
+                if ch.finish_reason:
+                    finish = ch.finish_reason
+                delta = ch.delta
+                text = getattr(delta, "content", None)
+                if text:
+                    content_parts.append(text)
+                    yield {"type": "delta", "channel": "content", "text": text}
+                rc = getattr(delta, "reasoning_content", None)
+                if not rc:
+                    extra = getattr(delta, "model_extra", None) or {}
+                    rc = extra.get("reasoning") or extra.get("reasoning_content")
+                if rc:
+                    reasoning_parts.append(rc)
+                    yield {"type": "delta", "channel": "reasoning", "text": rc}
+                for tc in getattr(delta, "tool_calls", None) or []:
+                    slot = calls.setdefault(
+                        tc.index if tc.index is not None else len(calls),
+                        {"id": "", "name": "", "args": ""})
+                    if tc.id:
+                        slot["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            slot["name"] += tc.function.name
+                        if tc.function.arguments:
+                            slot["args"] += tc.function.arguments
+        except Exception as e:  # 中断的流：已完成部分随 error 一并上报
+            self._trace(messages, None, [], chat_id, user_text, round_no, error=str(e))
+            yield {"type": "finish", "reply": LlmReply(error=f"llm_stream_error: {e}")}
+            return
+
+        tool_calls = []
+        for i in sorted(calls):
+            slot = calls[i]
+            if not slot["name"]:
+                continue
+            try:
+                args = json.loads(slot["args"] or "{}")
+            except Exception:
+                args = {}
+            tool_calls.append({"id": slot["id"] or f"call_{i}",
+                               "name": slot["name"], "arguments": args})
+        reply = LlmReply(content="".join(content_parts), tool_calls=tool_calls,
+                         finish_reason=finish, reasoning="".join(reasoning_parts))
+        self._trace(messages,
+                    {"content": reply.content, "tool_calls": reply.tool_calls},
+                    tool_calls, chat_id, user_text, round_no, finish=finish)
+        yield {"type": "finish", "reply": reply}
 
     def _trace(self, request, reply, tool_execs, chat_id, user_text, round_no,
                finish="stop", error=None):

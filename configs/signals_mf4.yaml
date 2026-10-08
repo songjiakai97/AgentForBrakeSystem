@@ -14,3 +14,22 @@ signal_maps:
   TCS_Active:      {description: TCS 激活,      unit: "",    candidates: [TCS_Active]}
   BrakePedalPos:   {description: 制动踏板深度,  unit: "%",   candidates: [BrakePedalPos]}
   ThrottlePedalPos: {description: 油门踏板深度, unit: "%",   candidates: [ThrottlePedalPos]}
+
+# 图表布局约束：多行一列共享 x 轴（design.md §6.6 扩展）
+# 每个 group = 一行子图，组内信号共用一个 y 轴（同单位才有意义）
+chart_layout:
+  - label: 车速 / 轮速
+    unit: km/h
+    signals: [speed_vbox, wheelSpeed_FL, wheelSpeed_FR, wheelSpeed_RL, wheelSpeed_RR]
+  - label: 纵向加速度
+    unit: m/s2
+    signals: [Ax]
+  - label: 横摆角速度
+    unit: deg/s
+    signals: [yaw_rate]
+  - label: 踏板开度
+    unit: "%"
+    signals: [BrakePedalPos, ThrottlePedalPos]
+  - label: 激活标志
+    unit: ""
+    signals: [ABS_Active, TCS_Active]
