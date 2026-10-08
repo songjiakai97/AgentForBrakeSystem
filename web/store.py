@@ -179,6 +179,27 @@ class Store:
             self.sessions[file_id] = Session(file_id=file_id)
         return self.sessions[file_id]
 
+    def mark_panels_consumed(self, chat: "Chat", chosen: Optional[str] = None) -> int:
+        """面板是一次性的：新一轮选择/提问后把旧的候选面板标记为已消费。
+
+        chosen 记录用户实际点选的项，用于前端回显「已选择 …」；
+        只有最新的一个未消费面板会被写入 chosen。
+        """
+        n = 0
+        latest_open = None
+        for m in chat.messages:
+            if m.kind == "target_options" and not m.meta.get("consumed"):
+                latest_open = m
+        for m in chat.messages:
+            if m.kind != "target_options" or m.meta.get("consumed"):
+                continue
+            m.meta["consumed"] = True
+            n += 1
+        if chosen is not None and latest_open is not None:
+            latest_open.meta["chosen"] = chosen
+        chat.touch()
+        return n
+
     # ---------------- message ----------------
     def add_message(self, chat: Chat, role: str, kind: str, content: str = "",
                     data: Optional[dict] = None, meta: Optional[dict] = None) -> Message:

@@ -241,6 +241,7 @@ def api_select(cid: str, body: SelectIn):
         fn = CFG.function(body.target_key)
         if fn is None:
             raise HTTPException(400, f"未知功能 {body.target_key}")
+        STORE.mark_panels_consumed(chat, chosen=fn.name)
         chat.selected_function = fn.key
         chat.selected_condition = None
         from brake_analyzer.agent.tools import recommend_targets
@@ -255,8 +256,10 @@ def api_select(cid: str, body: SelectIn):
             raise HTTPException(400, f"未知工况 {body.target_key}")
         fn = CFG.function(cond.function)
         profile = (body.profile or "").strip() or None
+        chosen = f"{cond.name}（{profile}）" if profile else cond.name
         if fn.profiles and not profile:
             # 需要档位但未提供 → 返回档位选择面板
+            STORE.mark_panels_consumed(chat, chosen=chosen)
             msg = ENGINE._options(chat, {
                 "hop": "profile", "function": fn.key,
                 "target": {"key": cond.id, "name": cond.name},
@@ -268,6 +271,7 @@ def api_select(cid: str, body: SelectIn):
             bad = [t for t in tokens if fn.profiles and t not in fn.profiles]
             if bad:
                 raise HTTPException(400, f"档位 {bad} 不在功能 {fn.key} 允许列表 {fn.profiles}")
+        STORE.mark_panels_consumed(chat, chosen=chosen)
         added = ENGINE._analyze(chat, cond.id, profile)
         return {"messages": [m.to_dict() for m in added]}
 

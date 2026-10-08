@@ -44,6 +44,8 @@ class ChatEngine:
     # ------------------------------------------------------------ 核心
     def _run(self, chat, text: str) -> List:
         self.store.add_message(chat, "user", "text", content=text)
+        # 用户另起一轮提问：此前的候选面板视为已回答，前端折叠为「已选择」
+        self.store.mark_panels_consumed(chat)
 
         if self.llm.available:
             out = self._run_llm(chat, text)

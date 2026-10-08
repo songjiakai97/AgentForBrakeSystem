@@ -6,6 +6,8 @@
 <title>制动测试分析 Agent · Demo</title>
 <script src="https://unpkg.com/vue@3.4.38/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 <style>
 :root{--bg:#0f172a;--panel:#1e293b;--panel2:#26344a;--text:#e2e8f0;--muted:#94a3b8;--accent:#38bdf8;--ok:#22c55e;--abn:#ef4444;--miss:#64748b;--info:#3b82f6;}
 *{box-sizing:border-box}
@@ -32,11 +34,28 @@ body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-ser
 .msg.user .bubble{background:#0369a1;color:#f0f9ff}
 .msg.assistant .bubble{background:var(--panel)}
 .msg.error .bubble{background:#3f1d1d;color:#fecaca;border:1px solid #7f1d1d}
+/* markdown 渲染（仅 Agent 文本）：bubble 的 pre-wrap 会放大 md 内的换行，这里交回 CSS */
+.bubble.md,.md{white-space:normal}
+.md > :first-child{margin-top:0}
+.md > :last-child{margin-bottom:0}
+.md p{margin:0 0 8px}
+.md ul,.md ol{margin:0 0 8px;padding-left:20px}
+.md li{margin:2px 0}
+.md h1,.md h2,.md h3,.md h4{margin:10px 0 6px;font-size:14px;line-height:1.4}
+.md code{background:#0b1220;border:1px solid #334155;border-radius:4px;padding:1px 5px;font-size:12.5px}
+.md pre{background:#0b1220;border:1px solid #334155;border-radius:8px;padding:9px 11px;overflow:auto;margin:0 0 8px}
+.md pre code{background:none;border:none;padding:0}
+.md table{border-collapse:collapse;margin:0 0 8px;font-size:13px}
+.md th,.md td{border:1px solid #334155;padding:4px 8px;text-align:left}
+.md blockquote{margin:0 0 8px;padding-left:10px;border-left:3px solid #334155;color:var(--muted)}
+.md a{color:var(--accent)}
 .role{font-size:11px;color:var(--muted);margin-bottom:3px}
 /* panels */
 .panel{background:var(--panel);border:1px solid #334155;border-radius:12px;padding:10px;max-width:86%}
 .optrow{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;cursor:pointer;font-size:13px}
+.panel.used{background:var(--panel);border-style:dashed;opacity:.85}
 .optrow:hover{background:var(--panel2)}
+.optrow:active{background:#2f4363}
 .optrow .idx{width:20px;height:20px;border-radius:6px;background:#334155;display:flex;align-items:center;justify-content:center;font-size:11px;flex:none}
 .optrow .score{margin-left:auto;color:var(--muted);font-size:11px}
 .panel .hint{font-size:12px;color:var(--muted);padding:4px 10px}
@@ -115,17 +134,29 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
       <div v-for="m in chat.messages" :key="m.message_id" class="msg" :class="[m.role, m.kind==='error'?'error':'']">
         <div class="role">{{m.role==='user'?'我':'Agent'}} · {{m.kind}}</div>
 
-        <!-- text / error -->
-        <div v-if="m.kind==='text'||m.kind==='error'" class="bubble">{{m.content}}</div>
+        <!-- text / error：Agent 文本按 Markdown 渲染，用户消息与错误保持纯文本 -->
+        <div v-if="m.kind==='text'||m.kind==='error'" class="bubble"
+             :class="{md: m.role==='assistant' && m.kind==='text'}">
+          <span v-if="m.role==='assistant' && m.kind==='text'" v-html="md(m.content)"></span>
+          <template v-else>{{m.content}}</template>
+        </div>
 
         <!-- attachment note -->
         <div v-else-if="m.kind==='attachment'" class="bubble">📎 {{m.content}}</div>
 
-        <!-- target options -->
-        <div v-else-if="m.kind==='target_options'" class="panel">
+        <!-- target options：一次性面板，点选后折叠为回执 -->
+        <div v-else-if="m.kind==='target_options'" class="panel" :class="{used: consumed(m)}">
+          <template v-if="consumed(m)">
+            <div class="hint">
+              <template v-if="m.meta && m.meta.chosen">已选择：{{m.meta.chosen}}</template>
+              <template v-else>该面板已被后续消息取代</template>
+              <span style="color:var(--muted)">（选项已失效）</span>
+            </div>
+          </template>
+          <template v-else>
           <div class="hint">{{m.content}}</div>
           <template v-if="m.data.hop==='function'||m.data.hop==='condition'">
-            <div v-for="(c,i) in m.data.candidates" :key="c.key" class="optrow" @click="choose(m.data,c)">
+            <div v-for="(c,i) in m.data.candidates" :key="c.key" class="optrow" @click="choose(m,c)">
               <span class="idx">{{i+1}}</span><span>{{c.name}}</span>
               <span class="score" v-if="c.score">{{c.score.toFixed(1)}}</span>
             </div>
@@ -137,13 +168,15 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
                   <option v-for="p in dim" :key="p" :value="p">{{p}}</option>
                 </select>
               </template>
-              <button class="pfBtn" @click="chooseProfile(m)">确认分析</button>
+              <button class="pfBtn" :disabled="busy" @click="chooseProfile(m)">
+                {{busy ? '处理中…' : '确认分析'}}</button>
             </div>
           </template>
           <div class="otherOpt">
             <input v-model="otherText[m.message_id]" placeholder="其他选项：手动描述目标，回车重新推荐" @keyup.enter="otherGo(m)">
             <button @click="otherGo(m)">发送</button>
           </div>
+          </template>
         </div>
 
         <!-- analysis result -->
@@ -180,7 +213,7 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
             </div>
             <div v-if="m.data.llm_suggestion" class="suggest">
               <h4>LLM 标定建议（区分于规则结论）</h4>
-              <div>{{m.data.llm_suggestion.summary}}</div>
+              <div class="md" v-html="md(m.data.llm_suggestion.summary)"></div>
               <div v-for="(a,i) in (m.data.llm_suggestion.calibration_actions||[])" :key="i" class="act">
                 {{a.param}} → <b>{{a.direction}}</b>（{{a.metric}}）：{{a.expected_effect}} <span style="color:var(--muted)">风险: {{a.risk}}</span>
               </div>
@@ -249,6 +282,17 @@ createApp({
     else await this.newChat();
   },
   methods:{
+    md(t){
+      if(!t) return '';
+      // marked 只做解析，DOMPurify 兜底：任一 CDN 缺失则退回转义纯文本，
+      // 绝不用 v-html 渲染未经净化的内容
+      if(typeof marked==='undefined' || typeof DOMPurify==='undefined') return this.plain(t);
+      try{
+        return DOMPurify.sanitize(marked.parse(String(t), {breaks:true, gfm:true}));
+      }catch(e){ return this.plain(t); }
+    },
+    plain(t){ return String(t).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])).replace(/\n/g,'<br>'); },
+    consumed(m){ return !!(m.meta && m.meta.consumed); },
     fmt(t){ return t==null?'—':Number(t).toFixed(2); },
     dur(w){ if(!w||w.t_start==null||w.t_end==null) return '0'; const d=w.t_end-w.t_start;
       return isFinite(d)? d.toFixed(2):'0'; },
@@ -340,9 +384,10 @@ createApp({
         }
       }
     },
-    async choose(rec,c){
-      if(rec.hop==='function') return this.select('function',c.key);
-      return this.select('condition',c.key,null);
+    async choose(m,c){
+      const rec=m.data;
+      if(rec.hop==='function') return this.select('function',c.key,null,m,c.name);
+      return this.select('condition',c.key,null,m,c.name);
     },
     dimsOf(m){
       const d=m.data||{};
@@ -351,15 +396,20 @@ createApp({
       const ps=d.profiles||(d.target&&d.target.profiles)||[];
       return ps.length?this.chunkDims(ps):[];
     },
-    async select(t,key,profile){
+    async select(t,key,profile,panel,label){
+      // 连点保护：上一次选择未返回时忽略新点击（否则同一面板会重复触发分析）
+      if(this.busy) return;
+      // 乐观折叠：点下去就把面板变成回执，等服务端确认（存储层同样会写 consumed）
+      if(panel){
+        panel.meta = Object.assign({}, panel.meta, {consumed:true, chosen: label || (panel.meta&&panel.meta.chosen) || key});
+      }
       this.busy=true;
       try{
         const r=await fetch(`/api/chats/${this.chatId}/select`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_type:t,target_key:key,profile:profile})});
         const d=await r.json();
         if(!r.ok){ this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:d.detail||'操作失败'}); }
         else {
-          // 移除上一个 profile 面板的回执，仅追加
-          (d.messages||[]).forEach(m=>this.pushMsg(m));
+          (d.messages||[]).forEach(x=>this.pushMsg(x));
         }
         await this.openChatKeepScroll();
       } finally{ this.busy=false; }
@@ -369,12 +419,15 @@ createApp({
       const profile=sel.filter(Boolean).join('|');
       const key=m.data.target?.key || (m.data.candidates&&m.data.candidates[0]&&m.data.candidates[0].key);
       if(!key){ alert('缺少工况 key'); return; }
-      await this.select('condition',key,profile);
+      const label=`${(m.data.target&&m.data.target.name)||key}（${profile}）`;
+      await this.select('condition',key,profile,m,label);
     },
     async otherGo(m){
       const t=(this.otherText[m.message_id]||'').trim();
-      if(!t) return;
+      if(!t || this.busy) return;
       this.otherText[m.message_id]='';
+      // 改用手打目标：本面板作废（服务端 _run 同样会标记 consumed）
+      m.meta = Object.assign({}, m.meta, {consumed:true});
       this.busy=true;
       try{
         const r=await fetch(`/api/chats/${this.chatId}/messages`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t})});

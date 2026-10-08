@@ -196,6 +196,52 @@ def test_sse_stream(client):
     assert "event: message" in body and "event: done" in body
 
 
+def test_panel_becomes_receipt_after_click(client):
+    """候选面板是一次性的：点选后标记 consumed，重复点击不会复活旧选项。"""
+    chat = client.post("/api/chats").json()
+    cid = chat["chat_id"]
+    _upload(client, cid, "abs_dry100_dist_abn.mf4")
+
+    # 模糊提问 → 工况面板（ABS 三个工况并列）
+    r = client.post(f"/api/chats/{cid}/messages", json={"text": "制动表现怎么样"}).json()
+    panels = [m for m in r["messages"] if m["kind"] == "target_options"]
+    assert panels and panels[0]["data"]["hop"] == "condition"
+    pid = panels[0]["message_id"]
+    key = "abs_full_brake_dry_asphalt_100kph"
+
+    # 点选面板项 → 面板在存储层被消费，并记录点了什么
+    r2 = client.post(f"/api/chats/{cid}/select",
+                     json={"target_type": "condition", "target_key": key}).json()
+    assert [m["kind"] for m in r2["messages"]] == ["analysis_result"]
+    stored = client.get(f"/api/chats/{cid}").json()["messages"]
+    done = next(m for m in stored if m["message_id"] == pid)
+    assert done["meta"]["consumed"] is True
+    assert done["meta"]["chosen"] == "ABS 干沥青 100kph 全力制动"
+
+    # 分析结果本身不是面板：重复点选只会新增结果，不会把旧面板退回可点状态
+    client.post(f"/api/chats/{cid}/select",
+                json={"target_type": "condition", "target_key": key})
+    stored2 = client.get(f"/api/chats/{cid}").json()["messages"]
+    again = next(m for m in stored2 if m["message_id"] == pid)
+    assert again["meta"]["consumed"] is True
+
+
+def test_message_run_consumes_panels(client):
+    """改用文字提问时，此前的面板同样失效（避免用户回头误点旧选项）。"""
+    chat = client.post("/api/chats").json()
+    cid = chat["chat_id"]
+    _upload(client, cid, "abs_wet50_normal.mf4")
+    r = client.post(f"/api/chats/{cid}/messages", json={"text": "制动表现怎么样"})
+    first = [m for m in r.json()["messages"] if m["kind"] == "target_options"]
+    assert first, r.json()
+    pid = first[0]["message_id"]
+
+    client.post(f"/api/chats/{cid}/messages", json={"text": "玄武岩 60kph 全力制动"})
+    stored = client.get(f"/api/chats/{cid}").json()["messages"]
+    old = next(m for m in stored if m["message_id"] == pid)
+    assert old["meta"].get("consumed") is True
+
+
 def test_debug_pages(client):
     assert client.get("/debug").status_code == 200
     assert isinstance(client.get("/api/debug/traces").json(), list)
