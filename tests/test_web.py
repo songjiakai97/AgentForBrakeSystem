@@ -1,5 +1,6 @@
 """Web 链路端到端测试（离线模式，覆盖 demo §8 验收）。"""
 
+import math
 import os
 import warnings
 
@@ -139,6 +140,34 @@ def test_profile_switch_changes_verdict(client):
     a2 = [m for m in s2["metrics"] if m["key"].endswith("acc_avg")][0]
     assert a4["status"] == "abnormal" and a4["profile"] == "4WD"
     assert a2["status"] == "ok" and a2["profile"] == "2WD"
+
+
+def test_degenerate_window_serializes_as_null(client):
+    """退化窗口端点是 NaN：响应边界必须归一为 null，否则 JSONResponse 直接 500。"""
+    chat = client.post("/api/chats").json()
+    cid = chat["chat_id"]
+    _upload(client, cid, "abs_dry100_no_v0.mf4")
+    key = "abs_full_brake_dry_asphalt_100kph"
+    r = client.post(f"/api/chats/{cid}/select",
+                    json={"target_type": "condition", "target_key": key})
+    assert r.status_code == 200, r.text
+    msgs = [m for m in r.json()["messages"] if m["kind"] == "analysis_result"]
+    assert msgs, r.json()
+    sample = msgs[0]["data"]["samples"][0]
+    assert sample["window"]["t_start"] is None
+    assert sample["window"]["t_end"] is None
+    assert all(mm["ts_range"] is None or all(v is None or math.isfinite(v) for v in mm["ts_range"])
+               for mm in sample["metrics"])
+    assert set(sample["status_summary"]) and sample["status_summary"]["missing"] > 0
+
+    sid = sample["sample_id"]
+    for url in (f"/api/analyses/{msgs[0]['data']['analysis_id']}",
+                f"/api/analyses/{sid}", f"/api/analyses/{sid}/timeseries"):
+        rr = client.get(url)
+        assert rr.status_code == 200, f"{url}: {rr.text[:120]}"
+    # 文本确认没有泄漏 NaN/Infinity 字面量
+    assert "NaN" not in client.get(f"/api/analyses/{sid}").text
+    assert "Infinity" not in client.get(f"/api/analyses/{sid}").text
 
 
 def test_delete_chat_cascades(client):

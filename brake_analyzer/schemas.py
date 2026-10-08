@@ -1,7 +1,29 @@
 """内核共享数据结构（design.md §6 / §10）。"""
 
+import math
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+
+def fnum(v: Any) -> Optional[float]:
+    """单个浮点响应值：NaN/Inf → None。"""
+    return json_safe(v)
+
+
+def json_safe(obj):
+    """递归清洗响应体：非有限浮点（NaN/Inf）一律转为 None。
+
+    Starlette 的 JSONResponse 以 allow_nan=False 序列化，内核里合法的 NaN
+    （如退化事件窗口端点）会直接抛 ValueError，因此必须在响应边界归一。
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
 
 
 @dataclass
@@ -84,7 +106,7 @@ class MetricResult:
             "category": self.category,
             "value": self.value,
             "unit": self.unit,
-            "ts_range": list(self.ts_range) if self.ts_range else None,
+            "ts_range": ([fnum(v) for v in self.ts_range] if self.ts_range else None),
             "status": self.status,
             "ok_range": self.ok_range,
             "profile": self.profile,
@@ -172,9 +194,9 @@ class AnalysisResult:
                     "run_index": s.run_index,
                     "file_name": s.file_name,
                     "window": {
-                        "t_start": s.window.t_start,
-                        "t_end": s.window.t_end,
-                        "anchor": s.window.anchor,
+                        "t_start": fnum(s.window.t_start),
+                        "t_end": fnum(s.window.t_end),
+                        "anchor": fnum(s.window.anchor),
                     },
                     "analysis_id": s.analysis_id,
                     "status_summary": s.status_summary(),

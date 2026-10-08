@@ -10,7 +10,7 @@ import warnings
 warnings.filterwarnings("ignore", module="asammdf")
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query  # noqa: E402
-from fastapi.responses import HTMLResponse, StreamingResponse  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 from typing import List, Optional  # noqa: E402
@@ -21,6 +21,7 @@ from brake_analyzer.configs import ConfigError, load_configs  # noqa: E402
 from brake_analyzer.events.segment import is_valid  # noqa: E402
 from brake_analyzer.llm.client import LlmClient, TraceStore  # noqa: E402
 from brake_analyzer.llm.kb import KnowledgeBase  # noqa: E402
+from brake_analyzer.schemas import json_safe  # noqa: E402
 from web.store import Store  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -29,7 +30,20 @@ KB_DIR = os.path.join(ROOT, "knowledge")
 FRONTEND = os.path.join(ROOT, "web", "frontend")
 ALLOWED_EXT = {".mf4"}
 
-app = FastAPI(title="Brake Agent Demo", docs_url="/api/docs", openapi_url="/api/openapi.json")
+
+class SafeJSONResponse(JSONResponse):
+    """边界防护：内核合法的 NaN/Inf 归一为 null，避免 allow_nan=False 抛错。"""
+
+    def render(self, content) -> bytes:
+        return super().render(json_safe(content))
+
+
+app = FastAPI(
+    title="Brake Agent Demo",
+    docs_url="/api/docs",
+    openapi_url="/api/openapi.json",
+    default_response_class=SafeJSONResponse,
+)
 
 try:
     CFG = load_configs(CONFIG_DIR)
@@ -207,7 +221,8 @@ async def api_send_stream(cid: str, body: MessageIn):
 
     def gen():
         for ev in ENGINE.stream(chat, body.text.strip()):
-            yield f"event: {ev['event']}\ndata: {json.dumps(ev['data'], ensure_ascii=False, default=str)}\n\n"
+            # allow_nan=False：SSE 分帧依赖合法 JSON，NaN 会让前端解析整帧失败
+            yield f"event: {ev['event']}\ndata: {json.dumps(json_safe(ev['data']), ensure_ascii=False, default=str, allow_nan=False)}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

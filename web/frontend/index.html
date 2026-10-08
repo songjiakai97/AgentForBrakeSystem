@@ -250,7 +250,8 @@ createApp({
   },
   methods:{
     fmt(t){ return t==null?'—':Number(t).toFixed(2); },
-    dur(w){ return w? (w.t_end-w.t_start).toFixed(2):'0'; },
+    dur(w){ if(!w||w.t_start==null||w.t_end==null) return '0'; const d=w.t_end-w.t_start;
+      return isFinite(d)? d.toFixed(2):'0'; },
     val(x){ if(x.value==null) return '—'; return Number(x.value).toFixed(2); },
     range(x){ if(!x.ok_range) return '无限值'; const[lo,hi]=x.ok_range;
       if(lo!=null&&hi!=null)return `${lo}~${hi}`; if(lo!=null)return `≥${lo}`; return `≤${hi}`; },
