@@ -149,7 +149,7 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
       <div v-if="!chat" class="empty">加载中…</div>
       <template v-else>
       <div v-if="!chat.messages.length" class="empty">
-        上传 .mf4 数据文件，然后描述要分析的目标，例如：<br>
+        上传 .mf4 / .blf 数据文件，然后描述要分析的目标，例如：<br>
         「干沥青 100kph 全力制动的制动距离怎么样」<br>「玄武岩 0-60 全油门加速打滑超限了吗」
       </div>
       <div v-for="m in chat.messages" :key="m.message_id" class="msg" :class="[m.role, m.kind==='error'?'error':'']">
@@ -282,14 +282,14 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
       </div>
       <div class="pending" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px" v-if="samples.length">
         <span style="font-size:11px;color:var(--muted);align-self:center">合成样例:</span>
-        <span v-for="s in samples.slice(0,8)" :key="s" class="fchip" style="color:#7dd3fc;cursor:pointer" @click="loadSample(s)" title="点击载入到本对话">⬇ {{s.replace('.mf4','')}}</span>
+        <span v-for="s in shownSamples" :key="s.name" class="fchip" style="color:#7dd3fc;cursor:pointer" @click="loadSample(s)" :title="`点击载入到本对话（${s.format}）`">⬇ {{s.name.replace(/\.(mf4|blf)$/,'')}}<i style="font-style:normal;opacity:.6">{{s.format==='blf'?'·blf':''}}</i></span>
       </div>
       <div class="pending" v-if="pending.length">
         <span v-for="(p,i) in pending" :key="i" class="fchip">📎 {{p.name}}<button @click="pending.splice(i,1)">✕</button></span>
       </div>
       <div class="inputrow">
-        <button class="addbtn" @click="$refs.file.click()" title="仅支持 .mf4">+</button>
-        <input ref="file" type="file" accept=".mf4" multiple style="display:none" @change="pickFiles">
+        <button class="addbtn" @click="$refs.file.click()" title="支持 .mf4 / .blf">+</button>
+        <input ref="file" type="file" :accept="acceptAttr" multiple style="display:none" @change="pickFiles">
         <textarea v-model="draft" placeholder="描述要分析的功能/工况，如：干沥青 100kph 全力制动" @keydown.enter.exact.prevent="send"></textarea>
         <button class="sendbtn" :disabled="busy" @click="send">发送</button>
       </div>
@@ -322,6 +322,18 @@ createApp({
     live: blankLive(), lastSeq: 0, currentRunId: '', runCid: '',
     chartData:null, chartTitle:'', chartGroups:[], chartHidden:[], chartFull:null, _chart:null,
   }},
+  computed:{
+    // 样例条带按格式分组显示：MF4 取前 6 个 + 全部 BLF，避免 BLF 被 MF4 挤出视野
+    shownSamples(){
+      const mf4 = this.samples.filter(s=>s.format==='mf4').slice(0,6);
+      const blf = this.samples.filter(s=>s.format==='blf');
+      return [...mf4, ...blf];
+    },
+    acceptAttr(){
+      const e = (this.meta.allowed_upload_ext||['.mf4','.blf']);
+      return e.join(',');
+    },
+  },
   async mounted(){
     try{ this.meta = await (await fetch('/api/meta')).json(); }catch(e){}
     try{ this.samples = await (await fetch('/api/samples')).json(); }catch(e){}
@@ -411,15 +423,17 @@ createApp({
       await this.openChat(this.chatId);
     },
     async loadSample(s){
-      const r=await fetch('/api/samples/'+s);
+      const r=await fetch('/api/samples/'+s.name);
       if(!r.ok){ alert('样例下载失败'); return; }
       const b=await r.blob();
-      this.pending.push(new File([b],s,{type:'application/octet-stream'}));
+      this.pending.push(new File([b],s.name,{type:'application/octet-stream'}));
     },
     pickFiles(ev){
       const fs=[...ev.target.files];
+      const exts=(this.meta.allowed_upload_ext||['.mf4','.blf']);
       for(const f of fs){
-        if(!f.name.toLowerCase().endsWith('.mf4')){ alert(`demo 仅接受 .mf4 文件：${f.name} 已忽略`); continue; }
+        const low=f.name.toLowerCase();
+        if(!exts.some(e=>low.endsWith(e))){ alert(`仅接受 ${exts.join('/')} 文件：${f.name} 已忽略`); continue; }
         this.pending.push(f);
       }
       ev.target.value='';

@@ -67,13 +67,14 @@ def test_functions_conditions_kb(client):
     assert kb["manual"] and kb["cases"]
 
 
-def test_reject_non_mf4(client):
+def test_reject_unsupported_ext(client):
     chat = client.post("/api/chats").json()
     r = client.post(
         f"/api/chats/{chat['chat_id']}/files",
-        files={"files": ("x.blf", b"abc", "application/octet-stream")},
+        files={"files": ("x.csv", b"abc", "application/octet-stream")},
     )
     assert r.status_code == 400
+    assert "仅接受" in r.json()["detail"]
 
 
 def test_offline_two_hop_and_analysis(client):
@@ -310,6 +311,119 @@ def test_chart_layout_validation():
     # 未入组的逻辑信号自动补为独立行
     placed = {s for g in cfg.chart_layout for s in g.signals}
     assert "distance_vbox" in placed
+
+
+# ---------------------------------------------------------------- BLF 上传链路
+
+BLF_DATA = os.path.join(ROOT, "tests", "data", "blf")
+
+
+def _blf_ready(client):
+    m = client.get("/api/meta").json()
+    return m.get("blf_ready", False) and ".blf" in m["allowed_upload_ext"]
+
+
+def _upload_blf(client, cid, fname):
+    with open(os.path.join(BLF_DATA, fname), "rb") as f:
+        r = client.post(
+            f"/api/chats/{cid}/files",
+            files={"files": (fname, f, "application/octet-stream")},
+        )
+    assert r.status_code == 200, r.text
+    return r.json()["files"][0]
+
+
+def test_samples_list_both_formats(client):
+    if not os.path.isdir(BLF_DATA):
+        pytest.skip("BLF demo 数据缺失")
+    samples = client.get("/api/samples").json()
+    assert all({"name", "format"} <= set(s) for s in samples)
+    assert any(s["format"] == "mf4" for s in samples)
+    if _blf_ready(client):
+        assert any(s["format"] == "blf" for s in samples), samples
+        one = next(s for s in samples if s["format"] == "blf")
+        r = client.get(f"/api/samples/{one['name']}")
+        assert r.status_code == 200 and len(r.content) > 1000
+    assert client.get("/api/samples/nope.mf4").status_code == 404
+
+
+def test_sample_download_rejects_traversal():
+    """basename 兜住 ../：只允许两个 demo 目录内的同格式文件。"""
+    from fastapi import HTTPException
+
+    from web.main import api_sample_download
+
+    for bad in ("../../etc/passwd", "..%2Fetc/passwd", "x.exe", "passwd"):
+        with pytest.raises(HTTPException) as ei:
+            api_sample_download(bad)
+        assert ei.value.status_code == 404
+
+
+def test_blf_upload_and_analysis(client):
+    """上传 .blf → 离线两跳 → 分析结果与图表走同一链路。"""
+    if not _blf_ready(client) or not os.path.isdir(BLF_DATA):
+        pytest.skip("环境无 python-can/cantools 或缺 BLF demo 数据")
+    chat = client.post("/api/chats").json()
+    cid = chat["chat_id"]
+    _upload_blf(client, cid, "abs_dry100_dist_abn.blf")
+    att = [m for m in client.get(f"/api/chats/{cid}").json()["messages"]
+           if m["kind"] == "attachment"]
+    assert "（blf）" in att[-1]["content"]
+
+    r = client.post(f"/api/chats/{cid}/messages",
+                    json={"text": "干沥青 100kph 全力制动，制动距离超了吗"}).json()
+    msg = [m for m in r["messages"] if m["kind"] == "analysis_result"]
+    assert msg, r
+    sample = msg[0]["data"]["samples"][0]
+    st = {m["key"].rsplit(".", 1)[1]: m["status"] for m in sample["metrics"]}
+    assert st["brake_distance"] == "abnormal" and st["yaw_rate_max"] == "ok"
+    assert any(v["rule_id"] == "abs_dist_abnormal" for v in sample["verdicts"])
+    assert msg[0]["data"]["file_name"] == "abs_dry100_dist_abn.blf"
+
+    # 图表数据来自 BLF 解码后的信号（通道 0 + DBC 量化）
+    body = client.get(f"/api/analyses/{sample['sample_id']}/timeseries").json()
+    labels = [g["label"] for g in body["groups"]]
+    assert "车速 / 轮速" in labels
+    speed = next(g for g in body["groups"] if g["label"] == "车速 / 轮速")
+    assert "speed_vbox" in speed["signals"]
+
+
+def test_blf_missing_channel_reported(client):
+    """缺横摆帧的 BLF：指标 missing + data_quality 规则命中，链路不报错。"""
+    if not _blf_ready(client) or not os.path.isdir(BLF_DATA):
+        pytest.skip("环境无 python-can/cantools 或缺 BLF demo 数据")
+    chat = client.post("/api/chats").json()
+    cid = chat["chat_id"]
+    _upload_blf(client, cid, "abs_wet60_no_yaw.blf")
+    r = client.post(f"/api/chats/{cid}/select", json={
+        "target_type": "condition",
+        "target_key": "abs_full_brake_wet_basalt_60kph"}).json()
+    msg = [m for m in r["messages"] if m["kind"] == "analysis_result"][0]
+    sample = msg["data"]["samples"][0]
+    st = {m["key"].rsplit(".", 1)[1]: m["status"] for m in sample["metrics"]}
+    assert st["yaw_rate_max"] == "missing"
+    assert any(v["rule_id"] == "abs_yaw_missing" for v in sample["verdicts"])
+
+
+def test_mixed_formats_in_one_chat(client):
+    """同一会话混放 MF4 与 BLF：两个文件都出结果，Loader 各按扩展名选。"""
+    if not _blf_ready(client) or not os.path.isdir(BLF_DATA):
+        pytest.skip("环境无 python-can/cantools 或缺 BLF demo 数据")
+    chat = client.post("/api/chats").json()
+    cid = chat["chat_id"]
+    _upload(client, cid, "abs_dry100_dist_abn.mf4")
+    _upload_blf(client, cid, "abs_dry100_dist_abn.blf")
+    r = client.post(f"/api/chats/{cid}/select", json={
+        "target_type": "condition",
+        "target_key": "abs_full_brake_dry_asphalt_100kph"}).json()
+    msg = [m for m in r["messages"] if m["kind"] == "analysis_result"]
+    assert len(msg) == 2, r
+    names = {m["data"]["file_name"] for m in msg}
+    assert names == {"abs_dry100_dist_abn.mf4", "abs_dry100_dist_abn.blf"}
+    # 同一剖面两条路径的判定一致
+    for m in msg:
+        st = {x["key"].rsplit(".", 1)[1]: x["status"] for x in m["data"]["samples"][0]["metrics"]}
+        assert st["brake_distance"] == "abnormal"
 
 
 def test_debug_pages(client):

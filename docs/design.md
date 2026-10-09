@@ -228,10 +228,10 @@ brake-agent/
 - 缺失信号返回空 `ts`/`values`，不抛异常，由指标/规则层标记 missing。
 - 信号映射全局共享；功能与工况差异只体现在指标集、参数、阈值。
 - 每个 `SignalData` 的 `ts` 统一相对起点偏移，便于跨文件对齐。
-- demo 阶段 Web 入口只开放 MF4（不依赖外部 DBC 文件）；`BLFLoader` 作为内核能力保留，
-  等真实 CAN 数据与 DBC 到位后再接入上传入口。BLF 侧的 demo 数据已在仓库内跑通
-  （`scripts/generate_demo_blf.py` 用 cantools 生成唯一一份 DBC、python-can 写 BLF，
-  通道全 0），由 `tests/test_blf_demo.py` 覆盖，只差上传入口。
+- demo 阶段 Web 入口接受 `.mf4` 与 `.blf`：Loader 按扩展名选（`pipeline.make_loader`），
+  BLF 走 `signals_blf.yaml` + 唯一一份 demo DBC，映射仍由服务端固定，用户不提供映射配置。
+  没装 `python-can`/`cantools` 时 `.blf` 不进上传白名单（`/api/meta.allowed_upload_ext` 随之变化），
+  避免收了不能分析的文件。
 
 `SignalData` 契约：
 
@@ -256,6 +256,25 @@ Loader 实现：
 
 - `MF4Loader(signal_maps)`：基于 asammdf，按 `candidates` 顺序用 `mdf.whereis` 解析首个命中通道；`raw=False` 取物理值，文本采样再以 `raw=True` 回取编码值构造 `choices`。
 - `BLFLoader(dbc_files, signal_maps)`：基于 python-can `BLFReader` + cantools 解码。`candidates` 为三元组 `[dbc_alias, msg_id, signal_name]`；`msg_id` 字符串约定：`"0x123"` 标准帧、`"0x123x"` 扩展帧、裸 int 按标准帧兼容处理。单次遍历文件，按 (frame_id, is_extended, channel) 建帧索引，逐帧解码后抽取各信号。
+- `make_loader(path, cfg, blf_cfg=None)`（`pipeline.py`）：按扩展名选 Loader，`.blf` → `BLFLoader`，其余 → `MF4Loader`；未给 `blf_cfg` 时分析 `.blf` 直接报"未启用 BLF"。
+  `ChatEngine` 按扩展名缓存 Loader 实例（`_loaders`），`BLFLoader` 的 DBC 解析在会话生命周期内只做一次。
+- 解码/加载失败（如非 BLF 内容冒充 `.blf`）不抛给用户：Loader 返回空信号，pipeline 补退化窗口，
+  指标全 missing、规则命中 data_quality。
+
+跨信号时间对齐的现状与缺口（真实 BLF/MF4 报文周期不一致时才会暴露）：
+
+- Loader 只做「同一文件内的统一相对时间原点」（各信号各自保留原生栅格），不做重采样。
+- 需要**点值**的地方已经是插值口径：分段交叉点用线性插值定位，`interp_at` 取窗口端点值，
+  `signal_span`/`speed_slope` 都靠它 → 这类指标对栅格不一致天然免疫。
+- 需要**窗口内样本**的地方仍按原始栅格，两处已知缺口：
+  1. `window_slice` 要求窗口内至少有一个原始采样点，否则判 `None`。信号周期远大于事件时长时
+     （如 100 ms 帧 + 30 ms 窗口）会出现「明明可算却判 missing」；
+  2. `wheel_slip_max` 以**第一个命中信号的栅格**作参考轴，把其它轮速插到该轴上。慢帧作参考时
+     会削掉快帧峰值（demo 剖面实测 19.51 vs 19.98，约 −2.4 %）；参考信号时间跨度不覆盖窗口时
+     `np.interp` 在两端静默钳位（实测 vbox 只覆盖中段时 slip 被算成常数差）。
+- 结论：对齐应加在**指标层**（共享工具把相关信号插到"最细可用栅格"的公共轴上），
+  而不是在 Loader 里预重采样 —— 后者会丢原始采样、放大内存、并对只看端点的指标毫无收益。
+  该项未定案前不改判定数值，故列入 §15 待办。
 
 配置 Schema 见 §9.6。
 
@@ -530,7 +549,7 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 | GET | `/api/chats` | 对话列表 |
 | GET | `/api/chats/{cid}` | 对话详情 |
 | DELETE | `/api/chats/{cid}` | 删除对话 |
-| POST | `/api/chats/{cid}/files` | 上传一个/多个数据文件 |
+| POST | `/api/chats/{cid}/files` | 上传一个/多个数据文件（`.mf4`/`.blf`，按扩展名选 Loader） |
 | DELETE | `/api/chats/{cid}/files/{fid}` | 移除文件 |
 | POST | `/api/chats/{cid}/messages` | 发送用户消息 |
 | POST | `/api/chats/{cid}/messages/stream` | SSE 流式发送 |
@@ -576,8 +595,10 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 - 点「+」多选文件。
 - 文件仅暂存在输入区上方，不立即上传。
 - 点发送时先批量上传，再发送文本。
-- demo 阶段仅接受 `.mf4`，其余扩展名前端拒绝并提示；`signals_mf4.yaml` 由服务端固定，
-  用户不提供映射配置。BLF/DBC 能力在内核中已实现，接入真实数据时再开放上传。
+- demo 阶段接受 `.mf4` 与 `.blf`，其余扩展名前端拒绝并提示；白名单来自 `/api/meta` 的
+  `allowed_upload_ext`（未安装 BLF 依赖时不含 `.blf`），前端 `accept` 与校验都按它渲染。
+  两套映射（`signals_mf4.yaml` / `signals_blf.yaml`）由服务端固定，用户不提供映射配置。
+- 合成样例条带同时列 MF4 与 BLF（`/api/samples` 返回 `{name, format}`），BLF 条目带 `·blf` 标记。
 
 **② 功能面板（`hop=function`）**
 
@@ -1269,7 +1290,10 @@ python scripts/generate_demo_blf.py --period 0.02   # 改发送周期（默认 1
 
 - 复现性对比：跨文件 × 事件的同工况 sample 聚合统计与叠画（本期已移除）。
 - 报告导出：Matplotlib 静态图 + Markdown/HTML 报告，进而 PDF/Excel。
-- 更多格式：ASC/ARXML；开放 BLF 上传（含用户自备 DBC）。
+- 更多格式：ASC/ARXML；BLF 上传已开放（服务端固定 demo DBC），下一步是允许用户自备 DBC
+  并与会话内文件配对上传。
+- 跨信号时间对齐（重采样）：当前只在需要点值的场合插值，峰值类指标仍按"首个命中信号的栅格"
+  取样；真实数据里快慢帧混布会让峰值被慢帧削低，见 §6.2 的对齐缺口与 §15 待办。
 - 车型 profile 中心化管理。
 - `tuning_params` 升级为结构化标定库（带单位、当前值、值域）。
 - 知识库管理后台。

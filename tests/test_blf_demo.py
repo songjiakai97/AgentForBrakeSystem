@@ -352,3 +352,60 @@ def test_abnormal_case_flags_distance(cfg, blf_loader):
     m = _metric_map(res)["abs_full_brake_dry_asphalt_100kph.brake_distance"]
     assert m.status == "abnormal"
     assert float(m.value) > 40
+
+
+# ---------------------------------------------------------------- 5. 按扩展名选 Loader
+
+class TestLoaderSelection:
+    def _engine(self, blf_cfg, tmp_path):
+        from brake_analyzer.agent.engine import ChatEngine
+        from brake_analyzer.llm.client import LlmClient
+        from brake_analyzer.llm.kb import KnowledgeBase
+        from web.store import Store
+
+        store = Store(upload_dir=str(tmp_path / "uploads"))
+        return ChatEngine(load_configs(CONFIG_DIR), LlmClient(),
+                          KnowledgeBase(os.path.join(ROOT, "knowledge")), store,
+                          blf_cfg=blf_cfg), store
+
+    def test_make_loader_by_ext(self, cfg, blf_cfg):
+        from brake_analyzer.loaders import BLFLoader, MF4Loader
+        from brake_analyzer.pipeline import NoDataError, make_loader
+
+        assert isinstance(make_loader("a.mf4", cfg, blf_cfg=blf_cfg), MF4Loader)
+        assert isinstance(make_loader("a.blf", cfg, blf_cfg=blf_cfg), BLFLoader)
+        # 没给 blf_cfg 时 .blf 明确报"未启用 BLF"，不静默按 MF4 解
+        with pytest.raises(NoDataError, match="BLF"):
+            make_loader("a.blf", cfg)
+
+    def test_engine_caches_loader_per_ext(self, blf_cfg, tmp_path):
+        """BLFLoader 构造要解析 DBC，同一扩展名必须复用同一实例。"""
+        eng, _ = self._engine(blf_cfg, tmp_path)
+        first = eng._loader_for("x.blf")
+        assert eng._loader_for("y.blf") is first
+        assert eng._loader_for("z.mf4") is not first
+
+    def test_engine_analyzes_blf_when_cfg_given(self, blf_cfg, tmp_path):
+        """会话内只有 .blf 时，引擎走 BLF 路径并出分析结果。"""
+        eng, store = self._engine(blf_cfg, tmp_path)
+        chat = store.create_chat()
+        with open(_require("abs_dry100_dist_abn.blf"), "rb") as f:
+            store.add_file(chat, "abs_dry100_dist_abn.blf", f.read())
+        added = eng._analyze(chat, "abs_full_brake_dry_asphalt_100kph", None)
+        kinds = [m.kind for m in added]
+        assert "analysis_result" in kinds, kinds
+        res = [m for m in added if m.kind == "analysis_result"][0]
+        st = {x["key"].rsplit(".", 1)[1]: x["status"]
+              for s in res.data["samples"] for x in s["metrics"]}
+        assert st["brake_distance"] == "abnormal"
+
+    def test_engine_without_blf_cfg_reports_error(self, tmp_path):
+        """没配 BLF 时不崩：按文件报错并汇总，不产出分析结果。"""
+        eng, store = self._engine(None, tmp_path)
+        chat = store.create_chat()
+        with open(_require("abs_dry100_dist_abn.blf"), "rb") as f:
+            store.add_file(chat, "abs_dry100_dist_abn.blf", f.read())
+        added = eng._analyze(chat, "abs_full_brake_dry_asphalt_100kph", None)
+        errs = [m for m in added if m.kind == "error"]
+        assert errs and "BLF" in errs[0].content
+        assert not [m for m in added if m.kind == "analysis_result"]

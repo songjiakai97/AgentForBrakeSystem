@@ -12,6 +12,7 @@
 """
 
 import json
+import os
 import threading
 from typing import Dict, List, Optional, Tuple
 
@@ -33,11 +34,15 @@ from ..schemas import AnalysisResult
 
 class ChatEngine:
     def __init__(self, cfg: AppConfigs, llm: LlmClient, kb: KnowledgeBase, store,
-                 budget: Optional[ContextBudget] = None):
+                 budget: Optional[ContextBudget] = None, blf_cfg=None):
         self.cfg = cfg
         self.llm = llm
         self.kb = kb
         self.store = store
+        # BLF 侧配置（signals_blf.yaml 校验结果）；None 时 .blf 文件按"未启用 BLF"报错
+        self.blf_cfg = blf_cfg
+        # Loader 按扩展名复用：BLFLoader 构造时要解析 DBC，逐文件新建是纯浪费
+        self._loaders: Dict[str, object] = {}
         self.budget = budget or ContextBudget.from_env()
         # 摘要子请求要知道是哪个会话（trace 按 chat_id 过滤），但多个会话并行跑线程
         self._tls = threading.local()
@@ -333,6 +338,15 @@ class ChatEngine:
             "hint": "该功能需先选档位再分析",
         })
 
+    def _loader_for(self, path: str):
+        """按扩展名取 Loader 实例（同一实例复用，DBC 只解析一次）。"""
+        from ..pipeline import make_loader
+
+        ext = os.path.splitext(path)[1].lower() or "?"
+        if ext not in self._loaders:
+            self._loaders[ext] = make_loader(path, self.cfg, blf_cfg=self.blf_cfg)
+        return self._loaders[ext]
+
     # ------------------------------------------------------------ 分析
     def _analyze(self, chat, condition_id: str, profile: Optional[str],
                  as_tool: bool = False) -> List:
@@ -340,7 +354,7 @@ class ChatEngine:
         if cond is None:
             return [self._msg(chat, "error", f"未知道况：{condition_id}")]
         if not chat.files:
-            return [self._msg(chat, "error", "会话内还没有数据文件，请先上传 .mf4 文件再分析。")]
+            return [self._msg(chat, "error", "会话内还没有数据文件，请先上传 .mf4/.blf 文件再分析。")]
 
         chat.selected_function = cond.function
         chat.selected_condition = cond.id
@@ -360,9 +374,7 @@ class ChatEngine:
             sess = self.store.session(f.file_id)
             try:
                 if sess.signals is None:
-                    from ..loaders.mf4 import MF4Loader
-
-                    sess.signals = MF4Loader(self.cfg.signal_maps).load(f.path)
+                    sess.signals = self._loader_for(f.path).load(f.path)
                 res = analyze_signals(
                     sess.signals, cond.id, self.cfg,
                     file_id=f.file_id, file_name=f.name, profile=profile,

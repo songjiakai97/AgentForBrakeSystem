@@ -155,15 +155,19 @@ def run_analysis_on_files(
     files: List[dict],
     condition_id: str,
     profile: Optional[str] = None,
+    blf_cfg=None,
 ) -> List[dict]:
-    """对会话内全部文件跑指定工况。files: [{file_id,name,path}]。"""
+    """对会话内全部文件跑指定工况。files: [{file_id,name,path}]。
+
+    blf_cfg 为 signals_blf.yaml 的校验结果；给出时 .blf 文件走 BLFLoader。
+    """
     out = []
     for f in files:
         try:
             res = analyze_file(
                 f["path"], condition_id, cfg,
                 file_id=f.get("file_id", ""), file_name=f.get("name", ""),
-                profile=profile,
+                profile=profile, blf_cfg=blf_cfg,
             )
             out.append({"ok": True, "result": res})
         except NoDataError as e:

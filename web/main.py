@@ -17,7 +17,9 @@ from typing import List, Optional  # noqa: E402
 
 from brake_analyzer.agent.engine import ChatEngine  # noqa: E402
 from brake_analyzer.charts.html import build_chart_option, timeseries_payload  # noqa: E402
-from brake_analyzer.configs import ConfigError, load_configs  # noqa: E402
+from brake_analyzer.configs import (  # noqa: E402
+    ConfigError, load_blf_config, load_configs,
+)
 from brake_analyzer.events.segment import is_valid  # noqa: E402
 from brake_analyzer.llm.client import LlmClient, TraceStore  # noqa: E402
 from brake_analyzer.llm.context import ContextBudget  # noqa: E402
@@ -31,7 +33,16 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = os.path.join(ROOT, "configs")
 KB_DIR = os.path.join(ROOT, "knowledge")
 FRONTEND = os.path.join(ROOT, "web", "frontend")
-ALLOWED_EXT = {".mf4"}
+# BLF 需要 DBC 解码，给前端做能力提示（缺库时不阻止启动，只在分析该文件时报错）
+try:
+    import can as _can           # noqa: F401
+    import cantools as _cantools  # noqa: F401
+    BLF_READY = True
+except ImportError:
+    BLF_READY = False
+
+# 上传白名单随依赖能力变化：没装 python-can/cantools 时 .blf 不收，避免收了不能分析
+ALLOWED_EXT = {".mf4"} | ({".blf"} if BLF_READY else set())
 
 
 class SafeJSONResponse(JSONResponse):
@@ -53,6 +64,12 @@ try:
 except ConfigError as e:
     raise RuntimeError(f"配置加载失败，服务拒绝启动：{e}")
 
+# BLF 侧配置同样启动期校验（结构非法直接拒绝启动；缺库只影响 .blf 文件本身）
+try:
+    BLF_CFG = load_blf_config(CONFIG_DIR, logical_names=set(CFG.signal_maps))
+except ConfigError as e:
+    raise RuntimeError(f"BLF 配置加载失败，服务拒绝启动：{e}")
+
 TRACES = TraceStore(cap=int(os.getenv("TRACE_STORE_MAX", "500")))
 STORE = Store()
 KB = KnowledgeBase(KB_DIR)
@@ -61,28 +78,33 @@ try:
     BUDGET = ContextBudget.from_env()
 except ValueError as e:
     raise RuntimeError(f"上下文预算配置无效，服务拒绝启动：{e}")
-ENGINE = ChatEngine(CFG, LLM, KB, STORE, budget=BUDGET)
+ENGINE = ChatEngine(CFG, LLM, KB, STORE, budget=BUDGET, blf_cfg=BLF_CFG)
 # 一轮 = 一个后台任务：与 HTTP 连接解耦，刷新/断网不再丢本轮回复
 RUNS = RunManager()
 
 
 @app.on_event("startup")
 def _ensure_demo_data():
-    """demo 样例可再生：缺失时自动生成（tests/data/mf4 不入库）。"""
-    data_dir = os.path.join(ROOT, "tests", "data", "mf4")
-    has_data = os.path.isdir(data_dir) and any(
-        f.endswith(".mf4") for f in os.listdir(data_dir)
-    )
-    if not has_data:
+    """demo 样例可再生：缺失时自动生成（tests/data/* 不入库）。"""
+    import sys
+
+    sys.path.insert(0, ROOT)
+    jobs = [
+        (os.path.join(ROOT, "tests", "data", "mf4"), ".mf4",
+         "scripts.generate_demo_data"),
+        # BLF 侧依赖 can/cantools；缺库或生成失败都只是没有样例，不影响服务
+        (os.path.join(ROOT, "tests", "data", "blf"), ".blf",
+         "scripts.generate_demo_blf"),
+    ]
+    for data_dir, ext, module in jobs:
+        if os.path.isdir(data_dir) and any(f.endswith(ext) for f in os.listdir(data_dir)):
+            continue
         try:
-            import sys
+            import importlib
 
-            sys.path.insert(0, ROOT)
-            from scripts.generate_demo_data import generate_all
-
-            generate_all(data_dir)
+            importlib.import_module(module).generate_all(data_dir)
         except Exception as e:  # 数据缺失不阻止服务启动
-            print(f"[warn] demo 样例生成失败: {e}")
+            print(f"[warn] demo 样例生成失败({ext}): {e}")
 
 
 def _chat_or_404(cid: str):
@@ -93,24 +115,38 @@ def _chat_or_404(cid: str):
 
 
 # ---------------------------------------------------------------- demo 样例数据
-SAMPLE_DIR = os.path.join(ROOT, "tests", "data", "mf4")
+SAMPLE_DIRS = {
+    "mf4": os.path.join(ROOT, "tests", "data", "mf4"),
+    "blf": os.path.join(ROOT, "tests", "data", "blf"),
+}
+MAX_SAMPLE_BYTES = 20 * 1024 * 1024
 
 
 @app.get("/api/samples")
 def api_samples():
-    if not os.path.isdir(SAMPLE_DIR):
-        return []
-    return sorted(
-        f for f in os.listdir(SAMPLE_DIR)
-        if f.endswith(".mf4") and os.path.getsize(os.path.join(SAMPLE_DIR, f)) < 20 * 1024 * 1024
-    )
+    """合成样例清单：MF4 在前、BLF 在后（BLF 仅在依赖可用时列出）。"""
+    out = []
+    for fmt in ("mf4", "blf"):
+        if fmt == "blf" and not BLF_READY:
+            continue
+        d = SAMPLE_DIRS[fmt]
+        if not os.path.isdir(d):
+            continue
+        for f in sorted(os.listdir(d)):
+            if not f.endswith("." + fmt):
+                continue
+            if os.path.getsize(os.path.join(d, f)) >= MAX_SAMPLE_BYTES:
+                continue
+            out.append({"name": f, "format": fmt})
+    return out
 
 
 @app.get("/api/samples/{name}")
 def api_sample_download(name: str):
     base = os.path.basename(name)
-    path = os.path.join(SAMPLE_DIR, base)
-    if not base.endswith(".mf4") or not os.path.isfile(path):
+    fmt = os.path.splitext(base)[1].lstrip(".").lower()
+    path = os.path.join(SAMPLE_DIRS.get(fmt, ""), base) if fmt in SAMPLE_DIRS else ""
+    if not path or not os.path.isfile(path):
         raise HTTPException(404, "样例不存在")
     from fastapi.responses import FileResponse
 
@@ -125,6 +161,7 @@ def api_meta():
         "model": LLM.model if LLM.available else None,
         "engine": "llm" if LLM.available else "offline",
         "allowed_upload_ext": sorted(ALLOWED_EXT),
+        "blf_ready": BLF_READY,
         "context": {
             **BUDGET.to_dict(),
             "summarizer": "llm" if LLM.available else "extractive",
@@ -209,13 +246,16 @@ async def api_upload(cid: str, files: List[UploadFile] = File(...)):
     out = []
     for uf in files:
         name = uf.filename or "unnamed.mf4"
-        if os.path.splitext(name)[1].lower() not in ALLOWED_EXT:
-            raise HTTPException(400, f"demo 仅接受 .mf4 上传，收到: {name}")
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in ALLOWED_EXT:
+            raise HTTPException(
+                400, f"仅接受 {'/'.join(sorted(ALLOWED_EXT))} 上传，收到: {name}"
+                     + ("" if BLF_READY else "（当前环境缺 python-can/cantools，BLF 不可用）"))
         content = await uf.read()
         entry = STORE.add_file(chat, name, content)
         out.append(entry.to_dict())
         STORE.add_message(chat, "assistant", "attachment",
-                          content=f"已接收文件 {name}", data=entry.to_dict())
+                          content=f"已接收文件 {name}（{ext.lstrip('.')}）", data=entry.to_dict())
     return {"files": out}
 
 
