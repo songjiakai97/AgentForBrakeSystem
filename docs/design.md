@@ -11,7 +11,7 @@
 - **异常识别**：基于可解释规则引擎判定指标状态与异常。
 - **标定指导**：规则引擎给出确定性结论后，由 LLM 结合知识库生成标定方向。
 - **图表展示**：Web 用 ECharts 交互式时序图，支持多测线叠加与异常窗口高亮。
-- **对话式交互**：Web 以聊天为主入口，支持多文件上传、两跳推荐、候选面板、分析结果卡片、时序图。
+- **对话式交互**：Web 以聊天为主入口，支持多文件上传、目标识别（渐进披露 + 候选面板）、分析结果卡片、时序图。
 
 ### 设计目标
 
@@ -47,6 +47,12 @@ Function（功能）
 
 指标实例键：`{condition_id}.{metric_key}`。
 
+**结构化定位键**：同一功能内 `maneuver + surface_code + params` 必须唯一确定一个工况，
+它是 §13 里 `resolve_condition` 的匹配依据（不是工况名相似度）。加载期校验（§6.1）：
+缺 `maneuver`/`surface_code` 或同功能内键值重复 → 直接 `ConfigError` 拒绝启动，
+因为这两类配置错误会让"该不该弹面板"变成随机行为。`params` 比较做了数值归一
+（`100` / `100.0` / `"100"` 同值），避免书写差异造成伪歧义。
+
 ### 2.3 功能元数据
 
 功能声明：
@@ -74,7 +80,7 @@ Web API（FastAPI）
         │
         ▼
 Agent 编排引擎
-  多轮对话 / 工具路由 / 两跳推荐
+  多轮对话 / 工具路由 / 目标识别（渐进披露）/ 上下文压缩
         │
         ▼
 Analysis Core
@@ -91,7 +97,8 @@ Analysis Core
 约束：
 
 - 前端请求全部经由 `agent/` 编排引擎。
-- LLM 只负责意图解析、候选推荐、语言化标定建议。
+- LLM 只负责槽位抽取（从描述里取 maneuver/路面/参数）、语言化标定建议；
+  「哪条工况」由配置索引精确匹配决定（§13），模型不在相似工况名之间挑。
 - 客观指标与异常判定完全由确定性内核完成。
 - 无 LLM Key 或网络失败时，离线确定性路由仍可跑通完整链路。
 
@@ -188,6 +195,8 @@ brake-agent/
 - 校验 `metrics.yaml` 覆盖所有被引用的 metric_key。
 - 校验 `rules.yaml` 引用的功能、工况、指标存在。
 - 校验 `conditions.yaml` 中出现的 profile 值都在功能 `profiles` 列表内（若功能声明了 profiles）。
+- 逐功能校验 §2.2 结构化定位键：每个工况都要有 `maneuver`/`surface_code`，且同一功能内
+  `maneuver+surface_code+params` 不重复（§13 的解析前提是"命中唯一"，配置歧义必须启动期失败）。
 
 加载失败即报出可读错误，阻止启动。
 
@@ -321,7 +330,9 @@ load(file)
 
 - `client.py`：OpenAI Compatible 客户端，`model` 从 `.env` 读取。
   - 无 Key 时降级为“仅规则结论”模式，界面明确提示。
-- `prompts.py`：将功能、工况、指标集、`RuleVerdict`、知识库片段组装成 prompt。
+- `prompts.py`：组装 prompt。分两层——常驻的只有功能层目录与会话状态（§13.1），工况层
+  由工具按需注入；标定建议 prompt 仍按「指标集 + `RuleVerdict` + 知识库片段」全量组装。
+  工具规格（含 enum）由 `build_tool_specs(cfg, scope_function)` 从配置生成。
 
 要求 LLM：
 
@@ -334,7 +345,7 @@ load(file)
 
 其他：
 
-- `context.py`：上下文预算与压缩（§6.10），阈值来自 `.env`。
+- `context.py`：上下文预算、压缩与一次性内容折叠（§6.10），阈值来自 `.env`。
 - `kb.py`：读取手册与案例。默认关键词/规则定位；可选向量检索。
 - `ingest.py`：Word/PDF 摄入为 Markdown 或结构化案例。
 
@@ -342,16 +353,24 @@ load(file)
 
 所有对话请求都经由 `agent/` 编排。
 
-工具集：
+工具集（四个，规格全部由配置生成，见 §13）：
 
-- `recommend_targets(query, max_items)`：两跳推荐入口，返回功能候选、工况候选或已解析结果。
-- `run_analysis_on_files(condition_id)`：对会话内全部已上传文件跑指定工况。
+- `resolve_condition(function_key?, maneuver?, surface_code?, params?)`：按 §2.2 唯一键
+  **结构化**定位工况。命中唯一返回 `hop=resolved`；键填不满返回 `hop=condition/function`
+  并给候选，由用户确认。取值域来自 `AppConfigs.vocab()`（enum），功能已定时
+  `run_analysis_on_files` 的 `condition_id` 进一步限定为 `scope_conditions(function)`。
+- `list_conditions(function_key)`：按需给出该功能全部工况（含唯一键属性），供模型填槽；
+  结果标 `transient`，只服务当次定位（§6.10）。
+- `run_analysis_on_files(condition_id, profile?)`：对会话内全部已上传文件跑指定工况。
+- `recommend_targets(query, max_items)`：两跳规则打分，保留为**兜底与离线路径**——
+  在线 LLM 不可用、或描述无法转成结构化槽位时使用，与离线路由同一实现，保证降级一致。
 
 说明：
 
 - 工况选择确认与档位选择由前端 `/select` 写入 `Chat.selected_*`，不作为 LLM 工具。
 - 文件由前端 chips 展示，`list_files` 不作为 LLM 工具。
-- 离线确定性路由内部可保留等价辅助方法，但不暴露给 LLM。
+- 工具规格由 `prompts.build_tool_specs(cfg, scope_function)` 生成，不写死在代码里；
+  新增功能/工况只改 YAML，prompt 与 enum 自动跟随。
 
 编排：
 
@@ -361,6 +380,13 @@ load(file)
   `seq` 写入缓冲区，SSE 只是缓冲区订阅者。客户端刷新/断网不会中断执行，重连
   `GET /api/runs/{id}/stream?after=<seq>` 可整轮回放或增量续传。
 - 真 tool-calling：多轮循环，最多 6 轮。
+- 工具 `hop` 的落库规则：`function`/`condition`/`profile` → 落 `target_options` 面板；
+  `catalog`（工况清单）与 `resolved` 只作为 `tool` 应答回灌模型，不弹面板；`error` 交还
+  模型组织措辞。面板只出现在"信息不足"时，且候选层级由工具保证（`function` 的候选一律是
+  功能，不会出现别的功能的工况）。
+- 档位守卫：`run_analysis_on_files` 未带 `profile` 且该功能声明了 `profiles` 时，引擎不执行
+  分析，改落 `hop=profile` 面板并回一条 `tool` 应答。`hop=resolved` 只保证工况唯一、
+  不保证档位唯一，离线路径本来就是"先选档再分析"，两条路径口径必须一致。
 - 网络/额度错误自动回退离线路由。
 - 流式额外产出 `reasoning`、`tool_call`、`tool_result` 事件。
 - 统一消息类型：`text`、`target_options`、`analysis_result`、`attachment`、`error`。
@@ -373,8 +399,8 @@ load(file)
 ### 6.10 上下文预算与压缩（`llm/context.py`）
 
 问题：`Chat.messages` 只追加不裁剪，多轮 + 多跳工具往返后送给 LLM 的 `messages`
-会一直变大；同时工具结果（分析摘要 JSON）本身就可能很大。本节定义长度上限与
-压缩策略，全部由 `.env` 配置。
+会一直变大；同时工具结果（分析摘要 JSON、工况清单）本身就可能很大。本节定义长度上限、
+压缩策略与"只保留有效内容"的折叠规则，全部由 `.env` 配置。
 
 配置（`.env`，估算 token，非精确 tokenizer 计数）：
 
@@ -398,8 +424,19 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 
 压缩流程（`ContextCompressor.fit(messages) -> (messages, note)`）：
 
-1. 估算值 ≤ `CONTEXT_COMPRESS_TOKENS` → 原样返回，`note=None`（不触发，不产生步骤）。
-2. 超阈值 → 保留开头的固定系统提示（功能目录 + 已上传文件 + 已选工况，§6.8），
+0. **先折叠一次性内容**（`prune_transient`，对应"context 只保留有效内容"）：工具 payload
+   里标了 `transient: true` 的（`list_conditions` 的工况清单、各候选面板的候选列表）在离开
+   最近 `KEEP_RECENT_UNITS`（2）个轮次单元后，正文换成一行存根
+   `[已折叠] 一次性候选/清单已折叠：hop=catalog 约 3 项（…）`。**只压正文、保留消息壳**，
+   因为删掉整条 `tool` 消息会让 `assistant` 的 `tool_calls` 失去应答而报 400；最近窗口内保留
+   原文，否则模型没法照着清单填槽。`resolved`/分析结果不带 `transient`，不会被折叠。
+   主要作用点是**同一轮的多跳循环**：清单是模型填槽的中间产物，取到第三条时第一条已经没有
+   价值，但还占着每次请求的预算（跨轮则更彻底——面板与工具结果都不回灌，见本节末尾）。
+   这一步在阈值之下也会执行并计入 `note`（`… · 先折叠 N 条一次性清单`），因为它本身就是
+   有效内容的清理。
+1. 折叠后估算值仍 ≤ `CONTEXT_COMPRESS_TOKENS` → 返回折叠结果（没有可折叠内容时
+   `note=None`，不触发、不产生步骤）。
+2. 超阈值 → 保留开头的固定系统提示（功能目录 + 已上传文件 + 已选工况，§6.8 §13），
    把正文按**轮次单元**切分：一条非 `tool` 消息起头，其后所有 `tool` 结果归入同一单元。
    折叠必须整单元进行，否则 `assistant` 的 `tool_calls` 会与对应 `tool` 消息拆散，
    OpenAI 兼容端点直接报 400。
@@ -424,8 +461,8 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 - 摘要按「待折叠内容 + 预算」哈希缓存（上限 64 条）：多跳工具循环里每轮请求前都会
   `fit`，同一份早期内容只烧一次摘要调用。
 - 触发压缩时向 `steps` 落一条 `上下文压缩` 步骤，`detail` 形如
-  `上下文 1390 → 362 tok · 摘要覆盖 17 段早期内容 · 截断 1 条超长内容`，
-  前端折叠区可见，用于事后核对 token。
+  `上下文 1390 → 362 tok · 摘要覆盖 17 段早期内容 · 截断 1 条超长内容 · 先折叠 2 条一次性清单`，
+  前端折叠区可见，用于事后核对 token。同一轮多跳里内容相同则不重复刷同一行。
 - `fit()` 不修改入参消息对象（写时复制），与 §6.9 的后台线程并发前提一致。
 
 其他注入口径（同为长度控制，但不由本节配置）：
@@ -513,7 +550,7 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 - 底部：输入区，含「+」上传按钮、多行输入、发送。
 - 输入区上方：待发送文件 chips、候选面板。
 
-### 8.2 两跳推荐交互
+### 8.2 目标确认交互
 
 **① 文件上传**
 
@@ -523,30 +560,30 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 - demo 阶段仅接受 `.mf4`，其余扩展名前端拒绝并提示；`signals_mf4.yaml` 由服务端固定，
   用户不提供映射配置。BLF/DBC 能力在内核中已实现，接入真实数据时再开放上传。
 
-**② 第一跳：功能选择**
+**② 功能面板（`hop=function`）**
 
-- 用户描述后，`recommend_targets` 返回 `hop=function` 或多个功能候选。
-- 面板按功能行渲染，一行一个功能。
+- 描述不足以判定功能时弹出，一行一个功能。
 - 支持点击或输入数字序号确认。
-- 功能唯一时自动进入第二跳。
+- 面板只给功能名：该功能下的工况清单只回灌给模型，不混进用户可见选项（§13）。
 
-**③ 第二跳：工况选择**
+**③ 工况面板（`hop=condition`）**
 
-- 在选中功能内精排工况。
-- 返回 `hop=condition` 时，面板按工况行渲染。
-- 工况唯一时 `hop=resolved`，后端自动分析。
+- 在选中功能内，唯一键没填满或零命中时弹出，候选一律来自该功能范围。
 - 工况所属功能声明了 `profiles` 时，展开档位选择（单下拉），选完再确认。
 
 **④ 其他选项**
 
 - 面板底部提供“其他选项”手动输入框。
-- 用户可自由描述未列出的目标，确认后作为新用户消息重新走两跳推荐。
+- 用户可自由描述未列出的目标，确认后作为新用户消息重新走 §13 识别流程。
 
 **⑤ 确认动作**
 
 - 统一调用 `POST /api/chats/{cid}/select`。
-- `target_type=function` 触发第二跳。
+- `target_type=function` 触发下一层识别。
 - `target_type=condition` 触发分析并追加 `analysis_result`。
+
+唯一键精确命中（`hop=resolved`）时不再弹工况确认面板；该功能声明了 `profiles` 时仍要先选
+档位。面板只在"信息不足"时出现，这是 §13.2 的约束。
 
 ### 8.3 结果展示
 
@@ -1047,41 +1084,87 @@ Trace 结构：
 
 ---
 
-## 13. 两跳推荐流程
+## 13. 目标识别与渐进披露
+
+工况规模会到 100+ 条。让模型一次性看完全部工况再挑，既烧 token，又不可靠：相邻工况名
+只差一个数字，选错了没有任何机制能发现。因此本节的设计原则是——**模型只做"从描述里抽
+维度取值"这件它擅长的事，"哪条工况"交给配置索引做确定性的精确匹配**。
+
+### 13.1 两层目录
+
+| 层 | 位置 | 内容 | 成本随什么涨 |
+| --- | --- | --- | --- |
+| 功能层 | **常驻** system prompt（`function_catalog_text(cfg)`，默认不含工况） | `key`、`name`、`aliases`、档位、该功能工况**条数** | 功能数 |
+| 工况层 | **按需**注入（`list_conditions`，仅当轮可见） | 该功能下全部工况 + 唯一键属性 | 单次请求，用完折叠 |
+
+常驻部分刻意不含工况名。用 10 功能 × 15 工况 = 150 条的合成配置实测：功能层 276 token，
+把工况全拼进去是 1870 token（每条请求都要重付）；按需注入时单个功能的清单按工况数线性
+增长（15 条约 1000 token），只在该轮的多跳循环里可见，用完折叠（§13.4）。工具规格与工况数
+无关（150 条配置下 702 token）。`include_conditions=True` 的完整拼法保留给离线展示与对比。
+
+工具规格同样不进 prompt 正文：`build_tool_specs(cfg, scope_function)` 从配置生成 enum，
+常驻成本由**维度数**（`vocab()` 的 maneuver/surface_code/param_keys）决定，与工况数无关；
+功能已定时 `condition_id` 的 enum 收窄到该功能的工况，非法 id 在结构上不可能出现。
+
+### 13.2 识别流程
 
 ```text
-用户 query
-  → recommend_targets(query)
-     第 1 跳：功能识别
-       ├─ 功能唯一 → 自动进入第 2 跳
-       └─ 功能多个 → hop=function
-            → 前端功能面板
-            → POST /select {target_type: function}
-            → 第 2 跳
-
-     第 2 跳：工况精排
-       ├─ 工况唯一 → hop=resolved
-       │    → 后端自动选择并分析
-       └─ 工况多个 → hop=condition
-            → 前端工况面板
-            → POST /select {target_type: condition, profile}
-            → 分析
+用户描述
+  → 模型判定功能（只看常驻功能层）
+  → resolve_condition(function_key, maneuver, surface_code, params)
+       ├─ 唯一命中          → hop=resolved  → run_analysis_on_files
+       │                                     （功能声明 profiles 时先确认档位）
+       ├─ 命中多条（键不全）  → hop=condition → 弹该功能下的工况面板，用户确认
+       ├─ 跨功能歧义/功能未定 → hop=function → 只弹功能面板（不泄露工况清单）
+       └─ 槽位抽不出来       → list_conditions(function_key) 取清单后重试；
+                               仍不行 → recommend_targets 规则打分兜底
 ```
 
-`recommend_targets` 返回：
+约束（写进 `SYSTEM_CHAT`，不只是文档里的期望）：
 
-| hop | 含义 | 前端动作 |
-| --- | --- | --- |
-| `function` | 多个功能候选 | 弹功能面板 |
-| `condition` | 某功能内多个工况候选 | 弹工况面板 |
-| `resolved` | 功能+工况唯一 | 自动分析 |
-| `error` | 未知功能/错误 | 提示兜底 |
+- 匹配语义：`maneuver`/`surface_code` 精确相等，`params` 按**子集**匹配（只报出 `v0_kph`
+  也能定位，不要求复述全部参数），空槽位视为"未填"而不是"匹配任意"。因此填得越满越可能
+  唯一命中，填不满只会退化成面板，不会选错。
+- **只有 `hop=resolved` 才允许直接开分析**；`hop=condition/function` 表示信息不足，
+  必须交用户确认，模型不得自选一条——这是防"静默选错工况"的硬约束。
+- 命中了需要档位的功能但未带 `profile` → 引擎守卫拦下，弹档位面板（§6.9），
+  与离线路径同一口径。
+- 歧义回到哪一层就只暴露那一层的选项：功能未定时不给工况清单，避免面板里混进
+  别的功能的工况。
+- `hop=catalog`（工况清单）是给模型填槽的中间产物，不作为 `target_options` 落给用户。
 
-规则兜底：
+### 13.3 hop 语义
 
-- 功能：同义词命中打分 + 功能下工况名命中加分。
-- 工况：关键词打分，动作词加权。
-- LLM 失败时自动落到规则打分。
+| hop | 产生者 | 含义 | 前端动作 |
+| --- | --- | --- | --- |
+| `function` | resolve / recommend | 功能待定或多功能候选 | 弹功能面板 |
+| `condition` | resolve / recommend | 某功能内多条候选或零命中兜底 | 弹工况面板（该功能范围内） |
+| `catalog` | list_conditions | 工况清单，仅模型可见 | 不弹面板 |
+| `resolved` | resolve / recommend | 唯一键精确命中 | 直接分析（有 profiles 时先选档位） |
+| `error` | 两者 | 未知道况/功能 | 提示兜底 |
+
+### 13.4 一次性内容的生命周期
+
+清单与候选是"用完即弃"的内容：留着既占预算，又会让后面几轮把旧候选当成可选项。工具把
+这类 payload 标 `transient: true`，`ContextCompressor` 在它们离开最近窗口后压成一行存根
+（只压正文、保留消息壳，见 §6.10 第 0 步）。
+
+两个层面的收益，别混为一谈：
+
+- **同一轮内**：多跳工具循环里每跳都会重发此前的清单，取到第三条时第一条已经没有价值，
+  折叠让后续请求不再为它付费。
+- **跨轮**：`steps` / `target_options` / 工具往返本来就不回灌进下一轮的 prompt（§6.10
+  末尾的注入口径），所以跨轮不是本节折叠的主战场；`prune_transient` 的跨轮作用主要是
+  兜住"同一轮跑到一半就撞压缩阈值"的情形。
+
+因此"渐进披露"省的是**每条请求的常驻成本**（工况目录不再进 system prompt）与
+**多跳循环的重复成本**，不是靠折叠省跨轮 token。
+
+### 13.5 规则兜底（离线路径）
+
+`recommend_targets` 保留两跳规则打分：功能同义词命中 + 功能下工况名命中加分；工况按
+关键词与动作/路面词加权；唯一性判据仍是"分差 ≥ 1.0"，否则出面板。在线 LLM 不可用或
+描述无法转成结构化槽位时走这条路径，与离线确定性路由同一实现，保证降级行为一致。
 
 候选规模服务端强剪，上限 `min(max(1, n), 8)`。
 
@@ -1124,6 +1207,10 @@ python -m uvicorn web.main:app --port 8000
 - LLM 稳定性。
 - 大文件内存压力。
 - 档位标签拼装可能变长，需要命名规范约束。
+- 槽位抽取质量只能在有 Key 的环境里实测；本仓库无 Key 时跑的是离线规则路径，
+  §13 的"命中唯一才开跑"能保证选错时是弹面板而不是静默分析，但抽错维度仍会出现。
+- 结构化解析依赖配置纪律：同功能内唯一键重复会在加载期失败（§2.2），新增工况时
+  这是最先要看的报错。
 
 ### 后续扩展
 
@@ -1135,10 +1222,16 @@ python -m uvicorn web.main:app --port 8000
 - 知识库管理后台。
 - 批量/脚本化扫描。
 - 异步任务化。
+- 工况再上量（>200 条/功能）时，`list_conditions` 可加参数按 maneuver/路面预筛，
+  避免单次清单过长；当前按需注入 + 用完折叠在 10 功能 × 20 工况量级内不需要。
 
 ### 已排除项
 
 - 同一文件多工况分析。
 - 指标级三级预警（warn 下沉到规则层 `severity`）。
 - 全局路面默认阈值（阈值工况自包含）。
+- 把工况目录写成 SKILL.md 这类文档机制：文档要靠人记得去读，且模型会照着文档里的
+  旧例子选；工具 + 加载期校验能让"选错"在结构上不可能，因此不走文档路线。
+- 让模型在工况名之间做相似度挑选来定目标（150 条量级实测会把同名不同速度的工况
+  并列在候选里，无法区分）；`recommend_targets` 的打分只作兜底，不作定案依据。
 - 多维 context 匹配（统一为 profile 字符串）。

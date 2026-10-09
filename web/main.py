@@ -298,7 +298,7 @@ class SelectIn(BaseModel):
 
 @app.post("/api/chats/{cid}/select")
 def api_select(cid: str, body: SelectIn):
-    """统一选择：function → 第二跳工况精排；condition → 写档位并分析。"""
+    """统一选择：function → 该功能下的工况面板；condition → 写档位并分析。"""
     chat = _chat_or_404(cid)
     # 后台还有一轮在跑时不接受新动作：两者都会写同一份消息列表，且并发分析无意义
     running = RUNS.active_for(chat.chat_id)

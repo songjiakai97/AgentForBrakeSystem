@@ -1,11 +1,15 @@
 """Agent 工具（design.md §6.9 / §13）。
 
-对 LLM 暴露两个工具：recommend_targets / run_analysis_on_files。
+对 LLM 暴露四个工具：
+- list_conditions / resolve_condition：工况层按需注入（§13 渐进披露），
+  解析走 §2.2 唯一键精确匹配，不让模型在相似工况名之间挑；
+- run_analysis_on_files：执行分析；
+- recommend_targets：两跳规则打分，保留为离线路径与兜底，不再是主推荐引擎。
 离线确定性路由与在线 tool-calling 共用同一实现，保证降级行为一致。
 """
 
 import re
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from ..configs import AppConfigs
 from ..pipeline import NoDataError, analyze_file
@@ -72,6 +76,7 @@ def recommend_targets(
         if not scored:
             return {
                 "hop": "error",
+                "transient": True,
                 "hint": "未能识别功能。请描述更接近的目标，或从目录中选择。",
                 "candidates": [
                     {"key": fn.key, "name": fn.name, "score": 0.0}
@@ -82,6 +87,7 @@ def recommend_targets(
             return recommend_targets(cfg, query, cap, function_key=scored[0][1].key)
         return {
             "hop": "function",
+            "transient": True,
             "candidates": [
                 {"key": fn.key, "name": fn.name, "score": round(s, 2)}
                 for s, fn in scored[:cap]
@@ -111,6 +117,7 @@ def recommend_targets(
         return {
             "hop": "condition",
             "function": function_key,
+            "transient": True,
             "hint": f"在「{fn.name}」下未匹配到明确工况，请从列表选择。",
             "candidates": [_cond_item(cfg, c, 0.0) for c in conds[:cap]],
         }
@@ -121,17 +128,20 @@ def recommend_targets(
     return {
         "hop": "condition",
         "function": function_key,
+        "transient": True,
         "candidates": [_cond_item(cfg, c, s) for s, c in scored_c[:cap]],
     }
 
 
-def _cond_item(cfg: AppConfigs, cond, score: float) -> dict:
+def _cond_item(cfg: AppConfigs, cond, score: float = 0.0) -> dict:
     fn = cfg.function(cond.function)
     item = {
         "key": cond.id,
         "name": cond.name,
         "score": round(score, 2),
         "function": cond.function,
+        "maneuver": cond.maneuver,
+        "surface_code": cond.surface_code,
         "params": dict(cond.params),
     }
     if fn.profiles:
@@ -161,3 +171,84 @@ def run_analysis_on_files(
         except Exception as e:  # 加载兜底
             out.append({"ok": False, "file": f, "error": f"分析失败: {e}"})
     return out
+
+
+# ---------------------------------------------------------------- 工况层按需注入（§13）
+
+def list_conditions(cfg: AppConfigs, function_key: str) -> dict:
+    """按需给出某功能的全部工况（含 §2.2 唯一键属性），只服务当次请求。
+
+    标注 transient：清单原文属于「用完即弃」的内容，下一轮请求前会被换成一行存根，
+    不参与摘要（§6.10「context 只保留有效内容」）。
+    """
+    fn = cfg.function(function_key or "")
+    if fn is None:
+        return {"hop": "error", "hint": f"未知功能 {function_key}",
+                "candidates": [{"key": k, "name": f.name} for k, f in cfg.functions.items()]}
+    items = [_cond_item(cfg, c) for c in cfg.conditions_of(fn.key)]
+    return {
+        "hop": "catalog",
+        "function": fn.key,
+        "transient": True,
+        "count": len(items),
+        "conditions": items,
+        "note": "清单仅供本轮定位目标；定位请用 resolve_condition",
+    }
+
+
+def resolve_condition(
+    cfg: AppConfigs,
+    function_key: Optional[str] = None,
+    maneuver: Optional[str] = None,
+    surface_code: Optional[str] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> dict:
+    """按 §2.2 唯一键精确匹配工况：命中唯一 → resolved；命中多条 → 候选面板；零 → 兜底。
+
+    这是结构化解析，不是名称相似度挑选：模型只负责从描述里抽出维度取值，
+    「哪条工况」由配置索引决定，因此不存在挑错相邻工况而无人报错的情况。
+    """
+    fn = cfg.function(function_key) if function_key else None
+    if function_key and fn is None:
+        return {"hop": "error", "hint": f"未知功能 {function_key}",
+                "candidates": [{"key": k, "name": f.name} for k, f in cfg.functions.items()]}
+
+    hits = cfg.find_condition(
+        fn.key if fn else None,
+        (maneuver or "").strip() or None,
+        (surface_code or "").strip() or None,
+        params or {},
+    )
+    if len(hits) == 1:
+        item = _cond_item(cfg, hits[0])
+        return {"hop": "resolved", "function": hits[0].function,
+                "candidates": [item], "target": item}
+    if len(hits) > 1:
+        # 键不全（例如只说了路面没给速度）：候选交用户确认，绝不自动开跑
+        if fn is None and len({c.function for c in hits}) > 1:
+            # 两跳设计（§13）：跨功能的歧义先回到功能层，不把别的功能的工况混进面板
+            return {
+                "hop": "function",
+                "transient": True,
+                "hint": "描述还不足以判定功能，请先选择功能",
+                "candidates": [{"key": k, "name": cfg.function(k).name}
+                               for k in dict.fromkeys(c.function for c in hits)],
+            }
+        return {
+            "hop": "condition",
+            "function": fn.key if fn else hits[0].function,
+            "transient": True,
+            "hint": "描述未填满 maneuver+路面+速度 唯一键，请从候选里确认",
+            "candidates": [_cond_item(cfg, c) for c in hits[:8]],
+        }
+    if fn is not None:
+        return {
+            "hop": "condition",
+            "function": fn.key,
+            "transient": True,
+            "hint": f"在「{fn.name}」下没有匹配到工况，请从候选选择或补充路面/速度",
+            "candidates": [_cond_item(cfg, c) for c in cfg.conditions_of(fn.key)[:8]],
+        }
+    return {"hop": "function",
+            "hint": "未能定位工况，请先确定功能",
+            "candidates": [{"key": k, "name": f.name} for k, f in cfg.functions.items()]}

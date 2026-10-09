@@ -9,11 +9,17 @@ from ..schemas import AnalysisResult, ConditionConfig, FunctionConfig
 SYSTEM_CHAT = """你是制动系统测试数据分析与标定指导助手，服务于台架/实车测试数据的分析与标定决策。
 
 职责：
-1. 根据用户描述，使用 recommend_targets 工具识别要分析的功能与工况（两跳）；
-2. 目标唯一后使用 run_analysis_on_files 对会话内已上传文件执行分析；
+1. 从用户描述里判定功能（功能目录见下），再用 resolve_condition 按结构化槽位
+   （动作 maneuver、路面 surface_code、工况参数 params）定位具体工况；
+   描述不足以填满唯一键时不要猜测，用 list_conditions 取该功能工况清单后弹候选；
+2. 目标唯一确定后使用 run_analysis_on_files 对会话内已上传文件执行分析；
 3. 基于分析结果与规则结论，给出可执行的标定方向建议。
 
 约束：
+- 工况目录不常驻在本提示里：需要时按功能调 list_conditions，只有当次请求能看到；
+- 只有 resolve_condition 返回 hop=resolved（唯一键精确命中）才可以直接分析；
+  返回 hop=condition/function 表示信息不足，必须交用户确认，不得自选一条；
+- 功能声明了档位（目录里的「档位:」）而用户没说选哪个时，先问档位，不要默认挑一个；
 - 可标定量只能引用指标声明的 tuning_params，不得编造不存在的参数；
 - 区分「确定规则结论」（来自规则引擎）与「建议性判断」（你的推断）；
 - 不得基于 info 指标单独下异常结论，info 只能作为佐证或趋势描述；
@@ -23,46 +29,132 @@ SYSTEM_CHAT = """你是制动系统测试数据分析与标定指导助手，服
 HISTORY_TAIL = 40   # 回灌的历史条数上限：只是保险丝，真正的长度由 token 预算控制
 TOOL_PAYLOAD_CLIP_CHARS = 4000   # 单个工具结果写入上下文的字数上限
 
-TOOL_SPECS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "recommend_targets",
-            "description": "两跳推荐入口：根据用户 query 识别功能/工况目标。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "用户意图原话或要点"},
-                    "max_items": {"type": "integer", "description": "最多返回候选数，1~8"},
+
+def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> List[dict]:
+    """工具规格：维度取值与工况 id 用配置生成的 enum 约束（§13）。
+
+    - 常驻成本由「维度数」决定，不由「工况数」决定：maneuver/surface_code 的取值域
+      通常十几个以内，工况清单不进 system prompt。
+    - scope_function 已知时，condition_id 直接限定为该功能下的工况 id，非法 id
+      在结构上不可能出现；未知时退化为自由字符串。
+    """
+    vocab = cfg.vocab()
+    fn_keys = list(cfg.functions)
+    # number 同时覆盖整数与小数（整数是 number 的子集），避免个别兼容端点拒绝 type 数组
+    param_props = {k: {"type": "number", "description": f"工况参数 {k}"}
+                   for k in vocab["param_keys"]}
+    cond_schema = ({"type": "string", "enum": cfg.scope_conditions(scope_function)}
+                   if scope_function and cfg.scope_conditions(scope_function)
+                   else {"type": "string",
+                         "description": "工况 id，必须是 resolve_condition 命中的那条"})
+    # 档位：resolved 只保证工况唯一，不保证档位唯一。这里只描述、不设为 required ——
+    # 设为必填会逼模型编一个档位，正确做法是先问用户，未选档时由引擎守卫弹面板（§6.9）
+    scope_fn = cfg.function(scope_function) if scope_function else None
+    profile_desc = "档位标签，可选；多维度用竖线拼接如 4WD|DTCS"
+    if scope_fn is not None and scope_fn.profiles:
+        profile_desc = ("该功能声明了档位，取值 " + "|".join(scope_fn.profiles)
+                        + "（多维度用竖线拼接如 4WD|DTCS）。用户没说选哪个时不要自己定，"
+                        "先向用户确认；未带档位调用时引擎不会执行分析，而是给用户弹档位面板")
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "resolve_condition",
+                "description": (
+                    "按 §2.2 唯一键（maneuver+surface_code+params）精确定位工况。"
+                    "命中唯一返回 hop=resolved，信息不足返回 hop=condition/function 并给候选——"
+                    "此时必须交用户确认，不得自行选择。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "function_key": {
+                            "type": "string", "enum": fn_keys,
+                            "description": "已判定的功能；不确定时可省略",
+                        },
+                        "maneuver": {
+                            "type": "string", "enum": vocab["maneuver"],
+                            "description": "测试动作",
+                        },
+                        "surface_code": {
+                            "type": "string", "enum": vocab["surface_code"],
+                            "description": "路面/附着条件",
+                        },
+                        "params": {
+                            "type": "object",
+                            "properties": param_props,
+                            "description": "工况参数，键取自参数名（如 v0_kph），值按描述填",
+                        },
+                    },
                 },
-                "required": ["query"],
             },
         },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_analysis_on_files",
-            "description": "对当前会话内全部已上传数据文件执行指定工况分析。仅在目标工况已确定后调用。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "condition_id": {"type": "string", "description": "已确定的工况 id"},
-                    "profile": {"type": "string", "description": "档位标签，可选；多维度用竖线拼接如 4WD|DTCS"},
+        {
+            "type": "function",
+            "function": {
+                "name": "list_conditions",
+                "description": (
+                    "取某功能下的全部工况（含唯一键属性），仅本轮可见，用完即弃。"
+                    "在描述无法填满唯一键、或用户询问「这个功能下测了哪些」时调用。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"function_key": {"type": "string", "enum": fn_keys}},
+                    "required": ["function_key"],
                 },
-                "required": ["condition_id"],
             },
         },
-    },
-]
+        {
+            "type": "function",
+            "function": {
+                "name": "run_analysis_on_files",
+                "description": "对当前会话内全部已上传数据文件执行指定工况分析。仅在目标工况已确定后调用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "condition_id": cond_schema,
+                        "profile": {
+                            "type": "string",
+                            "description": profile_desc,
+                        },
+                    },
+                    "required": ["condition_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "recommend_targets",
+                "description": "规则打分兜底：无法结构化解析时，用原话取功能/工况候选。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "用户意图原话或要点"},
+                        "max_items": {"type": "integer", "description": "最多返回候选数，1~8"},
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+    ]
 
 
-def function_catalog_text(cfg: AppConfigs) -> str:
+def function_catalog_text(cfg: AppConfigs, include_conditions: bool = False) -> str:
+    """常驻目录只到功能层（§13）；工况层由 list_conditions 按需注入。
+
+    include_conditions=True 保留旧的完整拼法，供离线展示与回归对比用。
+    """
     lines = []
     for fn in cfg.functions.values():
-        conds = "; ".join(c.name for c in cfg.conditions_of(fn.key))
         prof = ",".join(fn.profiles) if fn.profiles else "-"
-        lines.append(f"- {fn.key}（{fn.name}；别名: {','.join(fn.aliases)}；档位: {prof}；工况: {conds}）")
+        base = (f"- {fn.key}（{fn.name}；别名: {','.join(fn.aliases)}；档位: {prof}；"
+                f"工况数: {len(cfg.conditions_of(fn.key))}）")
+        if include_conditions:
+            conds = "; ".join(c.name for c in cfg.conditions_of(fn.key))
+            base = (f"- {fn.key}（{fn.name}；别名: {','.join(fn.aliases)}；档位: {prof}；"
+                    f"工况: {conds}）")
+        lines.append(base)
     return "\n".join(lines)
 
 

@@ -119,6 +119,22 @@ class ChartGroup:
     signals: List[str]
 
 
+def _slot_key(cond: ConditionConfig) -> tuple:
+    """§2.2 唯一键：maneuver + surface_code + params 唯一确定一个工况。"""
+    params = tuple(sorted((k, _norm_scalar(v)) for k, v in (cond.params or {}).items()))
+    return (cond.maneuver, cond.surface_code, params)
+
+
+def _norm_scalar(v: Any) -> str:
+    """数值归一：100 / 100.0 / "100" 视为同一个值，避免伪唯一。"""
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, (int, float)):
+        f = float(v)
+        return str(int(f)) if f.is_integer() else repr(f)
+    return str(v).strip()
+
+
 @dataclass
 class AppConfigs:
     config_dir: str
@@ -155,6 +171,55 @@ class AppConfigs:
             return []
         slot = cond.metric_index.get(metric_key) or {}
         return sorted(slot.get("by_profile", {}))
+
+    # ---- 目标解析辅助（§13：功能层常驻、工况层按需）----
+    def vocab(self) -> Dict[str, List[str]]:
+        """工况维度的取值域：动作、路面、params 键。
+
+        这三项进 LLM 工具参数的 enum（量级是「维度数」而非「工况数」），
+        工况条目本身只按功能注入当次请求。
+        """
+        maneuvers: List[str] = []
+        surfaces: List[str] = []
+        keys: List[str] = []
+        for c in self.conditions.values():
+            for bucket, val in ((maneuvers, c.maneuver), (surfaces, c.surface_code)):
+                if val and val not in bucket:
+                    bucket.append(val)
+            for k in c.params:
+                if k not in keys:
+                    keys.append(k)
+        return {"maneuver": maneuvers, "surface_code": surfaces, "param_keys": keys}
+
+    def scope_conditions(self, function_key: str) -> List[str]:
+        """本功能下全部可执行目标，限定成 LLM 工具参数的 enum（非法 id 结构上不可能）。"""
+        return list(self.conditions_by_function.get(function_key, []))
+
+    def find_condition(
+        self,
+        function_key: Optional[str],
+        maneuver: Optional[str],
+        surface_code: Optional[str],
+        params: Optional[Dict[str, Any]],
+    ) -> List[ConditionConfig]:
+        """按 §2.2 唯一键做精确匹配，返回全部命中（0/1/多条由调用方判）。
+
+        约束（§13）：一个功能下同一 maneuver+surface+params 组合只能对应一个工况，
+        所以给定完整键时命中唯一；键不全时返回候选，交调用方出面板。
+        """
+        want = {k: _norm_scalar(v) for k, v in (params or {}).items() if v is not None}
+        hits = []
+        for cond in self.conditions.values():
+            if function_key and cond.function != function_key:
+                continue
+            if maneuver and cond.maneuver != maneuver:
+                continue
+            if surface_code and cond.surface_code != surface_code:
+                continue
+            got = {k: _norm_scalar(v) for k, v in (cond.params or {}).items()}
+            if all(got.get(k) == v for k, v in want.items()):
+                hits.append(cond)
+        return hits
 
 
 def load_configs(config_dir: str = "configs") -> AppConfigs:
@@ -314,6 +379,23 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
                 enabled_metrics=collect_enabled(metrics),
             )
             cfg.conditions_by_function.setdefault(fkey, []).append(cid)
+
+    # §13 结构化解析的前提：一个功能内 maneuver+surface_code+params 必须唯一，
+    # 否则「按属性匹配」会命中多条，无法自动开跑（只能出面板）。
+    for fkey in cfg.conditions_by_function:
+        seen_slot: Dict[tuple, str] = {}
+        for cond in cfg.conditions_of(fkey):
+            slot = _slot_key(cond)
+            if not (cond.maneuver and cond.surface_code):
+                raise ConfigError(
+                    f"工况 {cond.id} 缺少 maneuver/surface_code，无法参与结构化目标解析（§13）"
+                )
+            if slot in seen_slot:
+                raise ConfigError(
+                    f"功能 {fkey} 下工况 {cond.id} 与 {seen_slot[slot]} 的 "
+                    "maneuver+surface_code+params 完全相同，结构化解析无法区分"
+                )
+            seen_slot[slot] = cond.id
 
     # ---- rules.yaml ----
     rules_raw = _load_yaml(os.path.join(config_dir, "rules.yaml"))

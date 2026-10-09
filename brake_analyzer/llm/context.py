@@ -10,6 +10,7 @@
 """
 
 import hashlib
+import json
 import math
 import os
 import re
@@ -141,6 +142,75 @@ def _char_limit(tokens: int, text: str) -> int:
 
 Summarizer = Callable[[str, int], str]
 
+# 按需注入的工具结果标了 transient：清单原文只服务当次定位，之后换成一行存根。
+TRANSIENT_KEY = "transient"
+STUB_PREFIX = "[已折叠]"
+
+
+def _is_transient_tool(msg: dict) -> bool:
+    """tool 结果是否为按需注入的一次性清单。
+
+    工具 payload 会被截到 TOOL_PAYLOAD_CLIP_CHARS，截断后 JSON 解析失败，
+    因此先看能否 parse，不能就退化为查前若干字符里的 "transient": true
+    （工具的 dict 把这个键放在前面，截断不影响识别）。
+    """
+    content = msg.get("content")
+    if msg.get("role") != "tool" or not isinstance(content, str):
+        return False
+    try:
+        payload = json.loads(content)
+        return isinstance(payload, dict) and bool(payload.get(TRANSIENT_KEY))
+    except Exception:
+        return '"transient": true' in content[:400]
+
+
+def prune_transient(messages: Sequence[dict],
+                    keep_last: int = KEEP_RECENT_UNITS) -> Tuple[List[dict], int]:
+    """把较早的一次性清单/候选结果换成一行存根，保留最近 keep_last 个轮次单元。
+
+    动机（§13 + §6.10）：工况清单、候选面板是"用完即弃"的内容，留着既占预算，
+    又会让后续轮次误把旧候选当成可选项。但模型至少要在清单给出的下一次请求里
+    看到它，所以最近 keep_last 个单元原样保留；也不能整条删掉——assistant 的
+    tool_calls 失去应答，兼容端点会报 400，故只压正文、保留消息壳。
+    """
+    msgs = list(messages)
+    i = 0
+    while i < len(msgs) and msgs[i].get("role") == "system":
+        i += 1
+    head, body = msgs[:i], msgs[i:]
+    units = group_units(body)
+    if len(units) <= keep_last:
+        return msgs, 0
+    old, fresh = units[:-keep_last], units[-keep_last:]
+    out: List[dict] = []
+    n = 0
+    for u in old:
+        new_u = []
+        for m in u:
+            if _is_transient_tool(m) and not str(m.get("content", "")).startswith(STUB_PREFIX):
+                m2 = dict(m)
+                m2["content"] = _stub_for(str(m.get("content") or ""))
+                new_u.append(m2)
+                n += 1
+            else:
+                new_u.append(m)
+        out.extend(new_u)
+    if n == 0:
+        return msgs, 0
+    return head + out + flatten(fresh), n
+
+
+def _stub_for(content: str) -> str:
+    hop = "?"
+    m = re.search(r'"hop":\s*"([a-z_]+)"', content)
+    if m:
+        hop = m.group(1)
+    rows = len(re.findall(r'"key":', content))
+    names = "、".join(re.findall(r'"name":\s*"([^"]{1,40})"', content)[:6])
+    stub = (f"{STUB_PREFIX} 一次性候选/清单已折叠：hop={hop} 约 {rows} 项"
+            + (f"（{names}）" if names else "") + "…（原文已折叠）")
+    return stub[:240]
+
 
 class ContextCompressor:
     """超预算时把早期轮次折叠为一条摘要，必要时硬截断兜底。
@@ -156,10 +226,15 @@ class ContextCompressor:
         self._cache: Dict[str, str] = {}    # transcript+预算 → 摘要文本
 
     def fit(self, messages: Sequence[dict]) -> Tuple[List[dict], Optional[str]]:
-        msgs = list(messages)
+        raw = estimate_message_tokens(list(messages))
+        msgs, n_pruned = prune_transient(messages)
         before = estimate_message_tokens(msgs)
+        prune_note = f"先折叠 {n_pruned} 条一次性清单" if n_pruned else ""
         if before <= self.budget.compress_tokens:
-            return msgs, None
+            if not n_pruned:
+                return msgs, None
+            # 折叠 transient 本身也是"只保留有效内容"，即便没到压缩阈值也要报告
+            return msgs, (f"上下文 {raw} → {before} tok · {prune_note}")
 
         # 固定的系统提示在最前，逐条按角色分流；摘要可重复出现，折叠时并入新摘要
         i = 0
@@ -186,7 +261,9 @@ class ContextCompressor:
                       if not _trimmable(keep) else "单轮正文超预算，就地裁剪")
 
         kept, clip_note = self._fit_keep(out, keep)
-        note = f"上下文 {before} → {estimate_message_tokens(kept)} tok · {detail}"
+        note = f"上下文 {raw} → {estimate_message_tokens(kept)} tok · {detail}"
+        if n_pruned:
+            note += f" · {prune_note}"
         if clip_note:
             note += f" · {clip_note}"
         return kept, note

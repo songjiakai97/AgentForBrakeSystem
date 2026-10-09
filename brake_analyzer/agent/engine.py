@@ -2,25 +2,28 @@
 
 - 所有对话经 ChatEngine 编排，统一走事件流：delta（推理/正文流式）→ message（落库）→ done。
 - 有 OPENAI_API_KEY → LLM tool-calling（≤6 轮，流式），失败自动回退离线路由。
+  目标解析走 §13 渐进披露：功能层常驻 system prompt，工况层由 resolve_condition /
+  list_conditions 按需注入，未填满唯一键一律交用户确认。
 - 无 Key → 离线确定性路由（规则打分两跳推荐 + 规则结论 + 可选模板建议）。
 - 路由/工具/分析过程落库为 kind=steps 消息，前端折叠展示。
 - 送给 LLM 的 messages 先过 ContextCompressor：超过 CONTEXT_COMPRESS_TOKENS 就把
-  早期轮次折叠为摘要，并在步骤里显示压缩前后的估算 token。
+  早期轮次折叠为摘要，并在步骤里显示压缩前后的估算 token；一次性清单/候选结果
+  （transient）在离开最近窗口后压成一行存根，只保留有效内容。
 """
 
 import json
 import threading
 from typing import Dict, List, Optional, Tuple
 
-from ..agent.tools import recommend_targets
+from ..agent.tools import list_conditions, recommend_targets, resolve_condition
 from ..configs import AppConfigs
 from ..llm.client import LlmClient
 from ..llm.context import ContextBudget, ContextCompressor
 from ..llm.kb import KnowledgeBase
 from ..llm.prompts import (
     TOOL_PAYLOAD_CLIP_CHARS,
-    TOOL_SPECS,
     build_chat_messages,
+    build_tool_specs,
     summarize_request,
     suggestion_prompt,
 )
@@ -168,6 +171,18 @@ class ChatEngine:
         if step is not None:
             yield self._mevent(step)
         exec_tools = {
+            # 结构化槽位解析（§13）：命中与否由配置唯一键决定，不靠工况名相似度
+            "resolve_condition": lambda args: resolve_condition(
+                self.cfg,
+                function_key=args.get("function_key") or chat.selected_function or None,
+                maneuver=args.get("maneuver"),
+                surface_code=args.get("surface_code"),
+                params=args.get("params") or {},
+            ),
+            "list_conditions": lambda args: list_conditions(
+                self.cfg,
+                args.get("function_key") or chat.selected_function or "",
+            ),
             "recommend_targets": lambda args: recommend_targets(
                 self.cfg, args.get("query", text), args.get("max_items", 8),
                 function_key=chat.selected_function,
@@ -176,12 +191,14 @@ class ChatEngine:
                 chat, args.get("condition_id"), args.get("profile"), as_tool=True
             ),
         }
+        # 工具规格由配置生成（维度/工况 id 作 enum），已选定功能时进一步收窄取值域
+        tool_specs = build_tool_specs(self.cfg, scope_function=chat.selected_function)
         previewed = False   # 是否已向用户流出了正文预览
         try:
             for rnd in range(1, 7):
                 reply = None
                 for ev in self.llm.chat_stream(
-                        messages, tools=TOOL_SPECS, chat_id=chat.chat_id,
+                        messages, tools=tool_specs, chat_id=chat.chat_id,
                         user_text=text, round_no=rnd):
                     if ev["type"] == "delta":
                         yield self._delta(ev["channel"], ev["text"])
@@ -234,6 +251,23 @@ class ChatEngine:
                         payload = {"error": f"未知工具 {name}"}
                         yield self._mevent(self._step_on(chat, [(f"{name} 失败", "未知工具", "error")]))
                     else:
+                        if name == "run_analysis_on_files" and not args.get("profile"):
+                            missing = self._profile_guard(chat, args.get("condition_id"))
+                            if missing is not None:
+                                # 与离线路径同一约束：声明了档位的功能没选档就不分析
+                                cond = self.cfg.condition(args.get("condition_id") or "")
+                                state["claimed"] = True
+                                yield self._mevent(self._step_on(chat, [(
+                                    "档位守卫：暂不分析",
+                                    f"工况 {cond.id if cond else args.get('condition_id')} "
+                                    "所属功能需先选档位", "warn")]))
+                                yield self._mevent(missing)
+                                payload = {"ok": False, "hop": "profile",
+                                           "note": "该功能需先选档位，已把档位面板给用户"}
+                                messages.append({
+                                    "role": "tool", "tool_call_id": tc["id"],
+                                    "content": json.dumps(payload, ensure_ascii=False)})
+                                continue
                         result = fn(args)
                         if name == "run_analysis_on_files":
                             payload = {"ok": True, "note": "分析结果已生成并展示"}
@@ -245,14 +279,21 @@ class ChatEngine:
                         else:
                             payload = result
                             hop = (result or {}).get("hop")
-                            yield self._mevent(self._step_on(chat, [
-                                (f"{name} → hop={hop}",
-                                 f"候选：{len(result.get('candidates', []))} 项", "ok")]))
+                            n_cand = len(result.get("candidates", [])) if isinstance(result, dict) else 0
+                            n_cond = (result.get("count") if isinstance(result, dict) else None)
+                            yield self._mevent(self._step_on(chat, [(
+                                f"{name} → hop={hop}",
+                                (f"清单 {n_cond} 条（仅本轮可见）" if hop == "catalog" else
+                                 f"候选：{n_cand} 项"),
+                                "ok")]))
+                            # 面板只在信息不足时弹；hop=function 的候选由工具保证是功能级，
+                            # 工况清单（catalog）不会走到这里，不混进用户可见选项
                             if hop in ("function", "condition", "profile"):
                                 state["claimed"] = True
                                 yield self._mevent(self._options(chat, result))
-                            elif hop == "resolved":
-                                # 把命中结果交还 LLM，由其决定文本/档位面板/分析
+                            elif hop in ("catalog", "resolved", "error"):
+                                # 清单/命中结果只作为 tool 应答回灌给 LLM；
+                                # error 也交还 LLM 组织措辞，不直接落用户可见消息
                                 pass
                     messages.append({
                         "role": "tool", "tool_call_id": tc["id"],
@@ -271,6 +312,26 @@ class ChatEngine:
                 state["failed"] = False
         except Exception:
             state["failed"] = True
+
+    def _profile_guard(self, chat, condition_id: str):
+        """声明了档位的功能未选档 → 返回档位面板；不需要拦时返回 None。
+
+        `hop=resolved` 只保证工况唯一，不保证档位唯一；离线路径本来就是"先选档再分析"，
+        在线路径不给这个例外的话，同一个问题会有两套结论口径。
+        """
+        cond = self.cfg.condition(condition_id or "")
+        if cond is None:
+            return None
+        fn = self.cfg.function(cond.function)
+        if fn is None or not fn.profiles:
+            return None
+        return self._options(chat, {
+            "hop": "profile", "function": fn.key,
+            "target": {"key": cond.id, "name": cond.name},
+            "candidates": [{"key": cond.id, "name": cond.name}],
+            "profiles": fn.profiles, "profile_dims": fn.profile_dims,
+            "hint": "该功能需先选档位再分析",
+        })
 
     # ------------------------------------------------------------ 分析
     def _analyze(self, chat, condition_id: str, profile: Optional[str],
