@@ -20,7 +20,9 @@ from brake_analyzer.charts.html import build_chart_option, timeseries_payload  #
 from brake_analyzer.configs import ConfigError, load_configs  # noqa: E402
 from brake_analyzer.events.segment import is_valid  # noqa: E402
 from brake_analyzer.llm.client import LlmClient, TraceStore  # noqa: E402
+from brake_analyzer.llm.context import ContextBudget  # noqa: E402
 from brake_analyzer.llm.kb import KnowledgeBase  # noqa: E402
+from brake_analyzer.llm.prompts import build_chat_messages  # noqa: E402
 from brake_analyzer.schemas import json_safe  # noqa: E402
 from web.runs import RunManager  # noqa: E402
 from web.store import Store  # noqa: E402
@@ -55,7 +57,11 @@ TRACES = TraceStore(cap=int(os.getenv("TRACE_STORE_MAX", "500")))
 STORE = Store()
 KB = KnowledgeBase(KB_DIR)
 LLM = LlmClient(traces=TRACES)
-ENGINE = ChatEngine(CFG, LLM, KB, STORE)
+try:
+    BUDGET = ContextBudget.from_env()
+except ValueError as e:
+    raise RuntimeError(f"上下文预算配置无效，服务拒绝启动：{e}")
+ENGINE = ChatEngine(CFG, LLM, KB, STORE, budget=BUDGET)
 # 一轮 = 一个后台任务：与 HTTP 连接解耦，刷新/断网不再丢本轮回复
 RUNS = RunManager()
 
@@ -119,7 +125,26 @@ def api_meta():
         "model": LLM.model if LLM.available else None,
         "engine": "llm" if LLM.available else "offline",
         "allowed_upload_ext": sorted(ALLOWED_EXT),
+        "context": {
+            **BUDGET.to_dict(),
+            "summarizer": "llm" if LLM.available else "extractive",
+        },
     }
+
+
+@app.get("/api/context/stats")
+def api_context_stats(cid: str = Query("")):
+    """当前会话上下文的估算 token 与两条阈值的关系（调试用）。"""
+    chat = STORE.get_chat(cid) if cid else STORE.latest_chat()
+    if chat is None:
+        raise HTTPException(status_code=404, detail="没有可用对话")
+    msgs = build_chat_messages(
+        CFG,
+        [{"role": m.role, "kind": m.kind, "content": m.content} for m in chat.messages],
+        "", [f.name for f in chat.files],
+        {"condition": chat.selected_condition, "profile": chat.selected_profile},
+    )
+    return {"chat_id": chat.chat_id, "messages": len(msgs), **ENGINE.compressor.stats(msgs)}
 
 
 @app.get("/api/functions")

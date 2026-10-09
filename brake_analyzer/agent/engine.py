@@ -1,29 +1,57 @@
-"""对话式编排引擎（design.md §6.9 / §13）。
+"""对话式编排引擎（design.md §6.9 / §6.10 / §13）。
 
 - 所有对话经 ChatEngine 编排，统一走事件流：delta（推理/正文流式）→ message（落库）→ done。
 - 有 OPENAI_API_KEY → LLM tool-calling（≤6 轮，流式），失败自动回退离线路由。
 - 无 Key → 离线确定性路由（规则打分两跳推荐 + 规则结论 + 可选模板建议）。
 - 路由/工具/分析过程落库为 kind=steps 消息，前端折叠展示。
+- 送给 LLM 的 messages 先过 ContextCompressor：超过 CONTEXT_COMPRESS_TOKENS 就把
+  早期轮次折叠为摘要，并在步骤里显示压缩前后的估算 token。
 """
 
 import json
-from typing import Dict, List, Optional
+import threading
+from typing import Dict, List, Optional, Tuple
 
 from ..agent.tools import recommend_targets
 from ..configs import AppConfigs
 from ..llm.client import LlmClient
+from ..llm.context import ContextBudget, ContextCompressor
 from ..llm.kb import KnowledgeBase
-from ..llm.prompts import TOOL_SPECS, build_chat_messages, suggestion_prompt
+from ..llm.prompts import (
+    TOOL_PAYLOAD_CLIP_CHARS,
+    TOOL_SPECS,
+    build_chat_messages,
+    summarize_request,
+    suggestion_prompt,
+)
 from ..pipeline import NoDataError, analyze_signals
 from ..schemas import AnalysisResult
 
 
 class ChatEngine:
-    def __init__(self, cfg: AppConfigs, llm: LlmClient, kb: KnowledgeBase, store):
+    def __init__(self, cfg: AppConfigs, llm: LlmClient, kb: KnowledgeBase, store,
+                 budget: Optional[ContextBudget] = None):
         self.cfg = cfg
         self.llm = llm
         self.kb = kb
         self.store = store
+        self.budget = budget or ContextBudget.from_env()
+        # 摘要子请求要知道是哪个会话（trace 按 chat_id 过滤），但多个会话并行跑线程
+        self._tls = threading.local()
+        self.compressor = ContextCompressor(
+            self.budget,
+            summarizer=self._summarize_with_llm if llm.available else None,
+        )
+
+    def _summarize_with_llm(self, transcript: str, budget_tokens: int) -> str:
+        """压缩器注入的摘要回调；摘要请求失败时由压缩器退化到抽取式。"""
+        r = self.llm.chat(
+            summarize_request(transcript, budget_tokens),
+            chat_id=getattr(self._tls, "chat_id", ""),
+            temperature=0.1, max_tokens=min(800, max(120, budget_tokens)),
+            round_no=0, user_text="context_summary",
+        )
+        return "" if r.error else r.content
 
     # ------------------------------------------------------------ 入口
     def events(self, chat, text: str):
@@ -112,6 +140,18 @@ class ChatEngine:
             yield self._mevent(m)
 
     # ------------------------------------------------------------ LLM 编排（流式）
+    def _fit_context(self, chat, raw: List[dict]) -> Tuple[List[dict], Optional[object]]:
+        """上下文预算检查 + 压缩；压缩过程作为步骤显示，便于事后核对 token。"""
+        self._tls.chat_id = chat.chat_id
+        fitted, note = self.compressor.fit(raw)
+        if not note:
+            return fitted, None
+        # 多跳循环里每轮都会 fit，同一份早期内容会算出同一句说明，别刷重复行
+        if note == getattr(self._tls, "last_note", None):
+            return fitted, None
+        self._tls.last_note = note
+        return fitted, self._step_on(chat, [("上下文压缩", note, "info")])
+
     def _run_llm_stream(self, chat, text: str, state: Dict[str, bool]):
         file_names = [f.name for f in chat.files]
         selected = {
@@ -123,7 +163,10 @@ class ChatEngine:
             {"role": m.role, "kind": m.kind, "content": m.content}
             for m in chat.messages[:-1]
         ]
-        messages = build_chat_messages(self.cfg, history, text, file_names, selected)
+        raw = build_chat_messages(self.cfg, history, text, file_names, selected)
+        messages, step = self._fit_context(chat, raw)
+        if step is not None:
+            yield self._mevent(step)
         exec_tools = {
             "recommend_targets": lambda args: recommend_targets(
                 self.cfg, args.get("query", text), args.get("max_items", 8),
@@ -213,8 +256,14 @@ class ChatEngine:
                                 pass
                     messages.append({
                         "role": "tool", "tool_call_id": tc["id"],
-                        "content": json.dumps(payload, ensure_ascii=False, default=str)[:4000],
+                        "content": json.dumps(payload, ensure_ascii=False, default=str)[
+                            :TOOL_PAYLOAD_CLIP_CHARS],
                     })
+                # 工具结果会把上下文撑大：下一轮请求前再压一次
+                fitted, step = self._fit_context(chat, messages)
+                messages = fitted
+                if step is not None:
+                    yield self._mevent(step)
                 previewed = False
             # 轮数耗尽：按失败处理，让调用方兜离线
             state["failed"] = True

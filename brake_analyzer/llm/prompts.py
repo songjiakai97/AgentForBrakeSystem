@@ -20,6 +20,9 @@ SYSTEM_CHAT = """你是制动系统测试数据分析与标定指导助手，服
 - 数据缺失（missing）时优先提示补测或检查通道映射，不得臆断性能结论；
 - 回答使用简体中文，简洁、面向工程师。"""
 
+HISTORY_TAIL = 40   # 回灌的历史条数上限：只是保险丝，真正的长度由 token 预算控制
+TOOL_PAYLOAD_CLIP_CHARS = 4000   # 单个工具结果写入上下文的字数上限
+
 TOOL_SPECS = [
     {
         "type": "function",
@@ -63,12 +66,32 @@ def function_catalog_text(cfg: AppConfigs) -> str:
     return "\n".join(lines)
 
 
+SUMMARY_SYSTEM = """你是对话压缩器。把制动测试分析对话的早期内容压成要点摘要，供后续轮次作为背景。
+
+要求：
+- 只保留后续决策仍需要的信息：已确定的功能/工况/档位、已分析的文件与结论要点、
+  异常或缺失指标（含关键数值与单位）、用户明确表达过的约束与偏好、未完成的待办；
+- 丢弃寒暄、重复表述、候选列表原文、工具调用的实现细节；
+- 用简体中文陈述条目，不加评论、不编造未出现过的数值；
+- 输出控制在给定 token 预算内，超预算时优先丢弃信息量最低的条目。"""
+
+
+def summarize_request(transcript: str, budget_tokens: int) -> List[dict]:
+    """摘要子请求的 messages：独立于主对话，不占主对话预算。"""
+    return [
+        {"role": "system", "content": SUMMARY_SYSTEM},
+        {"role": "user", "content":
+            f"请压缩为不超过 {budget_tokens} token 的要点摘要：\n\n{transcript}"},
+    ]
+
+
 def build_chat_messages(
     cfg: AppConfigs,
     history: List[dict],
     user_text: str,
     file_names: List[str],
     selected: dict,
+    history_limit: int = HISTORY_TAIL,
 ) -> List[dict]:
     ctx = [
         f"可用功能目录:\n{function_catalog_text(cfg)}",
@@ -79,11 +102,17 @@ def build_chat_messages(
             f"（档位 {selected['profile']}）" if selected.get("profile") else ""))
     system = SYSTEM_CHAT + "\n\n<上下文>\n" + "\n".join(ctx) + "\n</上下文>"
     messages = [{"role": "system", "content": system}]
-    for h in history[-8:]:
-        if h.get("role") in ("user", "assistant") and h.get("kind") in (None, "text"):
-            messages.append({"role": h["role"], "content": h["content"]})
+    # 条数只是保险丝；真正的长度上限由 ContextCompressor 按 token 预算决定（§6.10）
+    tail = [h for h in history if is_injected(h)][-history_limit:]
+    for h in tail:
+        messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": user_text})
     return messages
+
+
+def is_injected(h: dict) -> bool:
+    """只有纯文本轮次回灌上下文：steps / 候选面板 / 结果卡片不进 prompt。"""
+    return h.get("role") in ("user", "assistant") and h.get("kind") in (None, "text")
 
 
 def suggestion_prompt(

@@ -34,6 +34,26 @@ def test_meta_offline(client):
     m = client.get("/api/meta").json()
     assert m["engine"] in ("offline", "llm")
     assert ".mf4" in m["allowed_upload_ext"]
+    # 上下文预算随 .env 生效并被回显（design.md §6.10）
+    ctx = m["context"]
+    assert ctx["compress_tokens"] < ctx["max_tokens"]
+    assert ctx["summarizer"] in ("llm", "extractive")
+
+
+def test_context_stats(client):
+    chat = client.post("/api/chats").json()
+    cid = chat["chat_id"]
+    client.post(f"/api/chats/{cid}/messages", json={"text": "低附着 ABS 分析一下"})
+    r = client.get("/api/context/stats", params={"cid": cid})
+    assert r.status_code == 200
+    s = r.json()
+    assert s["chat_id"] == cid and s["messages"] >= 2
+    assert s["estimated_tokens"] > 0
+    assert s["compress_tokens"] < s["max_tokens"]
+    assert set(s) >= {"over_compress", "over_max"}
+    assert client.get("/api/context/stats", params={"cid": "nope"}).status_code == 404
+    # 不传 cid 时落到最近一个对话
+    assert client.get("/api/context/stats").json()["chat_id"] == cid
 
 
 def test_functions_conditions_kb(client):

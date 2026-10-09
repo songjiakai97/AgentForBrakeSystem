@@ -149,6 +149,7 @@ brake-agent/
 │   ├── llm/
 │   │   ├── client.py
 │   │   ├── prompts.py
+│   │   ├── context.py          # 上下文预算与压缩（§6.10）
 │   │   ├── kb.py
 │   │   └── ingest.py
 │   ├── agent/
@@ -190,7 +191,8 @@ brake-agent/
 
 加载失败即报出可读错误，阻止启动。
 
-`.env` 管理 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL`、`ENABLE_RAG` 等。
+`.env` 管理 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL`、`CONTEXT_MAX_TOKENS`、
+`CONTEXT_COMPRESS_TOKENS`、`ENABLE_RAG` 等（上下文两项见 §6.10）。
 
 ### 6.2 数据读取层（`loaders/`）
 
@@ -332,6 +334,7 @@ load(file)
 
 其他：
 
+- `context.py`：上下文预算与压缩（§6.10），阈值来自 `.env`。
 - `kb.py`：读取手册与案例。默认关键词/规则定位；可选向量检索。
 - `ingest.py`：Word/PDF 摄入为 Markdown 或结构化案例。
 
@@ -366,6 +369,74 @@ load(file)
 
 - 无 `OPENAI_API_KEY` 时完全绕过 LLM。
 - 离线路由 + 规则结论仍可跑通整链路。
+
+### 6.10 上下文预算与压缩（`llm/context.py`）
+
+问题：`Chat.messages` 只追加不裁剪，多轮 + 多跳工具往返后送给 LLM 的 `messages`
+会一直变大；同时工具结果（分析摘要 JSON）本身就可能很大。本节定义长度上限与
+压缩策略，全部由 `.env` 配置。
+
+配置（`.env`，估算 token，非精确 tokenizer 计数）：
+
+| 变量 | 含义 | 默认 |
+| --- | --- | --- |
+| `CONTEXT_MAX_TOKENS` | 一次 LLM 请求允许的最大上下文；超出即硬截断兜底 | 8000 |
+| `CONTEXT_COMPRESS_TOKENS` | 达到该值即触发压缩，把最早的若干轮折叠成一条摘要 | `max(1024, 0.75 × MAX)` |
+
+约束与加载行为：
+
+- `CONTEXT_COMPRESS_TOKENS` 必须严格小于 `CONTEXT_MAX_TOKENS`，否则来不及压缩就撞上
+  硬上限；`ContextBudget.from_env()` 直接抛 `ValueError`，Web 启动失败并报可读错误
+  （与 §6.1 配置校验同样的"拒绝启动"策略）。
+- 非法值（非整数、≤0）同样拒绝启动，不做静默纠正。
+- `CONTEXT_COMPRESS_TOKENS` 留空 = 取硬上限的 75%，只调 `CONTEXT_MAX_TOKENS` 也能工作。
+
+Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tiktoken），按
+「CJK 字符 1 token，其余 4 字符 1 token」估算，再加每条消息 4 token 与每次回复
+3 token 的固定开销；`assistant` 的 `tool_calls` 参数 JSON 一并计入。估算只用于
+判阈值，真上限由 `CONTEXT_MAX_TOKENS` 的硬截断兜住。
+
+压缩流程（`ContextCompressor.fit(messages) -> (messages, note)`）：
+
+1. 估算值 ≤ `CONTEXT_COMPRESS_TOKENS` → 原样返回，`note=None`（不触发，不产生步骤）。
+2. 超阈值 → 保留开头的固定系统提示（功能目录 + 已上传文件 + 已选工况，§6.8），
+   把正文按**轮次单元**切分：一条非 `tool` 消息起头，其后所有 `tool` 结果归入同一单元。
+   折叠必须整单元进行，否则 `assistant` 的 `tool_calls` 会与对应 `tool` 消息拆散，
+   OpenAI 兼容端点直接报 400。
+3. 除最近 `KEEP_RECENT_UNITS`（2）个单元外全部折叠为**一条**摘要消息
+   （`role=system`，前缀 `[历史摘要]`，正文声明"非新的用户请求"）。摘要预算取硬上限的
+   15%（下限 160 token）。
+4. 摘要文本优先由 LLM 生成（`prompts.summarize_request()`，独立子请求，`round=0`
+   落 trace）；摘要请求失败或返回空 → 退化为**抽取式**（逐条截断拼接），压缩不会成为
+   主链路的新故障点。无 Key 的纯离线路由不发 LLM 请求，因此不触发压缩。
+5. 剩余部分装入 `CONTEXT_MAX_TOKENS`：先就地截断最老的超长正文（标记
+   `…（超预算已截断）`，每条至少保留 40 token），仍装不下才整单元丢弃最老的；
+   **最后一个单元（含本轮提问）永不丢弃**。
+6. 没有可折叠的早期内容（首轮或超长单轮）时走同一条裁剪路径。若预算小于系统提示等
+   固定开销、裁到下限仍超限，`note` 如实写明「末轮仍超上限」「不裁剪」，不假装压下了
+   —— 这属于配置错误，应调大 `CONTEXT_MAX_TOKENS`。系统提示（功能目录）本身不参与裁剪。
+
+增量与幂等：
+
+- 压缩只作用于**发给 LLM 的请求**：`Chat.messages` 原样保留，前端仍显示完整历史与
+  全部结果卡片，不因为压缩丢用户可见内容。
+- 下一轮的输入若已含摘要，旧摘要并入新摘要，历史里始终最多一条，不会层层套娃。
+- 摘要按「待折叠内容 + 预算」哈希缓存（上限 64 条）：多跳工具循环里每轮请求前都会
+  `fit`，同一份早期内容只烧一次摘要调用。
+- 触发压缩时向 `steps` 落一条 `上下文压缩` 步骤，`detail` 形如
+  `上下文 1390 → 362 tok · 摘要覆盖 17 段早期内容 · 截断 1 条超长内容`，
+  前端折叠区可见，用于事后核对 token。
+- `fit()` 不修改入参消息对象（写时复制），与 §6.9 的后台线程并发前提一致。
+
+其他注入口径（同为长度控制，但不由本节配置）：
+
+- 历史回灌只取 `kind ∈ {None, text}` 的 user/assistant 消息，条数上限
+  `prompts.HISTORY_TAIL = 40`；条数只是保险丝，真正的长度由 token 预算决定。
+  `steps` / `target_options` / `analysis_result` 不进 prompt。
+- 单个工具结果写入上下文上限 `prompts.TOOL_PAYLOAD_CLIP_CHARS = 4000` 字。
+
+观测：`GET /api/context/stats?cid=` 返回当前会话上下文的估算 token 与两条阈值的关系；
+`GET /api/meta` 的 `context` 字段回显生效的预算与摘要方式（`llm` / `extractive`）。
 
 ---
 
@@ -413,6 +484,7 @@ load(file)
 | GET | `/api/analyses/{analysis_id}` | 单事件样本分析结果 |
 | GET | `/api/analyses/{id}/timeseries` | 事件窗口内信号时序 |
 | GET | `/api/kb` | 知识库只读浏览（手册 section + 案例清单） |
+| GET | `/api/context/stats` | 当前会话上下文的估算 token 与预算阈值（调试用，§6.10） |
 | GET | `/api/debug/traces` | 调试 trace 列表 |
 | GET | `/api/debug/traces/{tid}` | 单条 trace 详情 |
 | GET | `/debug` | 调试页 |
@@ -943,6 +1015,8 @@ learnings: <text>
 
 - 一次 LLM API 请求 = 一条 trace。
 - Trace 记录：`request`、`reply`、`tool_calls`、实际执行工具摘要。
+- 上下文压缩的摘要子请求同样落 trace，`round=0`、`user_text=context_summary`（§6.10），
+  据此可区分主对话请求与摘要请求。
 - 仅内存 `TraceStore`，上限可配（默认 500）。
 - 接口：
   - `GET /api/debug/traces`
@@ -1021,6 +1095,8 @@ Trace 结构：
 OPENAI_BASE_URL
 OPENAI_API_KEY
 OPENAI_MODEL
+CONTEXT_MAX_TOKENS=8000          # 上下文硬上限（估算 token），§6.10
+CONTEXT_COMPRESS_TOKENS=6000     # 触发压缩的阈值，必须小于上一项
 ENABLE_RAG=false
 ```
 
