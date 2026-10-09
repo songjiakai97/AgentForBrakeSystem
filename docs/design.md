@@ -352,8 +352,11 @@ load(file)
 
 编排：
 
-- `ChatEngine.run(chat, text)` 同步入口。
-- `ChatEngine.stream(chat, text)` SSE 流式入口。
+- `ChatEngine.events(chat, text)` 唯一入口，产出统一事件流（delta / message / done）。
+  同步等待由 `RunManager` 负责收集，引擎本身不再区分流式与同步两套入口。
+- 一轮 = 一个后台任务（`web/runs.py` RunManager）：引擎在独立线程产出事件并按单调
+  `seq` 写入缓冲区，SSE 只是缓冲区订阅者。客户端刷新/断网不会中断执行，重连
+  `GET /api/runs/{id}/stream?after=<seq>` 可整轮回放或增量续传。
 - 真 tool-calling：多轮循环，最多 6 轮。
 - 网络/额度错误自动回退离线路由。
 - 流式额外产出 `reasoning`、`tool_call`、`tool_result` 事件。
@@ -404,6 +407,8 @@ load(file)
 | DELETE | `/api/chats/{cid}/files/{fid}` | 移除文件 |
 | POST | `/api/chats/{cid}/messages` | 发送用户消息 |
 | POST | `/api/chats/{cid}/messages/stream` | SSE 流式发送 |
+| GET | `/api/chats/{cid}/run` | 本会话是否有进行中的一轮（刷新后据此重连） |
+| GET | `/api/runs/{run_id}/stream?after=<seq>` | 回放/订阅某轮事件，支持断点续传 |
 | POST | `/api/chats/{cid}/select` | 统一选择接口：`target_type=function` 或 `condition` |
 | GET | `/api/analyses/{analysis_id}` | 单事件样本分析结果 |
 | GET | `/api/analyses/{id}/timeseries` | 事件窗口内信号时序 |

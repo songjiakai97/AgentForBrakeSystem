@@ -22,6 +22,7 @@ from brake_analyzer.events.segment import is_valid  # noqa: E402
 from brake_analyzer.llm.client import LlmClient, TraceStore  # noqa: E402
 from brake_analyzer.llm.kb import KnowledgeBase  # noqa: E402
 from brake_analyzer.schemas import json_safe  # noqa: E402
+from web.runs import RunManager  # noqa: E402
 from web.store import Store  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -55,6 +56,8 @@ STORE = Store()
 KB = KnowledgeBase(KB_DIR)
 LLM = LlmClient(traces=TRACES)
 ENGINE = ChatEngine(CFG, LLM, KB, STORE)
+# 一轮 = 一个后台任务：与 HTTP 连接解耦，刷新/断网不再丢本轮回复
+RUNS = RunManager()
 
 
 @app.on_event("startup")
@@ -209,22 +212,57 @@ def api_send_message(cid: str, body: MessageIn):
     chat = _chat_or_404(cid)
     if not body.text.strip():
         raise HTTPException(400, "消息为空")
-    added = ENGINE.run(chat, body.text.strip())
-    return {"messages": added}
+    run, started = RUNS.start(ENGINE, chat, body.text.strip())
+    if not started:
+        raise HTTPException(409, f"本对话已有一轮在进行中：{run.run_id}，请等待其完成")
+    for _ in run.since(-1):
+        pass
+    if run.status == "error":
+        raise HTTPException(500, f"本轮执行失败：{run.error}")
+    added = [ev["data"] for ev in run.events if ev["event"] == "message"]
+    return {"messages": [json_safe(a) for a in added], "run_id": run.run_id}
+
+
+def _frame(ev: dict) -> str:
+    """SSE 帧：id 即事件序号，断线重连时作为 after 传回即可精确续传。"""
+    data = json.dumps(json_safe(ev["data"]), ensure_ascii=False, default=str, allow_nan=False)
+    return f"id: {ev['seq']}\nevent: {ev['event']}\ndata: {data}\n\n"
+
+
+def _run_stream(gen_run, after: int):
+    yield ("event: run\ndata: "
+           + json.dumps(json_safe(gen_run.info()), ensure_ascii=False, allow_nan=False) + "\n\n")
+    for ev in gen_run.since(after):
+        yield _frame(ev)
 
 
 @app.post("/api/chats/{cid}/messages/stream")
 async def api_send_stream(cid: str, body: MessageIn):
+    """启动一轮并在 SSE 上回放；客户端断开不影响执行，刷新后走 /api/runs/{id}/stream 续看。"""
     chat = _chat_or_404(cid)
     if not body.text.strip():
         raise HTTPException(400, "消息为空")
+    run, started = RUNS.start(ENGINE, chat, body.text.strip())
+    if not started:
+        raise HTTPException(409, f"本对话已有一轮在进行中：{run.run_id}")
+    return StreamingResponse(_run_stream(run, -1), media_type="text/event-stream")
 
-    def gen():
-        for ev in ENGINE.stream(chat, body.text.strip()):
-            # allow_nan=False：SSE 分帧依赖合法 JSON，NaN 会让前端解析整帧失败
-            yield f"event: {ev['event']}\ndata: {json.dumps(json_safe(ev['data']), ensure_ascii=False, default=str, allow_nan=False)}\n\n"
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+@app.get("/api/chats/{cid}/run")
+def api_active_run(cid: str):
+    """刷新后询问本会话是否有进行中的一轮（引擎在后台线程跑，不会因断线丢）。"""
+    chat = _chat_or_404(cid)
+    run = RUNS.active_for(chat.chat_id)
+    return {"run": run.info() if run else None}
+
+
+@app.get("/api/runs/{run_id}/stream")
+def api_run_stream(run_id: str, after: int = Query(-1)):
+    """订阅/回放某轮事件；after 传已收到的最大 seq 做增量续传。"""
+    run = RUNS.get(run_id)
+    if run is None:
+        raise HTTPException(404, "该轮已回收或不存在（会话消息仍可从 GET /api/chats 读取）")
+    return StreamingResponse(_run_stream(run, after), media_type="text/event-stream")
 
 
 class SelectIn(BaseModel):
@@ -237,6 +275,10 @@ class SelectIn(BaseModel):
 def api_select(cid: str, body: SelectIn):
     """统一选择：function → 第二跳工况精排；condition → 写档位并分析。"""
     chat = _chat_or_404(cid)
+    # 后台还有一轮在跑时不接受新动作：两者都会写同一份消息列表，且并发分析无意义
+    running = RUNS.active_for(chat.chat_id)
+    if running is not None:
+        raise HTTPException(409, f"本对话有一轮回复正在进行（{running.run_id}），请等待完成后再选择")
     if body.target_type == "function":
         fn = CFG.function(body.target_key)
         if fn is None:

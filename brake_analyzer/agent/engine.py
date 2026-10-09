@@ -37,14 +37,6 @@ class ChatEngine:
         yield from self._run_stream(chat, text)
         yield {"event": "done", "data": {"chat_id": chat.chat_id}}
 
-    def stream(self, chat, text: str):
-        """兼容旧调用名。"""
-        return self.events(chat, text)
-
-    def run(self, chat, text: str) -> List[dict]:
-        """同步入口：处理一条用户消息，返回新增 assistant 消息 dict 列表。"""
-        return [ev["data"] for ev in self.events(chat, text) if ev["event"] == "message"]
-
     def _engine_name(self) -> str:
         return "llm" if self.llm.available else "offline"
 
@@ -354,7 +346,9 @@ class ChatEngine:
             rows.append({"label": label, "detail": detail, "status": status or "info"})
         for m in chat.messages[::-1]:
             if m.kind == "steps" and not m.meta.get("sealed"):
-                m.data["items"].extend(rows)
+                # 写时替换而非原地 extend：本轮在后台线程跑，
+                # 另一个线程可能正在序列化同一份 data，原地改 list 会让 json 迭代炸掉
+                m.data = {**(m.data or {}), "items": list((m.data or {}).get("items", [])) + rows}
                 m.content = self._steps_text(m.data["items"])
                 chat.touch()
                 return m

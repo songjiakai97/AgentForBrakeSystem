@@ -319,7 +319,7 @@ createApp({
     meta:{engine:'offline'}, chats:[], chat:null, chatId:'',
     draft:'', pending:[], busy:false, samples:[],
     otherText:{}, pfSel:{}, opened:{}, openState:{},
-    live: blankLive(),
+    live: blankLive(), lastSeq: 0, currentRunId: '', runCid: '',
     chartData:null, chartTitle:'', chartGroups:[], chartHidden:[], chartFull:null, _chart:null,
   }},
   async mounted(){
@@ -369,9 +369,32 @@ createApp({
     },
     async openChat(cid){
       this.chatId=cid; this.nav(cid);
+      // 切到别的会话：上一会话的流式预览不再属于这里（那轮仍在后台跑，切回去可续看）
+      if(this.runCid && this.runCid!==cid){ this.live=blankLive(); }
       this.chat = await (await fetch('/api/chats/'+cid)).json();
       this.initPanelState(this.chat.messages);
       this.$nextTick(this.scroll);
+      // 刷新/重进会话时：若后台还有一轮在跑（引擎与连接已解耦），重新订阅回放整轮过程
+      if(!this.busy) this.attachActiveRun();
+    },
+    async attachActiveRun(){
+      if(this._attaching) return;
+      this._attaching = true;
+      try{
+        const d = await (await fetch(`/api/chats/${this.chatId}/run`)).json();
+        if(!d.run || d.run.status!=='running') return;
+        const cid = this.chatId;
+        this.busy = true;
+        this.live = blankLive();
+        this.lastSeq = 0;                 // 从头回放整轮：思考流与已产生的消息都能补回来
+        this.currentRunId = d.run.run_id; this.runCid = cid;
+        try{ await this.followRun(d.run.run_id); }finally{ this.busy = false; }
+        // 回放事件都已转成落库消息，live 只用于展示进行中的部分，收尾即清
+        if(this.chatId===cid) this.live = blankLive();   // 切走了就别动当前会话的显示
+        this.currentRunId = ''; this.runCid = '';
+        if(this.chatId===cid) await this.openChatKeepScroll();
+      }catch(e){ this.busy=false; }
+      finally{ this._attaching = false; }
     },
     async delChat(cid){
       if(!confirm('删除该对话及其全部文件、消息与分析缓存？')) return;
@@ -426,6 +449,19 @@ createApp({
       }
     },
     onEvent(name, data){
+      // 事件属于发起它的那一轮：用户中途切了会话就丢弃（服务端照常落库，切回去看得到）
+      if(this.runCid && this.runCid!==this.chatId) return;
+      if(name==='run'){
+        this.currentRunId = data.run_id || this.currentRunId;
+        if(data.status && data.status!=='running') this.live.done = true;
+        return;
+      }
+      if(name==='run_error'){
+        this.chat.messages.push({message_id:'tmp_x'+Date.now(),role:'assistant',kind:'error',
+                                 content:'本轮执行失败：'+(data.error||''),meta:{}});
+        this.live.done = true;
+        return;
+      }
       if(name==='delta'){
         const ch=data.channel;
         if(ch==='meta') this.live.engine=data.engine||'offline';
@@ -443,33 +479,63 @@ createApp({
       }
       this.$nextTick(this.scroll);
     },
+    // 读取一条 SSE 流：记录每帧 seq，供断线后增量续传；返回是否正常读完
+    async consumeStream(response){
+      const reader=response.body.getReader(), dec=new TextDecoder();
+      let buf='', sawDone=false;
+      const feed=(frame)=>{
+        let ev='message', payload='', idv=null;
+        for(const line of frame.split('\n')){
+          if(line.startsWith('event:')) ev=line.slice(6).trim();
+          else if(line.startsWith('data:')) payload+=line.slice(5).trim();
+          else if(line.startsWith('id:')) idv=line.slice(3).trim();
+        }
+        if(!payload) return;
+        let obj=null;
+        try{ obj=JSON.parse(payload); }catch(e){ return; }
+        // 先派发再推进 seq：派发异常时下次重连会重放这一帧，不会静默丢事件
+        if(ev==='done') sawDone=true;
+        this.onEvent(ev, obj);
+        if(idv!==null && Number(idv)>=this.lastSeq) this.lastSeq=Number(idv)+1;
+      };
+      for(;;){
+        const {value, done} = await reader.read();
+        if(done) break;
+        buf += dec.decode(value, {stream:true});
+        let k;
+        while((k=buf.indexOf('\n\n'))>=0){ feed(buf.slice(0,k)); buf=buf.slice(k+2); }
+      }
+      return sawDone;
+    },
+    async followRun(runId){
+      // 订阅直到本轮真正结束；连接断了就凭 lastSeq 增量重连（服务端有缓冲，不丢字）
+      for(let attempt=0; attempt<8; attempt++){
+        if(this.chatId!==this.runCid) return true;        // 用户切走了：别再往这个会话写
+        try{
+          const r = await fetch(`/api/runs/${runId}/stream?after=${this.lastSeq-1}`);
+          if(r.status===404) return true;            // 已回收：消息已落库，读历史即可
+          if(!r.ok) throw new Error('HTTP '+r.status);
+          if(await this.consumeStream(r)) return true;
+        }catch(e){ /* 断线：下面重试 */ }
+        if(this.chatId!==this.runCid) return true;
+        const st = await fetch(`/api/chats/${this.chatId}/run`).then(x=>x.json()).catch(()=>({run:null}));
+        if(!st.run || st.run.run_id!==runId) return true;   // 后台已跑完
+        await new Promise(res=>setTimeout(res, 600));
+      }
+      return false;
+    },
     async streamSend(text){
-      // 返回 {ok, httpError?}：内部消费事件流；网络中断时不落半轮状态
       this.live = blankLive();
+      this.lastSeq = 0; this.currentRunId = ''; this.runCid = this.chatId;
       const r = await fetch(`/api/chats/${this.chatId}/messages/stream`,
         {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
       if(!r.ok){
         let detail='请求失败'; try{ detail=(await r.json()).detail||detail; }catch(e){}
         return {ok:false, detail};
       }
-      const reader=r.body.getReader(), dec=new TextDecoder();
-      let buf='';
-      for(;;){
-        const {value, done} = await reader.read();
-        if(done) break;
-        buf += dec.decode(value, {stream:true});
-        let k;
-        while((k=buf.indexOf('\n\n'))>=0){
-          const frame=buf.slice(0,k); buf=buf.slice(k+2);
-          let ev='message', payload='';
-          for(const line of frame.split('\n')){
-            if(line.startsWith('event:')) ev=line.slice(6).trim();
-            else if(line.startsWith('data:')) payload+=line.slice(5).trim();
-          }
-          if(!payload) continue;
-          try{ this.onEvent(ev, JSON.parse(payload)); }catch(e){}
-        }
-      }
+      const finished = await this.consumeStream(r);
+      // 连接中断但后台仍在跑 → 自动续订，用户不需要刷新
+      if(!finished && this.currentRunId) await this.followRun(this.currentRunId);
       return {ok:true};
     },
     async send(){
@@ -489,7 +555,11 @@ createApp({
         }
         await this.loadChats();
         await this.openChatKeepScroll();
-      } finally { this.busy=false; this.live=blankLive(); this.$nextTick(this.scroll); }
+      } finally {
+        this.busy=false;
+        this.live=blankLive(); this.runCid='';   // 本轮已结束，指针一律复位
+        this.$nextTick(this.scroll);
+      }
     },
     async choose(m,c){
       const rec=m.data;
@@ -541,7 +611,10 @@ createApp({
         const res = await this.streamSend(t);
         if(!res.ok) this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:res.detail,meta:{}});
         await this.openChatKeepScroll();
-      } finally{ this.busy=false; this.live=blankLive(); }
+      } finally{
+        this.busy=false;
+        this.live=blankLive(); this.runCid='';   // 本轮已结束，指针一律复位
+      }
     },
     async openChatKeepScroll(){
       const el=this.$refs.msgs; const at=el?el.scrollTop:0;
