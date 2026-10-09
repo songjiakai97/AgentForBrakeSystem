@@ -78,9 +78,17 @@ def wheel_slip_max(signals: dict, condition, window: tuple, params: Optional[dic
             max_arr = vals.copy()
         else:
             max_arr = np.maximum(max_arr, np.interp(ref_ts, ts, vals))
-    ts_v, v_vbox = window_slice(signals, vbox_name, window)
-    if v_vbox is None:
+    sig_v = signals.get(vbox_name)
+    if sig_v is None or len(sig_v.ts) == 0:
         return {"value": None, "reason": f"missing:{vbox_name}"}
+    # 车速用整条序列插值到参考轴：窗口边缘由窗外样本真实括住，不在窗口内钳位；
+    # 参考轴落在车速时间范围外则判不可算（与 interp_at 口径一致）。
+    ts_v = np.asarray(sig_v.ts, dtype=np.float64)
+    v_vbox = np.asarray(sig_v.values, dtype=np.float64)
+    order = np.argsort(ts_v, kind="stable")
+    ts_v, v_vbox = ts_v[order], v_vbox[order]
+    if ref_ts[0] < ts_v[0] or ref_ts[-1] > ts_v[-1]:
+        return {"value": None, "reason": f"out_of_range:{vbox_name}"}
     vbox = np.interp(ref_ts, ts_v, v_vbox)
     slip = max_arr - vbox
     return {"value": float(np.max(slip))}

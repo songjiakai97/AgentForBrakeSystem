@@ -204,3 +204,34 @@ def test_slip_unit_kmh(cfg):
     m = _metrics(res)["slip_max"]
     # 合成 slip_peak=50 衰减，量级应为几十 km/h 而非 0~1 或 m/s
     assert 10 < m.value < 60
+
+
+def test_slip_vbox_interpolated_over_full_series():
+    """车速用整条序列 np.interp 到参考轴：窗口边缘由窗外样本括住，
+    不再被窗口内子段钳位；参考轴越出车速范围则判 missing 而非静默错值。"""
+    from brake_analyzer.metrics.tools import wheel_slip_max
+
+    window = (1.0, 2.0)
+    wheels = {
+        f"wheelSpeed_{p}": _sig(np.linspace(1.0, 2.0, 11), np.full(11, 60.0))
+        for p in ("FL", "FR", "RL", "RR")
+    }
+
+    # 车速稀疏：窗口内只有一个 50 km/h 样本，但窗外是 10/90 —— 旧口径会把它
+    # 钳成常数 50，得 slip=10；新口径按整条序列插值。
+    sparse = dict(wheels)
+    sparse["speed_vbox"] = _sig([0.0, 1.5, 3.0], [10.0, 50.0, 90.0])
+    out = wheel_slip_max(sparse, None, window, {"signals": list(sparse)})
+    # slip 在窗口起点最大：vbox(1.0) = 10 + (1.0/1.5)*(50-10) = 36.67
+    assert out["value"] == pytest.approx(60.0 - (10.0 + 40.0 / 1.5))
+
+    # 参考轴越出车速时间范围 → 明确不可算，而不是钳到端点值
+    outside = dict(wheels)
+    outside["speed_vbox"] = _sig([2.2, 3.0], [70.0, 90.0])
+    out = wheel_slip_max(outside, None, window, {"signals": list(outside)})
+    assert out["value"] is None and out["reason"] == "out_of_range:speed_vbox"
+
+    # 车速通道缺失 → missing
+    no_vbox = dict(wheels)
+    out = wheel_slip_max(no_vbox, None, window, {"signals": list(no_vbox)})
+    assert out["value"] is None and out["reason"] == "missing:speed_vbox"
