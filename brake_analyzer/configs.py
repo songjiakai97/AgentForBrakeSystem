@@ -4,6 +4,7 @@
 """
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -472,3 +473,90 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             )
 
     return cfg
+
+
+# ---------------------------------------------------------------- BLF 侧配置（§9.6）
+
+_MSG_ID_RE = re.compile(r"^0x[0-9a-f]+x?$", re.I)
+
+
+@dataclass
+class BlfConfigs:
+    """signals_blf.yaml 的校验结果；path 已解析为绝对路径，可直接喂 BLFLoader。"""
+    dbc_files: Dict[str, Dict[str, Any]]
+    signal_maps: Dict[str, Dict[str, Any]]
+
+
+def _resolve_config_path(path: str, config_dir: str) -> str:
+    """dbc 路径：绝对路径原样；相对路径先按 config_dir 解析，再按仓库根解析。
+
+    signals_blf.yaml 里写 `configs/dbc/brake_demo.dbc`（仓库根相对），
+    这样进程从任意 cwd 启动都能找到文件。
+    """
+    if os.path.isabs(path):
+        return path
+    for base in (config_dir, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))):
+        cand = os.path.normpath(os.path.join(base, path))
+        if os.path.exists(cand):
+            return cand
+    # 都不存在时返回 config_dir 版本，交给后面的存在性检查报错
+    return os.path.normpath(os.path.join(config_dir, path))
+
+
+def load_blf_config(config_dir: str = "configs",
+                    logical_names: Optional[set] = None) -> BlfConfigs:
+    """加载并校验 signals_blf.yaml（结构错误抛 ConfigError，阻止启动）。
+
+    只校验结构，不加载 DBC（不引入 python-can/cantools 依赖）：候选三元组解析失败
+    由 BLFLoader 逐条回退，最终缺信号返回空序列。
+    """
+    path = os.path.join(config_dir, "signals_blf.yaml")
+    raw = _load_yaml(path)          # 缺失/空文件由 _load_yaml 抛 ConfigError
+    if not isinstance(raw, dict):
+        raise ConfigError("signals_blf.yaml 顶层必须是映射（dbc_files + signal_maps）")
+
+    dbc_raw = raw.get("dbc_files")
+    if not isinstance(dbc_raw, dict) or not dbc_raw:
+        raise ConfigError("signals_blf.yaml 缺少非空 dbc_files 段")
+    dbc_files: Dict[str, Dict[str, Any]] = {}
+    for alias, info in dbc_raw.items():
+        if not isinstance(info, dict) or not info.get("path"):
+            raise ConfigError(f"dbc_files.{alias} 缺少 path")
+        ch = info.get("channel")
+        if not isinstance(ch, int) or isinstance(ch, bool):
+            raise ConfigError(f"dbc_files.{alias} 的 channel 必须是 int，实际: {ch!r}")
+        real = _resolve_config_path(str(info["path"]), config_dir)
+        if not os.path.exists(real):
+            raise ConfigError(f"dbc_files.{alias} 的 DBC 文件不存在: {info['path']}")
+        dbc_files[alias] = {"path": real, "channel": ch,
+                            **{k: v for k, v in info.items() if k not in ("path", "channel")}}
+
+    signal_maps = raw.get("signal_maps")
+    if not isinstance(signal_maps, dict) or not signal_maps:
+        raise ConfigError("signals_blf.yaml 缺少非空 signal_maps 段")
+    for name, spec in signal_maps.items():
+        if not isinstance(spec, dict) or not isinstance(spec.get("candidates"), list) \
+                or not spec["candidates"]:
+            raise ConfigError(f"signals_blf.yaml 信号 {name} 缺少非空 candidates 列表")
+        for cand in spec["candidates"]:
+            if not isinstance(cand, (list, tuple)) or len(cand) != 3:
+                raise ConfigError(
+                    f"信号 {name} 的候选必须是 [alias, msg_id, signal_name] 三元组: {cand}")
+            alias, msg_id, sig = cand
+            if alias not in dbc_files:
+                raise ConfigError(f"信号 {name} 的候选 alias 不在 dbc_files: {alias}")
+            if isinstance(msg_id, bool) or not isinstance(msg_id, (str, int)):
+                raise ConfigError(f"信号 {name} 的 msg_id 必须是字符串或 int: {msg_id!r}")
+            if isinstance(msg_id, str) and not _MSG_ID_RE.match(msg_id.strip()):
+                raise ConfigError(
+                    f"信号 {name} 的 msg_id 非法: {msg_id!r}（约定 \"0x123\" 标准帧、"
+                    "\"0x123x\" 扩展帧）")
+
+    if logical_names is not None:
+        got, want = set(signal_maps), set(logical_names)
+        if got != want:
+            raise ConfigError(
+                f"signals_blf.yaml 与 signals_mf4.yaml 的逻辑信号集不一致："
+                f"BLF 侧缺 {sorted(want - got)}，多 {sorted(got - want)}")
+
+    return BlfConfigs(dbc_files=dbc_files, signal_maps=signal_maps)

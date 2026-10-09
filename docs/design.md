@@ -129,7 +129,9 @@ brake-agent/
 ├── .env.example
 ├── configs/
 │   ├── signals_mf4.yaml
-│   ├── signals_blf.yaml
+│   ├── signals_blf.yaml        # BLF 侧：dbc_files + 三元组候选（§9.6）
+│   ├── dbc/
+│   │   └── brake_demo.dbc      # demo 唯一 DBC，由 scripts/generate_demo_blf.py 生成后入库
 │   ├── functions.yaml          # 功能清单
 │   ├── conditions.yaml         # 工况清单，按 function_key 索引
 │   ├── metrics.yaml            # 指标模板（全局）
@@ -164,6 +166,9 @@ brake-agent/
 │   │   └── tools.py
 │   ├── pipeline.py
 │   └── schemas.py
+├── scripts/
+│   ├── generate_demo_data.py   # MF4 demo：合成物理剖面
+│   └── generate_demo_blf.py    # BLF demo：cantools 建 DBC + python-can 写 BLF（复用同一剖面）
 ├── web/
 │   ├── main.py
 │   ├── store.py
@@ -171,7 +176,7 @@ brake-agent/
 │       ├── index.html
 │       └── debug.html
 └── tests/
-    ├── data/
+    ├── data/                   # mf4/ 与 blf/ 均可再生，不入库
     └── test_*.py
 ```
 
@@ -200,6 +205,18 @@ brake-agent/
 
 加载失败即报出可读错误，阻止启动。
 
+`signals_blf.yaml` 由同文件的 `load_blf_config(config_dir, logical_names=None)` 加载校验
+（与 `load_configs` 分开，因为 BLF 是可选能力，内核启动不强依赖它）：
+
+- `dbc_files` 必须非空，`channel` 必须是 int；`path` 解析成绝对路径后必须存在
+  （相对路径先按 `config_dir` 解析，再按仓库根解析，故 yaml 里可写
+  `configs/dbc/brake_demo.dbc`，进程从任意 cwd 启动都能找到）。
+- 每条候选必须是 `[alias, msg_id, signal_name]` 三元组，alias 在 `dbc_files` 内，
+  `msg_id` 符合 `"0x123"` / `"0x123x"` / int 约定。
+- 传入 `logical_names`（MF4 侧的逻辑信号集）时校验两侧集合完全一致，避免 BLF 少配信号。
+- 只校验结构，不加载 DBC —— 不在内核里硬绑 python-can/cantools；候选解析失败仍由
+  `BLFLoader` 逐条回退。
+
 `.env` 管理 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL`、`CONTEXT_MAX_TOKENS`、
 `CONTEXT_COMPRESS_TOKENS`、`ENABLE_RAG` 等（上下文两项见 §6.10）。
 
@@ -212,7 +229,9 @@ brake-agent/
 - 信号映射全局共享；功能与工况差异只体现在指标集、参数、阈值。
 - 每个 `SignalData` 的 `ts` 统一相对起点偏移，便于跨文件对齐。
 - demo 阶段 Web 入口只开放 MF4（不依赖外部 DBC 文件）；`BLFLoader` 作为内核能力保留，
-  等真实 CAN 数据与 DBC 到位后再接入上传入口。
+  等真实 CAN 数据与 DBC 到位后再接入上传入口。BLF 侧的 demo 数据已在仓库内跑通
+  （`scripts/generate_demo_blf.py` 用 cantools 生成唯一一份 DBC、python-can 写 BLF，
+  通道全 0），由 `tests/test_blf_demo.py` 覆盖，只差上传入口。
 
 `SignalData` 契约：
 
@@ -790,6 +809,29 @@ signal_maps:
 - `msg_id` 约定：字符串 `"0x123"` 标准帧、`"0x123x"`（十六进制 + `x` 后缀）扩展帧、裸 int 按标准帧兼容处理。
 - 三元组解析失败（alias 不存在、frame_id 查不到、signal 不在报文中）尝试下一候选；全部失败返回空 `ts`/`values`，不报错。
 
+demo 约定（`configs/signals_blf.yaml` + `configs/dbc/brake_demo.dbc`）：
+
+- **一份 DBC 管全部 12 个逻辑信号**，alias = `BRAKE`，`channel: 0`；所有 BLF 帧也发在通道 0
+  （loader 按 `(frame_id, is_extended, channel)` 匹配，两侧必须一致）。
+- DBC 由 `scripts/generate_demo_blf.py` 用 cantools 定义后 `dump_file` 生成，**入库**（4 KB，
+  是数据契约的一部分）；BLF 输出到 `tests/data/blf/`，与 MF4 一样不入库、可再生。
+- 实车信号名 = 逻辑名（不做重命名），状态位 1 bit 带 `INACTIVE/ACTIVE` 枚举表，
+  报文 8 字节标准帧、逐信号连续排布（结构上不可能重叠），`check_layout()` 生成即自检。
+
+  | 帧 | 内容 | 量化 |
+  |---|---|---|
+  | 0x100 / 0x101 | wheelSpeed_FL/FR、RL/RR | 16bit × 0.01 km/h |
+  | 0x102 | speed_vbox / distance_vbox / Ax | 0.01 km/h、0.05 m、有符号 0.01 m/s² |
+  | 0x103 | BrakePedalPos / ThrottlePedalPos / ABS_Active / TCS_Active | 8bit × 0.5 %、1bit × 1 |
+  | 0x104 | yaw_rate | 16bit 有符号 × 0.01 deg/s |
+
+- factor 的选择原则是「不改变 demo 判定」：distance 0.05 m 相对 40 m 阈值、踏板 0.5 % 相对
+  80/95 % 的 `pedal_arm_pct`、速度 0.01 km/h 相对滑移量阈值都留了数量级余量。
+- 横摆单独占一帧，`abs_wet60_no_yaw.blf` 整帧不发，用来验证 BLF 路径下的 missing 口径。
+- 发送周期 10 ms，与 MF4 demo 的时间栅格一致；物理剖面直接复用 `gen_abs_run`/`gen_tcs_run`，
+  且 BLF 场景的 `seed` 显式取该场景在 MF4 `scenario_matrix()` 里的下标 —— 剖面同源，
+  两条加载路径的指标差异才只来自 CAN 量化（`tests/test_blf_demo.py` 卡住状态一致 + 数值容差）。
+
 ---
 
 ## 10. 指标判定与 pick 实现
@@ -1189,6 +1231,14 @@ Web：
 python -m uvicorn web.main:app --port 8000
 ```
 
+Demo 数据（`tests/data/` 不入库，克隆后首次 `pytest` 由 `tests/conftest.py` 自动生成）：
+
+```bash
+python scripts/generate_demo_data.py      # → tests/data/mf4（22 个 MF4）
+python scripts/generate_demo_blf.py       # → configs/dbc/brake_demo.dbc + tests/data/blf（6 个 BLF）
+python scripts/generate_demo_blf.py --period 0.02   # 改发送周期（默认 10 ms，与 MF4 栅格一致）
+```
+
 依赖分组：
 
 - `core`
@@ -1211,6 +1261,9 @@ python -m uvicorn web.main:app --port 8000
   §13 的"命中唯一才开跑"能保证选错时是弹面板而不是静默分析，但抽错维度仍会出现。
 - 结构化解析依赖配置纪律：同功能内唯一键重复会在加载期失败（§2.2），新增工况时
   这是最先要看的报错。
+- demo DBC 的帧 id、factor 与 10 ms 周期是自定义的（§9.6）：真实 DBC 到位后量化可能更粗，
+  `tests/test_blf_demo.py` 的状态一致断言要重跑，判定阈值余量不足的指标（如 distance）
+  可能需要改 factor 而不是放宽容差。
 
 ### 后续扩展
 
