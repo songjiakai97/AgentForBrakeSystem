@@ -146,7 +146,7 @@ class ContextCompressor:
     """超预算时把早期轮次折叠为一条摘要，必要时硬截断兜底。
 
     summarizer(transcript, budget_tokens) -> str 由调用方注入（走 LLM）；
-    未注入或返回空时退化为抽取式（逐条截断拼接），离线环境同样有界。
+    未注入或返回空时退化为抽取式（逐条截断拼接），摘要失败不会拖垮主链路。
     返回 (messages, note)：note 为人类可读的压缩说明，None 表示未触发。
     """
 
