@@ -23,10 +23,12 @@ class Run:
         self.chat_id = chat_id
         self.text = text
         self.events: List[dict] = []          # {"seq", "event", "data"}
-        self.status = "running"               # running | done | error
+        self.status = "running"               # running | done | error | stopped
         self.error: str = ""
         self.created_at = time.time()
         self.finished_at: Optional[float] = None
+        self.stop_requested = False           # 用户按了停止，等引擎下一个事件点收尾
+        self.stop_event = threading.Event()   # 同一标记的可等待版本，传给引擎在检查点自检
         self.cond = threading.Condition()
 
     def publish(self, event: str, data: dict) -> int:
@@ -35,6 +37,21 @@ class Run:
             self.events.append({"seq": seq, "event": event, "data": data})
             self.cond.notify_all()
             return seq
+
+    def request_stop(self) -> bool:
+        """请求停止。只有还在跑的一轮能被停，已结束返回 False。
+
+        停止只置标记，不在这里动生成器：引擎在另一个线程执行中，
+        从外部 close() 会抛 "generator already executing"。收尾由引擎在
+        下一个检查点（每个 LLM delta、每轮工具、每个文件）自己完成，
+        引擎会把已流出的半截正文按方案落库后再返回。
+        """
+        with self.cond:
+            if self.status != "running":
+                return False
+            self.stop_requested = True
+            self.stop_event.set()
+            return True
 
     def finish(self, status: str = "done", error: str = "") -> None:
         with self.cond:
@@ -99,9 +116,10 @@ class RunManager:
 
     def _worker(self, engine, chat, text: str, run: Run) -> None:
         try:
-            for ev in engine.events(chat, text):
+            for ev in engine.events(chat, text, stop_event=run.stop_event):
                 run.publish(ev.get("event", "message"), ev.get("data", {}))
-            run.finish("done")
+            # 引擎被停止时自己收尾，这里据标记区分 done / stopped
+            run.finish("stopped" if run.stop_requested else "done")
         except Exception as e:                      # 引擎异常：状态置 error，前端可见
             run.finish("error", f"{type(e).__name__}: {e}")
         finally:
@@ -111,6 +129,14 @@ class RunManager:
 
     def get(self, run_id: str) -> Optional[Run]:
         return self._runs.get(run_id)
+
+    def stop(self, run_id: str) -> Optional[Run]:
+        """请求停止某轮；不存在返回 None，已结束返回该 run（调用方按 status 判断）。"""
+        run = self._runs.get(run_id)
+        if run is None:
+            return None
+        run.request_stop()
+        return run
 
     def active_for(self, chat_id: str) -> Optional[Run]:
         with self._lock:

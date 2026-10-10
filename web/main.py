@@ -321,6 +321,15 @@ def api_active_run(cid: str):
     return {"run": run.info() if run else None}
 
 
+@app.post("/api/runs/{run_id}/stop")
+def api_stop_run(run_id: str):
+    """请求停止进行中的一轮：只置标记，引擎在下一个检查点收尾（半截正文落库）。"""
+    run = RUNS.stop(run_id)
+    if run is None:
+        raise HTTPException(404, "该轮已回收或不存在（会话消息仍可从 GET /api/chats 读取）")
+    return {"run_id": run.run_id, "stop_requested": run.stop_requested, "status": run.status}
+
+
 @app.get("/api/runs/{run_id}/stream")
 def api_run_stream(run_id: str, after: int = Query(-1)):
     """订阅/回放某轮事件；after 传已收到的最大 seq 做增量续传。"""

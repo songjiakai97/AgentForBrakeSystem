@@ -171,6 +171,7 @@ brake-agent/
 │   └── generate_demo_blf.py    # BLF demo：cantools 建 DBC + python-can 写 BLF（复用同一剖面）
 ├── web/
 │   ├── main.py
+│   ├── runs.py                 # 一轮 = 后台任务 + 事件缓冲 + 协作式停止（§6.9）
 │   ├── store.py
 │   └── frontend/
 │       ├── index.html
@@ -419,11 +420,28 @@ load(file)
 
 编排：
 
-- `ChatEngine.events(chat, text)` 唯一入口，产出统一事件流（delta / message / done）。
+- `ChatEngine.events(chat, text, stop_event=None)` 唯一入口，产出统一事件流（delta / message / done）。
   同步等待由 `RunManager` 负责收集，引擎本身不再区分流式与同步两套入口。
 - 一轮 = 一个后台任务（`web/runs.py` RunManager）：引擎在独立线程产出事件并按单调
   `seq` 写入缓冲区，SSE 只是缓冲区订阅者。客户端刷新/断网不会中断执行，重连
   `GET /api/runs/{id}/stream?after=<seq>` 可整轮回放或增量续传。
+- **停止一轮是协作式的**（`stop_event: threading.Event`）：`RunManager.stop()` 只置标记，
+  绝不在别的线程 `close()` 正在执行的生成器（那会抛 `generator already executing`）。
+  引擎在检查点自检：每轮工具开始前、每个流式 delta 之后、`_analyze` 每个文件开始前
+  （工具阶段是整轮最慢的一段且期间没有 delta 可检查，故必须按文件自检）。
+  收尾走方案 (a)：`_finish_stopped` 封存步骤、把**已经流出的半截正文落成消息**（正文末尾
+  追加「—— 用户已停止本轮（回答未完整）」，`meta.stopped=True`；正文此前只以 delta 流出，
+  故同时标 `meta.streamed=True` 让前端 live 气泡让位给落库版本），未流出一个字则回一行
+  「本轮已按你的要求停止。」，事件流照常以 `done` 结束。`preview_buf` 在正文落库后清空，
+  避免后续轮次被停止时把旧正文再写一遍。
+  停止置 `state["stopped"]`，上层直接返回——**停止不是失败，绝不回退离线路由**；
+  `Run.status` 因此新增 `stopped`（与 `done`/`error` 并列），`api_send_message` 只在
+  `error` 时 500，停止的一轮照常返回已落库消息。
+  分析阶段被停时补一条 warn 步骤「已停止：N 个文件未分析」，前序文件的结果照常落库；
+  若一个文件都还没跑就停，落的是「本轮已按你的要求停止：尚未开始分析文件。」而不是
+  「没有可分析的文件。」——后者会把"你还没上传文件"这句道歉塞给用户。
+  `stop_event` 全程按参数传递、不存 `ChatEngine` 实例属性——`ENGINE` 是全局单例，
+  多个会话同时在跑线程。
 - 真 tool-calling：多轮循环，最多 6 轮。
 - 工具 `hop` 的落库规则：`function`/`condition`/`profile` → 落 `target_options` 面板；
   `catalog`（工况清单）与 `resolved` 只作为 `tool` 应答回灌模型，不弹面板；`error` 交还
@@ -572,6 +590,7 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 | POST | `/api/chats/{cid}/messages/stream` | SSE 流式发送 |
 | GET | `/api/chats/{cid}/run` | 本会话是否有进行中的一轮（刷新后据此重连） |
 | GET | `/api/runs/{run_id}/stream?after=<seq>` | 回放/订阅某轮事件，支持断点续传 |
+| POST | `/api/runs/{run_id}/stop` | 请求停止进行中的一轮（§6.9 协作式停止）；未知 id 404，已结束的一轮只回状态 |
 | POST | `/api/chats/{cid}/select` | 统一选择接口：`target_type=function` 或 `condition` |
 | GET | `/api/analyses/{analysis_id}` | 单事件样本分析结果 |
 | GET | `/api/analyses/{id}/timeseries` | 事件窗口内信号时序 |
@@ -656,6 +675,19 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 - 当前同步返回。
 - 前端显示“分析中…”占位气泡。
 - 演进规划：状态机 `idle → uploading → choosing_condition → running → done / failed`；本期未引入任务队列。
+
+**停止按钮（与上面的“刷新不停止”是一对）**
+
+- 一轮进行中，输入区的「发送」键就地变成红色「■ 停止」键（`.sendbtn.stop`），
+  点它 `POST /api/runs/{currentRunId}/stop`；不额外加一个常驻按钮，避免两个键抢位。
+- 停止只作用于「有 run 的一轮」：文本消息走 `RunManager`，因此可停；
+  点选面板的 `POST /api/chats/{cid}/select` 在服务端同步执行、不属于任何 run，
+  这时按钮显示灰色「处理中…」（禁用 + 说明性 title），不给一个按不动的停止键。
+  实现上按 `busy && currentRunId` 判定：`currentRunId` 来自 `run` 事件，同步路径恒为空。
+- 刷新/切会话仍然不停止（§6.9 订阅者断开不影响执行）：想停只能按这个键。
+  停止后 `meta.stopped` 的那条正文按普通 `text` 消息渲染，同时带 `meta.streamed`，
+  live 气泡让位，不会出现半截回答显示两遍。
+- 前端不为停止特判事件流：引擎照常发 `done`，`busy` 复位，会话立即可再发下一轮。
 
 ---
 

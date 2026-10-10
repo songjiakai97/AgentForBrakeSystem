@@ -65,30 +65,40 @@ class ChatEngine:
         return "" if r.error else r.content
 
     # ------------------------------------------------------------ 入口
-    def events(self, chat, text: str):
+    def events(self, chat, text: str, stop_event=None):
         """统一事件流：{"event": "delta"|"message"|"done", "data": {...}}。
 
         - delta.channel: meta / reasoning / content / reset
         - message.data: 与 GET /api/chats 中同构的消息 dict
         - reset: LLM 预览失败，前端应丢弃本轮未落库的流式内容
+        - stop_event: 可选 threading.Event，用户按「停止」时置位。引擎在下一个检查点
+          自己收尾，不从外部 close 生成器（那会抛 generator already executing）。
+          只在本次调用内传递，不存实例属性——ENGINE 是全局单例，多会话并行跑线程。
         """
         yield self._delta("meta", "", engine=self._engine_name())
-        yield from self._run_stream(chat, text)
+        yield from self._run_stream(chat, text, stop_event)
         yield {"event": "done", "data": {"chat_id": chat.chat_id}}
+
+    @staticmethod
+    def _stopped(stop_event) -> bool:
+        return stop_event is not None and stop_event.is_set()
 
     def _engine_name(self) -> str:
         return "llm" if self.llm.available else "offline"
 
     # ------------------------------------------------------------ 核心调度
-    def _run_stream(self, chat, text: str):
+    def _run_stream(self, chat, text: str, stop_event=None):
         self.store.add_message(chat, "user", "text", content=text)
         # 用户另起一轮提问：此前的候选面板视为已回答，前端折叠为「已选择」
         self.store.mark_panels_consumed(chat)
         self._seal_steps(chat)
 
         if self.llm.available:
-            state = {"claimed": False, "failed": False}
-            yield from self._run_llm_stream(chat, text, state)
+            state = {"claimed": False, "failed": False, "stopped": False}
+            yield from self._run_llm_stream(chat, text, state, stop_event)
+            if state["stopped"]:
+                # 停止不是失败：绝不回退离线路由，否则会凭空多出一段离线结论
+                return
             if not state["failed"]:
                 return
             if not state["claimed"]:
@@ -96,10 +106,13 @@ class ChatEngine:
                 yield self._delta("reset", "")
             # 已落库部分保留，继续离线兜底补全本轮结论
 
-        yield from self._run_offline_stream(chat, text)
+        yield from self._run_offline_stream(chat, text, stop_event)
 
     # ------------------------------------------------------------ 离线路由（带步骤）
-    def _run_offline_stream(self, chat, text: str):
+    def _run_offline_stream(self, chat, text: str, stop_event=None):
+        if self._stopped(stop_event):
+            yield self._mevent(self._msg(chat, "text", "本轮已按你的要求停止。"))
+            return
         yield self._delta("reasoning", f"解析目标：「{text}」")
         scope = chat.selected_function or "全功能"
         yield self._delta("reasoning", f"两跳推荐（当前范围：{scope}）")
@@ -147,7 +160,9 @@ class ChatEngine:
                 "profile_dims": fn.profile_dims}))
             return
         yield self._delta("reasoning", f"目标唯一命中「{target['name']}」，直接分析")
-        for m in self._analyze(chat, target["key"], profile=None)[0]:
+        # 分析阶段是离线路径最慢的一段，把停止标记传下去按文件自检
+        for m in self._analyze(chat, target["key"], profile=None,
+                               stop_event=stop_event)[0]:
             yield self._mevent(m)
 
     # ------------------------------------------------------------ LLM 编排（流式）
@@ -163,7 +178,8 @@ class ChatEngine:
         self._tls.last_note = note
         return fitted, self._step_on(chat, [("上下文压缩", note, "info")])
 
-    def _run_llm_stream(self, chat, text: str, state: Dict[str, bool]):
+    def _run_llm_stream(self, chat, text: str, state: Dict[str, bool],
+                        stop_event=None):
         file_names = [f.name for f in chat.files]
         selected = {
             "function": chat.selected_function,
@@ -196,15 +212,20 @@ class ChatEngine:
                 function_key=chat.selected_function,
             ),
             "run_analysis_on_files": lambda args: self._analyze(
-                chat, args.get("condition_id"), args.get("profile")
+                chat, args.get("condition_id"), args.get("profile"), stop_event
             ),
         }
         # 工具规格由配置生成（维度/工况 id 作 enum），已选定功能时进一步收窄取值域
         tool_specs = build_tool_specs(self.cfg, scope_function=chat.selected_function)
         previewed = False   # 是否已向用户流出了正文预览
+        preview_buf: List[str] = []   # 已流出的正文，停止时按方案 (a) 落库
         try:
             for rnd in range(1, 7):
+                if self._stopped(stop_event):
+                    yield from self._finish_stopped(chat, state, preview_buf)
+                    return
                 reply = None
+                stop_mid = False
                 for ev in self.llm.chat_stream(
                         messages, tools=tool_specs, chat_id=chat.chat_id,
                         user_text=text, round_no=rnd):
@@ -212,8 +233,17 @@ class ChatEngine:
                         yield self._delta(ev["channel"], ev["text"])
                         if ev["channel"] == "content":
                             previewed = True
+                            preview_buf.append(ev["text"])
+                        if self._stopped(stop_event):
+                            stop_mid = True
+                            break
                     else:
                         reply = ev["reply"]
+                if stop_mid:
+                    # 已流出的预览落库，本轮就此结束（不写回 messages，不回退离线）
+                    yield from self._finish_stopped(chat, state, preview_buf,
+                                                   note="用户已停止本轮（回答未完整）")
+                    return
                 if reply is None or reply.error:
                     state["failed"] = True
                     return
@@ -249,6 +279,8 @@ class ChatEngine:
                     m.meta["streamed"] = True
                     state["claimed"] = True
                     yield self._mevent(m)
+                    # 这段预览已落库：清空缓冲，否则后续轮次被停止时会把它再写一遍
+                    preview_buf.clear()
 
                 for tc in reply.tool_calls:
                     name, args = tc["name"], tc["arguments"]
@@ -341,6 +373,27 @@ class ChatEngine:
         except Exception:
             state["failed"] = True
 
+    def _finish_stopped(self, chat, state: Dict[str, bool],
+                        previewed: List[str], note: str = "用户已停止本轮"):
+        """方案 (a)：把已经流出的半截正文落成消息再结束，信息不丢。
+
+        预览正文此前只以 delta 形式流出、尚未落库；停止后若直接结束，刷新就看不到它。
+        这里补一条带「已停止」标记的 text 消息，并置 state["stopped"]，
+        让上层知道这不是失败（绝不能回退离线路由，否则凭空多出一段离线结论）。
+        """
+        self._seal_steps(chat)
+        text = "".join(previewed).strip()
+        state["claimed"] = True
+        if text:
+            # 这段正文此前只以 delta 流出，标 streamed 让前端 live 气泡让位给落库版本
+            m = self._msg(chat, "text", text + f"\n\n—— {note}",
+                          meta={"stopped": True, "streamed": True})
+            yield self._mevent(m)
+        else:
+            # 一个字都还没出来：给一行明确回执，避免界面停在「处理中…」
+            yield self._mevent(self._msg(chat, "text", "本轮已按你的要求停止。"))
+        state["stopped"] = True
+
     def _profile_guard(self, chat, condition_id: str):
         """声明了档位的功能未选档 → 返回档位面板；不需要拦时返回 None。
 
@@ -371,8 +424,8 @@ class ChatEngine:
         return self._loaders[ext]
 
     # ------------------------------------------------------------ 分析
-    def _analyze(self, chat, condition_id: str,
-                 profile: Optional[str]) -> Tuple[List, List[dict]]:
+    def _analyze(self, chat, condition_id: str, profile: Optional[str],
+                 stop_event=None) -> Tuple[List, List[dict]]:
         """执行分析并落库可见消息。
 
         返回 (消息列表, 数值摘要列表)。摘要与结果卡片同源，既拼进卡片正文
@@ -400,7 +453,15 @@ class ChatEngine:
 
         results: List[AnalysisResult] = []
         errors: List[str] = []
-        for f in chat.files:
+        stopped_early = False
+        for i, f in enumerate(chat.files):
+            # 工具阶段是整轮最慢的一段，且期间没有 delta 可供上层检查停止：
+            # 每个文件开始前自检，已完成的文件结果照常保留落库
+            if self._stopped(stop_event):
+                stopped_early = True
+                self._step_on(chat, [(f"已停止：{len(chat.files) - i} 个文件未分析",
+                                      "前序文件的结果已保留", "warn")])
+                break
             sess = self.store.session(f.file_id)
             try:
                 if sess.signals is None:
@@ -429,7 +490,11 @@ class ChatEngine:
             digests.append(digest_from_analysis(res.to_dict()))
         if errors:
             added.append(self._msg(chat, "error", "部分文件分析失败：\n" + "\n".join(errors)))
-        if not results and not errors:
+        elif stopped_early and not results:
+            # 一个文件都还没跑就停了：别报"没有可分析的文件"，那会误导模型和用户
+            added.append(self._msg(chat, "text", "本轮已按你的要求停止：尚未开始分析文件。",
+                                   meta={"stopped": True}))
+        elif not results and not errors:
             added.append(self._msg(chat, "error", "没有可分析的文件。"))
         return added, digests
 
@@ -489,8 +554,9 @@ class ChatEngine:
         return "\n".join(lines)
 
     # ------------------------------------------------------------ 消息工厂
-    def _msg(self, chat, kind: str, content: str, data=None):
-        return self.store.add_message(chat, "assistant", kind, content=content, data=data)
+    def _msg(self, chat, kind: str, content: str, data=None, meta=None):
+        return self.store.add_message(chat, "assistant", kind, content=content,
+                                      data=data, meta=meta)
 
     def _step_on(self, chat, items: List):
         """把步骤落进本轮最近的未封存 steps 消息（追加），否则新建一条。"""

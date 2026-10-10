@@ -22,7 +22,7 @@ class SlowEngine:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def events(self, chat, text):
+    def events(self, chat, text, stop_event=None):
         yield {"event": "delta",
                "data": {"channel": "meta", "text": "", "engine": "offline"}}
         self.started.set()
@@ -237,7 +237,7 @@ def test_engine_error_is_visible(slow):
     m, fake, client = slow
 
     class Boom:
-        def events(self, chat, text):
+        def events(self, chat, text, stop_event=None):
             yield {"event": "delta", "data": {"channel": "meta", "text": "", "engine": "offline"}}
             raise RuntimeError("引擎炸了")
 
@@ -256,3 +256,133 @@ def test_engine_error_is_visible(slow):
 
 def test_unknown_run_is_404(client):
     assert client.get("/api/runs/run_nope/stream").status_code == 404
+
+
+class StoppableEngine:
+    """流式吐一段正文后等 stop_event，再按引擎契约收尾（方案 a：半截正文落库）。
+
+    timeout=0 时不等停止直接收尾——用来测「停止之后还能不能发新轮」。
+    """
+
+    def __init__(self, store, timeout: float = 10.0):
+        self.store = store
+        self.started = threading.Event()
+        self.timeout = timeout
+
+    def events(self, chat, text, stop_event=None):
+        yield {"event": "delta",
+               "data": {"channel": "meta", "text": "", "engine": "llm"}}
+        yield {"event": "delta", "data": {"channel": "content", "text": "实测制动距离 85.6 m"}}
+        self.started.set()
+        assert stop_event is not None, "运行管理器必须把停止标记传进引擎"
+        stop_event.wait(timeout=self.timeout)
+        msg = self.store.add_message(
+            chat, "assistant", "text",
+            content="实测制动距离 85.6 m\n\n—— 用户已停止本轮（回答未完整）",
+            meta={"stopped": True, "streamed": True})
+        yield {"event": "message", "data": msg.to_dict()}
+        yield {"event": "done", "data": {"chat_id": chat.chat_id}}
+
+
+@pytest.fixture()
+def stoppable(client):
+    """把可停止的假引擎换进 web.main.ENGINE（RUNS.start 取的就是它），测完还原。"""
+    import web.main as m
+
+    original = m.ENGINE
+    fake = StoppableEngine(m.STORE)
+    m.ENGINE = fake
+    try:
+        yield m, client, fake
+    finally:
+        m.ENGINE = original
+
+
+def _wait_finished(run, tries=60):
+    for _ in range(tries):
+        if run.status != "running":
+            return run.status
+        time.sleep(0.05)
+    return run.status
+
+
+def test_stop_endpoint_stops_running_run(stoppable):
+    """POST /api/runs/{id}/stop：置标记 → 引擎收尾 → 状态 stopped，会话不再占用。"""
+    m, client, fake = stoppable
+    cid = m.STORE.create_chat("stop").chat_id
+    run, started = m.RUNS.start(m.ENGINE, m.STORE.get_chat(cid), "随便看看")
+    assert started and run.stop_requested is False
+    assert fake.started.wait(3)
+
+    r = client.post(f"/api/runs/{run.run_id}/stop")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["stop_requested"] is True, body
+    # 接口只置标记、不阻塞等产品：回 running / stopped 都取决于收尾快慢
+    assert body["status"] in ("running", "stopped"), body
+
+    assert _wait_finished(run) == "stopped"                  # 与 done/error 区分开
+    assert m.RUNS.active_for(cid) is None, "停止后不该还占着会话"
+    assert client.get(f"/api/chats/{cid}/run").json()["run"] is None
+
+    stored = client.get(f"/api/chats/{cid}").json()["messages"]
+    stopped = [x for x in stored if x.get("meta", {}).get("stopped")]
+    assert stopped and stopped[0]["content"].startswith("实测制动距离 85.6 m")
+    # 事件流照常走到 done，前端不需要为停止特判
+    assert run.events[-1]["event"] == "done"
+
+
+def test_stopped_session_is_free_again(stoppable):
+    """停止的意义之一是不再锁会话：紧接着的追问不该 409。"""
+    m, client, fake = stoppable
+    cid = m.STORE.create_chat("stop-free").chat_id
+    run, started = m.RUNS.start(m.ENGINE, m.STORE.get_chat(cid), "随便看看")
+    assert started and fake.started.wait(3)
+    client.post(f"/api/runs/{run.run_id}/stop")
+    assert _wait_finished(run) == "stopped"
+
+    m.ENGINE = StoppableEngine(m.STORE, timeout=0.2)   # 第二轮不等停止，只为确认不 409
+    dup = client.post(f"/api/chats/{cid}/messages", json={"text": "停止后还能追问"})
+    assert dup.status_code == 200, dup.text
+
+
+def test_stop_finished_run_is_harmless(stoppable):
+    """已结束的一轮停不了：只回状态，不报错，也不把 done 改成别的。"""
+    m, client, fake = stoppable
+    cid = m.STORE.create_chat("stop-done").chat_id
+    run, started = m.RUNS.start(m.ENGINE, m.STORE.get_chat(cid), "随便看看")
+    assert started and fake.started.wait(3)
+    client.post(f"/api/runs/{run.run_id}/stop")   # 先置标记，让这一轮按停止收尾
+    assert _wait_finished(run) == "stopped"
+
+    r = client.post(f"/api/runs/{run.run_id}/stop")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "stopped", "重复停止不该把状态改回去或报错"
+    assert len([e for e in run.events if e["event"] == "message"]) == 1
+
+
+def test_stop_unknown_run_is_404(client):
+    assert client.post("/api/runs/run_nope/stop").status_code == 404
+
+
+def test_stopped_run_is_not_a_failure_for_non_stream_api(client):
+    """非流式入口把停止当正常收尾：只有 error 才 500，否则前端会看到"失败"假象。"""
+    import web.main as m
+
+    class SelfStopping(StoppableEngine):
+        def events(self, chat, text, stop_event=None):
+            yield {"event": "delta",
+                   "data": {"channel": "meta", "text": "", "engine": "llm"}}
+            yield {"event": "delta", "data": {"channel": "content", "text": "实测制动距离 85.6"}}
+            stop_event.set()                   # 等价于用户在流式途中按了停止
+            yield from super().events(chat, text, stop_event)
+
+    original = m.ENGINE
+    m.ENGINE = SelfStopping(m.STORE)
+    try:
+        cid = m.STORE.create_chat("stop-post").chat_id
+        r = client.post(f"/api/chats/{cid}/messages", json={"text": "随便看看"})
+        assert r.status_code == 200, r.text
+        assert any("停止" in (x["content"] or "") for x in r.json()["messages"])
+    finally:
+        m.ENGINE = original

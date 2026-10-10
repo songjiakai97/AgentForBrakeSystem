@@ -96,6 +96,8 @@ body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-ser
 textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:10px;color:var(--text);padding:9px 12px;font-size:14px;resize:none;height:38px;max-height:110px;font-family:inherit}
 .sendbtn{background:var(--accent);border:none;color:#0b1220;border-radius:10px;padding:9px 18px;font-size:14px;font-weight:600;cursor:pointer}
 .sendbtn:disabled{opacity:.4}
+/* 一轮进行中：发送键变停止键（红色 + 方块），刷新不会停本轮，只有点这里才停 */
+.sendbtn.stop{background:var(--abn);color:#fff;min-width:74px}
 .chartbox{position:fixed;inset:4vh 6vw;background:var(--bg);border:1px solid #334155;border-radius:14px;z-index:50;display:flex;flex-direction:column}
 .chartbox .cb-head{display:flex;justify-content:space-between;padding:10px 16px;border-bottom:1px solid #1e293b;font-size:13px}
 .chartbox .cb-body{flex:1;min-height:0}
@@ -291,7 +293,10 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
         <button class="addbtn" @click="$refs.file.click()" title="支持 .mf4 / .blf">+</button>
         <input ref="file" type="file" :accept="acceptAttr" multiple style="display:none" @change="pickFiles">
         <textarea v-model="draft" placeholder="描述要分析的功能/工况，如：干沥青 100kph 全力制动" @keydown.enter.exact.prevent="send"></textarea>
-        <button class="sendbtn" :disabled="busy" @click="send">发送</button>
+        <button class="sendbtn" :class="{stop:busy && currentRunId}"
+                :disabled="busy && !currentRunId"
+                :title="busy ? (currentRunId ? '停止本轮：已流出的正文会落库，未分析的文件不再分析（刷新页面不会停止）' : '这一步在服务端同步执行，刷新本来也不会停止它') : '发送'"
+                @click="busy ? stopRun() : send()">{{busy ? (currentRunId ? '■ 停止' : '处理中…') : '发送'}}</button>
       </div>
     </div>
   </div>
@@ -319,7 +324,7 @@ createApp({
     meta:{engine:'offline'}, chats:[], chat:null, chatId:'',
     draft:'', pending:[], busy:false, samples:[],
     otherText:{}, pfSel:{}, opened:{}, openState:{},
-    live: blankLive(), lastSeq: 0, currentRunId: '', runCid: '',
+    live: blankLive(), lastSeq: 0, currentRunId: '', runCid: '', stopping: false,
     chartData:null, chartTitle:'', chartGroups:[], chartHidden:[], chartFull:null, _chart:null,
   }},
   computed:{
@@ -400,7 +405,7 @@ createApp({
         this.live = blankLive();
         this.lastSeq = 0;                 // 从头回放整轮：思考流与已产生的消息都能补回来
         this.currentRunId = d.run.run_id; this.runCid = cid;
-        try{ await this.followRun(d.run.run_id); }finally{ this.busy = false; }
+        try{ await this.followRun(d.run.run_id); }finally{ this.busy = false; this.stopping = false; }
         // 回放事件都已转成落库消息，live 只用于展示进行中的部分，收尾即清
         if(this.chatId===cid) this.live = blankLive();   // 切走了就别动当前会话的显示
         this.currentRunId = ''; this.runCid = '';
@@ -571,6 +576,7 @@ createApp({
         await this.openChatKeepScroll();
       } finally {
         this.busy=false;
+        this.stopping=false;
         this.live=blankLive(); this.runCid='';   // 本轮已结束，指针一律复位
         this.$nextTick(this.scroll);
       }
@@ -595,6 +601,8 @@ createApp({
         panel.meta = Object.assign({}, panel.meta, {consumed:true, chosen: label || (panel.meta&&panel.meta.chosen) || key});
       }
       this.busy=true;
+      // /select 在服务端同步执行、不属于任何 run：清掉旧 id，停止键才不会被上一轮的 id 误导
+      this.currentRunId = '';
       try{
         const r=await fetch(`/api/chats/${this.chatId}/select`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_type:t,target_key:key,profile:profile})});
         const d=await r.json();
@@ -627,8 +635,23 @@ createApp({
         await this.openChatKeepScroll();
       } finally{
         this.busy=false;
+        this.stopping=false;
         this.live=blankLive(); this.runCid='';   // 本轮已结束，指针一律复位
       }
+    },
+    async stopRun(){
+      // 只置服务端标记：引擎在下一个检查点（每个 delta / 每个文件）自己收尾，
+      // 已流出的正文会落成消息，事件流照常走到 done，前端不用断开重连。
+      if(!this.busy || !this.currentRunId || this.stopping) return;
+      this.stopping = true;
+      try{
+        const r = await fetch(`/api/runs/${this.currentRunId}/stop`, {method:'POST'});
+        if(!r.ok){
+          const d = await r.json().catch(()=>({}));
+          if(r.status !== 404) alert(d.detail || '停止请求失败');
+        }
+      }catch(e){ alert('停止请求未能送达'); }
+      finally{ if(!this.busy) this.stopping = false; }   // 本轮已抢先结束则立即复位
     },
     async openChatKeepScroll(){
       const el=this.$refs.msgs; const at=el?el.scrollTop:0;
