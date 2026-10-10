@@ -27,7 +27,8 @@ body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-ser
 .badge{padding:2px 8px;border-radius:10px;font-size:11px}
 .badge.offline{background:#33415a;color:#cbd5e1}
 .badge.llm{background:#064e3b;color:#6ee7b7}
-.msgs{flex:1;overflow:auto;padding:18px 8%}
+.msgsWrap{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
+.msgs{flex:1;min-height:0;overflow:auto;padding:18px 8%}
 .msg{margin-bottom:14px;display:flex;flex-direction:column}
 .msg.user{align-items:flex-end}
 .msg .bubble{max-width:86%;padding:10px 14px;border-radius:12px;font-size:14px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
@@ -56,8 +57,8 @@ body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-ser
 .panel.used{background:var(--panel);border-style:dashed;opacity:.85}
 .optrow:hover{background:var(--panel2)}
 .optrow:active{background:#2f4363}
-.optrow .idx{width:20px;height:20px;border-radius:6px;background:#334155;display:flex;align-items:center;justify-content:center;font-size:11px;flex:none}
-.optrow .score{margin-left:auto;color:var(--muted);font-size:11px}
+.optrow .idx,.rcRow .idx{width:20px;height:20px;border-radius:6px;background:#334155;display:flex;align-items:center;justify-content:center;font-size:11px;flex:none}
+.optrow .score,.rcRow .score{margin-left:auto;color:var(--muted);font-size:11px}
 .panel .hint{font-size:12px;color:var(--muted);padding:4px 10px}
 .profileSel{display:flex;gap:8px;padding:8px 10px;align-items:center;flex-wrap:wrap}
 .profileSel select{background:#0b1220;color:var(--text);border:1px solid #334155;border-radius:6px;padding:5px 8px;font-size:13px}
@@ -65,6 +66,17 @@ body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-ser
 .otherOpt{display:flex;gap:6px;padding:8px 10px;border-top:1px solid #1e293b;margin-top:6px}
 .otherOpt input{flex:1;background:#0b1220;border:1px solid #334155;color:var(--text);border-radius:6px;padding:6px 9px;font-size:12px}
 .otherOpt button{background:#334155;border:none;color:var(--text);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer}
+/* 已折叠的面板回执：可以展开回看当初给了哪些候选 */
+.rcToggle{cursor:pointer;color:var(--accent);margin-left:6px;font-size:11px}
+.rcList{margin-top:6px;border-top:1px dashed #334155;padding-top:6px}
+.rcRow{display:flex;align-items:center;gap:8px;padding:3px 6px;font-size:12px;color:var(--muted)}
+.rcRow.chosen{color:var(--text);background:#16233c;border-radius:6px}
+/* 待定面板的遮罩：只盖消息区，底部输入框保持可用（发新消息即作废旧面板，这是唯一出口） */
+.mask{position:absolute;inset:0;z-index:40;background:rgba(8,13,24,.74);display:flex;padding:18px;overflow:auto}
+.mcard{width:min(560px,100%);margin:auto;background:var(--panel);border:1px solid #3b4a63;border-radius:14px;padding:12px 12px 6px;box-shadow:0 18px 50px rgba(0,0,0,.55)}
+.mcard .mtag{font-size:11px;color:var(--accent);letter-spacing:.5px;margin-bottom:4px;padding:0 10px}
+.mcard .mhint{font-size:13px;color:var(--text);padding:0 10px 8px;line-height:1.5}
+.mcard .mrules{font-size:11px;color:var(--muted);border-top:1px solid #1e293b;margin-top:8px;padding:8px 10px;line-height:1.7}
 /* analysis card */
 .acard{background:var(--panel);border:1px solid #334155;border-radius:12px;padding:12px;max-width:92%;font-size:13px}
 .acard .head{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
@@ -147,6 +159,7 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
       <a href="/debug" target="_blank" style="color:var(--muted);font-size:11px">debug</a>
     </div>
 
+    <div class="msgsWrap">
     <div class="msgs" ref="msgs">
       <div v-if="!chat" class="empty">加载中…</div>
       <template v-else>
@@ -181,38 +194,31 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
         <!-- attachment note -->
         <div v-else-if="m.kind==='attachment'" class="bubble">📎 {{m.content}}</div>
 
-        <!-- target options：一次性面板，点选后折叠为回执 -->
-        <div v-else-if="m.kind==='target_options'" class="panel" :class="{used: consumed(m)}">
-          <template v-if="consumed(m)">
+        <!-- target_options：待选的活面板一律搬到遮罩弹窗里；消息流只留历史占位或可展开的回执 -->
+        <div v-else-if="m.kind==='target_options'" class="panel" :class="{used: !inModal(m)}">
+          <template v-if="!inModal(m)">
             <div class="hint">
               <template v-if="m.meta && m.meta.chosen">已选择：{{m.meta.chosen}}</template>
-              <template v-else>该面板已被后续消息取代</template>
+              <template v-else>{{consumed(m) ? '该面板已被后续消息取代' : '该面板已被更新的面板取代'}}</template>
               <span style="color:var(--muted)">（选项已失效）</span>
+              <span class="rcToggle" @click="toggleOpen('rc:'+m.message_id)">
+                {{openState['rc:'+m.message_id] ? '▾ 收起候选' : '▸ 展开候选'}}</span>
+            </div>
+            <div v-if="openState['rc:'+m.message_id]" class="rcList">
+              <div v-for="(c,i) in (m.data&&m.data.candidates)||[]" :key="c.key"
+                   class="rcRow" :class="{chosen: isChosen(m,c)}">
+                <span class="idx">{{i+1}}</span><span>{{c.name}}</span>
+                <span v-if="isChosen(m,c)" style="color:var(--accent);font-size:11px">✓ 所选</span>
+                <span class="score" v-if="c.score">{{c.score.toFixed(1)}}</span>
+              </div>
+              <div v-for="(dim,di) in dimsOf(m)" :key="'d'+di" class="rcRow">
+                <span class="idx">{{String.fromCharCode(65+di)}}</span><span>{{dim.join(' / ')}}</span>
+              </div>
             </div>
           </template>
           <template v-else>
-          <div class="hint">{{m.content}}</div>
-          <template v-if="m.data.hop==='function'||m.data.hop==='condition'">
-            <div v-for="(c,i) in m.data.candidates" :key="c.key" class="optrow" @click="choose(m,c)">
-              <span class="idx">{{i+1}}</span><span>{{c.name}}</span>
-              <span class="score" v-if="c.score">{{c.score.toFixed(1)}}</span>
-            </div>
-          </template>
-          <template v-else-if="m.data.hop==='profile'">
-            <div class="profileSel">
-              <template v-for="(dim,di) in dimsOf(m)" :key="di">
-                <select v-model="pfSel[m.message_id][di]">
-                  <option v-for="p in dim" :key="p" :value="p">{{p}}</option>
-                </select>
-              </template>
-              <button class="pfBtn" :disabled="busy" @click="chooseProfile(m)">
-                {{busy ? '处理中…' : '确认分析'}}</button>
-            </div>
-          </template>
-          <div class="otherOpt">
-            <input v-model="otherText[m.message_id]" placeholder="其他选项：手动描述目标，回车重新推荐" @keyup.enter="otherGo(m)">
-            <button @click="otherGo(m)">发送</button>
-          </div>
+            <div class="hint" v-if="busy">⏳ 本轮进行中，选项暂不可点；跑完若仍未选择会重新弹出</div>
+            <div class="hint" v-else>⏳ 弹窗中等你选择：{{m.content}}</div>
           </template>
         </div>
 
@@ -277,6 +283,39 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
       </template>
     </div>
 
+    <!-- 待定面板 = 遮罩弹窗（派生自最新一条未消费的 target_options，不是新的状态源）。
+         不给 ×、不给 ESC、点遮罩不关：要么在这里选/写，要么用底部输入框换个说法发出去
+         ——新消息会让本面板按 mark_panels_consumed 自然作废，这就是唯一出口。
+         一旦新一轮开跑就先让开（/select 在跑动中会 409，这里点了也无效），让流式正文可见。 -->
+    <div class="mask" v-if="pendingPanel && !busy">
+      <div class="mcard">
+        <div class="mtag">Agent 在等你选择</div>
+        <div class="mhint">{{pendingPanel.content}}</div>
+        <template v-if="pendingPanel.data && (pendingPanel.data.hop==='function'||pendingPanel.data.hop==='condition')">
+          <div v-for="(c,i) in pendingPanel.data.candidates" :key="c.key" class="optrow" @click="choose(pendingPanel,c)">
+            <span class="idx">{{i+1}}</span><span>{{c.name}}</span>
+            <span class="score" v-if="c.score">{{c.score.toFixed(1)}}</span>
+          </div>
+        </template>
+        <template v-else-if="pendingPanel.data && pendingPanel.data.hop==='profile'">
+          <div class="profileSel">
+            <template v-for="(dim,di) in dimsOf(pendingPanel)" :key="di">
+              <select v-model="pfSel[pendingPanel.message_id][di]">
+                <option v-for="p in dim" :key="p" :value="p">{{p}}</option>
+              </select>
+            </template>
+            <button class="pfBtn" @click="chooseProfile(pendingPanel)">确认分析</button>
+          </div>
+        </template>
+        <div class="otherOpt">
+          <input v-model="otherText[pendingPanel.message_id]" placeholder="其他选项：手动描述目标，回车重新推荐" @keyup.enter="otherGo(pendingPanel)">
+          <button @click="otherGo(pendingPanel)">发送</button>
+        </div>
+        <div class="mrules">不选这里就走不出去。想换个说法直接问，请在下方输入框发送——那会让这批候选作废。</div>
+      </div>
+    </div>
+    </div><!-- /msgsWrap -->
+
     <div class="composer">
       <div class="uploaded" v-if="chat && chat.files.length">
         <span v-for="f in chat.files" :key="f.file_id" class="fchip">✅ {{f.name}}
@@ -338,6 +377,16 @@ createApp({
       const e = (this.meta.allowed_upload_ext||['.mf4','.blf']);
       return e.join(',');
     },
+    // 待定面板：最新一条未消费的 target_options（派生状态，不另立状态源）。
+    // 历史遗留的多条未消费面板只弹最新的一条，其余按回执显示。
+    pendingPanel(){
+      const ms = (this.chat && this.chat.messages) || [];
+      for(let i=ms.length-1; i>=0; i--){
+        const m = ms[i];
+        if(m.kind==='target_options' && !this.consumed(m) && m.data) return m;
+      }
+      return null;
+    },
   },
   async mounted(){
     try{ this.meta = await (await fetch('/api/meta')).json(); }catch(e){}
@@ -360,6 +409,13 @@ createApp({
     },
     plain(t){ return String(t).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])).replace(/\n/g,'<br>'); },
     consumed(m){ return !!(m.meta && m.meta.consumed); },
+    // 消息流里的面板：只有"不在弹窗里的那条"才画成历史占位/回执，
+    // 待定那条由遮罩弹窗呈现，正文不在流里重复一遍
+    inModal(m){ return !!(this.pendingPanel && m.message_id === this.pendingPanel.message_id); },
+    isChosen(m,c){
+      const ch = m.meta && m.meta.chosen;
+      return !!ch && (ch === c.key || ch === c.name || String(ch).startsWith(c.name));
+    },
     toggleOpen(k){ this.openState[k] = !this.openState[k]; },
     fmt(t){ return t==null?'—':Number(t).toFixed(2); },
     dur(w){ if(!w||w.t_start==null||w.t_end==null) return '0'; const d=w.t_end-w.t_start;
