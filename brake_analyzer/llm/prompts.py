@@ -24,6 +24,8 @@ SYSTEM_CHAT = """你是制动系统测试数据分析与标定指导助手，服
 - 区分「确定规则结论」（来自规则引擎）与「建议性判断」（你的推断）；
 - 不得基于 info 指标单独下异常结论，info 只能作为佐证或趋势描述；
 - 数据缺失（missing）时优先提示补测或检查通道映射，不得臆断性能结论；
+- 实测值一律直接引用 run_analysis_on_files 返回的 results（值/单位/限值/判定），
+  不得让用户自查图表；
 - 回答使用简体中文，简洁、面向工程师。"""
 
 HISTORY_TAIL = 40   # 回灌的历史条数上限：只是保险丝，真正的长度由 token 预算控制
@@ -203,8 +205,133 @@ def build_chat_messages(
 
 
 def is_injected(h: dict) -> bool:
-    """只有纯文本轮次回灌上下文：steps / 候选面板 / 结果卡片不进 prompt。"""
-    return h.get("role") in ("user", "assistant") and h.get("kind") in (None, "text")
+    """哪些历史消息回灌 prompt。
+
+    steps / 候选面板 / 附件不回灌（非结论内容）；analysis_result 只回灌 content 文本
+    ——那行文本是数值+判定摘要（digest_line），否则模型跨轮追问数值时只能"让你看图"。
+    """
+    if h.get("role") not in ("user", "assistant"):
+        return False
+    return h.get("kind") in (None, "text", "analysis_result")
+
+
+def _limit_text(ok_range) -> str:
+    """ok_range → 简短限值串：[None,40] → ≤40；[1.6,None] → ≥1.6；[a,b] → a~b。"""
+    if not ok_range:
+        return ""
+    lo, hi = (list(ok_range) + [None, None])[:2]
+    if lo is not None and hi is not None:
+        return f"{lo}~{hi}"
+    if hi is not None:
+        return f"≤{hi}"
+    if lo is not None:
+        return f"≥{lo}"
+    return ""
+
+
+_STATUS_CN = {"ok": "达标", "abnormal": "不合格", "missing": "不可算", "info": "仅记录"}
+
+
+def _round3(v):
+    """给 LLM 的数值统一保留 3 位：全精度既占字数也不像工程口径。"""
+    return round(float(v), 3) if isinstance(v, (int, float)) else v
+
+
+def digest_from_analysis(d: dict) -> dict:
+    """把 res.to_dict() 压成给 LLM 的数值摘要（design.md §6.9）。
+
+    只留下结论需要的：指标名/值/单位/判定状态/限值/命中档位 + 规则结论原文。
+    字段名自解释、空值省略；单工况约 0.3~0.9k 字，远低于 TOOL_PAYLOAD_CLIP_CHARS。
+    """
+    samples = []
+    for s in (d or {}).get("samples", []):
+        w = s.get("window") or {}
+        t0, t1 = w.get("t_start"), w.get("t_end")
+        metrics = []
+        for m in s.get("metrics", []):
+            mi = {
+                "metric": m.get("name"),
+                "value": _round3(m["value"]) if m.get("value") is not None else None,
+                "unit": m.get("unit"),
+                "status": m.get("status"),
+            }
+            lim = _limit_text(m.get("ok_range"))
+            if lim:
+                mi["limit"] = lim
+            if m.get("profile"):
+                mi["profile"] = m["profile"]
+            metrics.append(mi)
+        item = {"run": s.get("run_index"), "file": s.get("file_name")}
+        if t0 is not None and t1 is not None:
+            item["window_s"] = [round(float(t0), 3), round(float(t1), 3)]
+        item["metrics"] = metrics
+        verdicts = [
+            {"rule": v.get("rule_id"), "metric": v.get("metric_name"),
+             "conclusion": v.get("message"), "direction": v.get("direction"),
+             "severity": v.get("severity")}
+            for v in s.get("verdicts", [])
+        ]
+        if verdicts:
+            item["verdicts"] = verdicts
+        samples.append(item)
+    out = {"condition_name": d.get("condition_name"), "samples": samples}
+    if d.get("profile"):
+        out["profile"] = d["profile"]
+    if d.get("degraded"):
+        out["note"] = "LLM 标定建议不可用，仅规则结论"
+    return out
+
+
+def digest_payload(digests: List[dict],
+                   limit: int = TOOL_PAYLOAD_CLIP_CHARS) -> List[dict]:
+    """把多份数值摘要收进工具应答，保证序列化后不超过 limit。
+
+    工具 payload 会被硬截到 limit，截断后 JSON 就废了（§6.10），所以这里主动降级：
+    先摘掉最长的规则结论原文，再摘掉 verdicts，最后只保留最近若干份分析——
+    更早的数值仍在结果卡片正文里，跨轮追问时由 history 回灌。
+    """
+    def size(items):
+        return len(json.dumps(items, ensure_ascii=False))
+
+    kept = [dict(d) for d in digests]
+    if size(kept) <= limit:
+        return kept
+    for d in kept:                      # 1) 去掉结论原文（最长且重复于 verdict 摘要）
+        for s in d.get("samples", []):
+            for v in s.get("verdicts", []):
+                v.pop("conclusion", None)
+    if size(kept) <= limit:
+        return kept
+    for d in kept:                      # 2) 去掉 verdicts，只留数值+判定
+        for s in d.get("samples", []):
+            s.pop("verdicts", None)
+    if size(kept) <= limit:
+        return kept
+    out: List[dict] = []                # 3) 从最新往前保留能装下的份数
+    for d in reversed(kept):
+        if not out and size([d]) > limit:
+            break
+        if out and size(out + [d]) > limit:
+            break
+        out.insert(0, d)
+    return out
+
+
+def digest_line(d: dict) -> str:
+    """数值摘要 → 一行文本，拼进结果卡片 content，供后续轮次回灌（不含工况名，卡片头已有）。"""
+    runs = []
+    for s in digest_from_analysis(d)["samples"]:
+        seg = "，".join(
+            f"{m['metric']}="
+            + (f"{m['value']}{m['unit'] or ''}" if m.get("value") is not None else "无值")
+            + f" {_STATUS_CN.get(m['status'], m['status'])}"
+            + (f"（限值 {m['limit']}" + (f"，档位 {m['profile']}" if m.get("profile") else "") + "）"
+               if m.get("limit") else "")
+            for m in s["metrics"]
+        )
+        runs.append(f"run{s.get('run')}·{s.get('file')}：{seg}")
+    return "；".join(runs)
+
 
 
 def suggestion_prompt(

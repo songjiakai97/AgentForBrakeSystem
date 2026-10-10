@@ -379,7 +379,7 @@ def api_select(cid: str, body: SelectIn):
             if bad:
                 raise HTTPException(400, f"档位 {bad} 不在功能 {fn.key} 允许列表 {fn.profiles}")
         STORE.mark_panels_consumed(chat, chosen=chosen)
-        added = ENGINE._analyze(chat, cond.id, profile)
+        added, _digests = ENGINE._analyze(chat, cond.id, profile)
         return {"messages": [m.to_dict() for m in added]}
 
     raise HTTPException(400, "target_type 必须为 function|condition")

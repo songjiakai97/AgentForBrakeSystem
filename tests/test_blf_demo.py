@@ -391,7 +391,7 @@ class TestLoaderSelection:
         chat = store.create_chat()
         with open(_require("abs_dry100_dist_abn.blf"), "rb") as f:
             store.add_file(chat, "abs_dry100_dist_abn.blf", f.read())
-        added = eng._analyze(chat, "abs_full_brake_dry_asphalt_100kph", None)
+        added, digests = eng._analyze(chat, "abs_full_brake_dry_asphalt_100kph", None)
         kinds = [m.kind for m in added]
         assert "analysis_result" in kinds, kinds
         res = [m for m in added if m.kind == "analysis_result"][0]
@@ -405,7 +405,7 @@ class TestLoaderSelection:
         chat = store.create_chat()
         with open(_require("abs_dry100_dist_abn.blf"), "rb") as f:
             store.add_file(chat, "abs_dry100_dist_abn.blf", f.read())
-        added = eng._analyze(chat, "abs_full_brake_dry_asphalt_100kph", None)
+        added, digests = eng._analyze(chat, "abs_full_brake_dry_asphalt_100kph", None)
         errs = [m for m in added if m.kind == "error"]
         assert errs and "BLF" in errs[0].content
         assert not [m for m in added if m.kind == "analysis_result"]

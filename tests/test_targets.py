@@ -379,6 +379,89 @@ def test_engine_allows_analysis_with_profile_or_no_profiles():
     assert errs and "上传" in errs[0].content
 
 
+def test_engine_returns_numbers_to_llm_after_analysis(tmp_path):
+    """分析后 tool 应答必须带实测值与判定，否则模型正文只能让用户自己看图（§6.9）。"""
+    data = os.path.join(ROOT, "tests", "data", "mf4", "abs_dry100_dist_abn.mf4")
+    if not os.path.exists(data):
+        pytest.skip("demo 数据未生成")
+    from brake_analyzer.agent.engine import ChatEngine
+    from brake_analyzer.llm.kb import KnowledgeBase
+    from web.store import Store
+
+    llm = ToolLlm([("run_analysis_on_files",
+                    {"condition_id": "abs_full_brake_dry_asphalt_100kph"})])
+    eng = ChatEngine(load_configs(CONFIG_DIR), llm,
+                     KnowledgeBase(os.path.join(ROOT, "knowledge")),
+                     Store(upload_dir=str(tmp_path / "uploads")))
+    chat = eng.store.create_chat()
+    with open(data, "rb") as f:
+        eng.store.add_file(chat, "abs_dry100_dist_abn.mf4", f.read())
+    for _ in eng.events(chat, "干沥青 100 全力制动，制动距离超了吗"):
+        pass
+
+    tool_msgs = [m for m in llm.calls[-1] if m.get("role") == "tool"]
+    payload = json.loads(tool_msgs[-1]["content"])
+    assert payload["ok"] is True
+    got = {m["metric"]: m for s in payload["results"][0]["samples"] for m in s["metrics"]}
+    assert got["制动距离"]["status"] == "abnormal"
+    assert got["制动距离"]["value"] == pytest.approx(85.65, abs=0.5)
+    assert got["制动距离"]["limit"] == "≤40" and got["制动距离"]["unit"] == "m"
+    assert got["最大横摆角速度"]["status"] == "ok"
+    # 规则结论原文一并给出，模型不必自己措辞
+    assert any(v["rule"] == "abs_dist_abnormal"
+               for s in payload["results"][0]["samples"] for v in s.get("verdicts", []))
+    # 结果卡片正文自带数值行，跨轮追问时由 history 回灌
+    card = [m for m in chat.messages if m.kind == "analysis_result"][0]
+    assert "制动距离=85" in card.content and "不合格" in card.content
+
+    # 下一轮只追问数值、不再调工具：模型必须能从历史里读到那行数字
+    for _ in eng.events(chat, "那实测制动距离到底多少"):
+        pass
+    sent = llm.calls[-1]
+    assert any("制动距离=85" in (m.get("content") or "") for m in sent), \
+        "结果卡片的数值行没有回灌，跨轮追问又会变成「请查看图表」"
+
+
+def test_engine_reports_no_result_without_files():
+    """没跑出结果时 tool 应答说清楚"没有结果"，别给模型一个成功的假象。"""
+    llm = ToolLlm([("run_analysis_on_files",
+                    {"condition_id": "abs_full_brake_dry_asphalt_100kph"})])
+    eng = _engine(llm)
+    chat = eng.store.create_chat()
+    for _ in eng.events(chat, "跑一下干沥青 100"):
+        pass
+    tool_msgs = [m for m in llm.calls[-1] if m.get("role") == "tool"]
+    payload = json.loads(tool_msgs[-1]["content"])
+    assert payload["ok"] is False and payload.get("results") is None
+    assert "上传" in payload["note"]
+
+
+def test_digest_payload_degrades_instead_of_breaking_json():
+    """摘要超预算时按结论原文 → verdicts → 旧结果逐级降级，产出必须是合法 JSON。"""
+    from brake_analyzer.llm.prompts import TOOL_PAYLOAD_CLIP_CHARS, digest_payload
+
+    def fake(i):
+        return {"condition_name": f"工况{i}", "samples": [{
+            "run": i, "file": f"f{i}.mf4", "window_s": [1.0, 2.0],
+            "metrics": [{"metric": "制动距离", "value": 40.0 + i, "unit": "m",
+                         "status": "abnormal", "limit": "≤40"}],
+            "verdicts": [{"rule": f"r{i}", "metric": "制动距离",
+                          "conclusion": "说明" * 60, "direction": "高于上界 40m",
+                          "severity": "high"}]}]}
+
+    many = [fake(i) for i in range(40)]
+    kept = digest_payload(many, TOOL_PAYLOAD_CLIP_CHARS - 256)
+    assert kept and len(json.dumps(kept, ensure_ascii=False)) <= TOOL_PAYLOAD_CLIP_CHARS
+    assert len(kept) < len(many)
+    # 保留的是最近的几份，且数值仍完整
+    assert kept[-1]["condition_name"] == many[-1]["condition_name"]
+    assert kept[-1]["samples"][0]["metrics"][0]["value"] == 79.0
+    # 单份就超限的极端情况不崩：宁可不给，也不给坏 JSON
+    huge = [{"condition_name": "x", "samples": [{"run": 1, "file": "f",
+              "metrics": [{"metric": "m" * 3000, "value": 1, "unit": "", "status": "ok"}]}]}]
+    assert digest_payload(huge, 100) == []
+
+
 def test_engine_ambiguous_opens_condition_panel_only_from_that_function():
     llm = ToolLlm([("resolve_condition", {"function_key": "abs", "maneuver": "full_brake"})])
     eng = _engine(llm)

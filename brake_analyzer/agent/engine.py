@@ -25,6 +25,9 @@ from ..llm.prompts import (
     TOOL_PAYLOAD_CLIP_CHARS,
     build_chat_messages,
     build_tool_specs,
+    digest_from_analysis,
+    digest_line,
+    digest_payload,
     summarize_request,
     suggestion_prompt,
 )
@@ -144,7 +147,7 @@ class ChatEngine:
                 "profile_dims": fn.profile_dims}))
             return
         yield self._delta("reasoning", f"目标唯一命中「{target['name']}」，直接分析")
-        for m in self._analyze(chat, target["key"], profile=None):
+        for m in self._analyze(chat, target["key"], profile=None)[0]:
             yield self._mevent(m)
 
     # ------------------------------------------------------------ LLM 编排（流式）
@@ -193,7 +196,7 @@ class ChatEngine:
                 function_key=chat.selected_function,
             ),
             "run_analysis_on_files": lambda args: self._analyze(
-                chat, args.get("condition_id"), args.get("profile"), as_tool=True
+                chat, args.get("condition_id"), args.get("profile")
             ),
         }
         # 工具规格由配置生成（维度/工况 id 作 enum），已选定功能时进一步收窄取值域
@@ -275,12 +278,32 @@ class ChatEngine:
                                 continue
                         result = fn(args)
                         if name == "run_analysis_on_files":
-                            payload = {"ok": True, "note": "分析结果已生成并展示"}
-                            for m in result or []:
+                            msgs, digests = result if isinstance(result, tuple) else (result or [], [])
+                            for m in msgs:
                                 state["claimed"] = True
                                 yield self._mevent(m)
+                            failed = " / ".join(
+                                (m.content or "") for m in msgs if m.kind == "error")[:400]
+                            if digests:
+                                # 数值 + 判定 + 规则结论原文回灌：模型据此直接下结论。
+                                # 预算扣掉外层信封（ok/note），避免整段被硬截成坏 JSON
+                                payload = {
+                                    "ok": True,
+                                    "note": "results 为本次分析的实测值与判定，"
+                                            "回答实测值直接引用它，不要让用户查看图表",
+                                    "results": digest_payload(
+                                        digests, TOOL_PAYLOAD_CLIP_CHARS - 256),
+                                }
+                                if failed:
+                                    payload["failed"] = failed
+                            else:
+                                payload = {
+                                    "ok": False,
+                                    "note": "未产生分析结果：" + (failed or "没有可分析的文件"),
+                                }
                             yield self._mevent(self._step_on(chat, [
-                                (f"{name} 完成", f"生成 {len(result or [])} 条消息", "ok")]))
+                                (f"{name} 完成", f"生成 {len(msgs)} 条消息 · {len(digests)} 份结果",
+                                 "ok" if digests else "warn")]))
                         else:
                             payload = result
                             hop = (result or {}).get("hop")
@@ -348,13 +371,20 @@ class ChatEngine:
         return self._loaders[ext]
 
     # ------------------------------------------------------------ 分析
-    def _analyze(self, chat, condition_id: str, profile: Optional[str],
-                 as_tool: bool = False) -> List:
+    def _analyze(self, chat, condition_id: str,
+                 profile: Optional[str]) -> Tuple[List, List[dict]]:
+        """执行分析并落库可见消息。
+
+        返回 (消息列表, 数值摘要列表)。摘要与结果卡片同源，既拼进卡片正文
+        （跨轮追问时由 history 回灌），也直接回灌给 LLM 当轮 tool 应答 ——
+        否则模型只拿到"分析已完成"，正文会退化成让用户自己看图（§6.9）。
+        """
         cond = self.cfg.condition(condition_id or "")
         if cond is None:
-            return [self._msg(chat, "error", f"未知道况：{condition_id}")]
+            return [self._msg(chat, "error", f"未知道况：{condition_id}")], []
         if not chat.files:
-            return [self._msg(chat, "error", "会话内还没有数据文件，请先上传 .mf4/.blf 文件再分析。")]
+            return [self._msg(chat, "error",
+                              "会话内还没有数据文件，请先上传 .mf4/.blf 文件再分析。")], []
 
         chat.selected_function = cond.function
         chat.selected_condition = cond.id
@@ -393,13 +423,15 @@ class ChatEngine:
              "ok" if not errors else "warn")])
         if step2 is not step_msg:
             added.append(step2)
+        digests: List[dict] = []
         for res in results:
             added.append(self._analysis_msg(chat, res))
+            digests.append(digest_from_analysis(res.to_dict()))
         if errors:
             added.append(self._msg(chat, "error", "部分文件分析失败：\n" + "\n".join(errors)))
         if not results and not errors:
             added.append(self._msg(chat, "error", "没有可分析的文件。"))
-        return added
+        return added, digests
 
     def _maybe_suggest(self, res: AnalysisResult, cond) -> None:
         """LLM 可用且有异常/缺失时，生成 calibration_actions；否则降级标记。"""
@@ -506,7 +538,11 @@ class ChatEngine:
             + (f"，{n_bad} 项异常/缺失" if n_bad else "，全部达标")
             + ("（LLM 建议不可用，仅规则结论）" if res.degraded else "")
         )
-        return self.store.add_message(chat, "assistant", "analysis_result", content=head, data=d)
+        # 正文带上数值+判定：卡片 kind 不是 text，默认不回灌 prompt，
+        # 后续轮次追问"实测多少"时模型只能看到这一行（is_injected 放行 analysis_result）
+        return self.store.add_message(
+            chat, "assistant", "analysis_result",
+            content=head + "\n" + digest_line(d), data=d)
 
     @staticmethod
     def _options_text(rec: dict) -> str:

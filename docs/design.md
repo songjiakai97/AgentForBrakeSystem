@@ -429,6 +429,15 @@ load(file)
   `catalog`（工况清单）与 `resolved` 只作为 `tool` 应答回灌模型，不弹面板；`error` 交还
   模型组织措辞。面板只出现在"信息不足"时，且候选层级由工具保证（`function` 的候选一律是
   功能，不会出现别的功能的工况）。
+- **分析结果必须回灌数值**（`digest_from_analysis` / `digest_payload` / `digest_line`，
+  `llm/prompts.py`）：`run_analysis_on_files` 的 `tool` 应答带 `results`——每个指标的
+  实测值（3 位）、单位、限值串（`≤40` / `≥1.6` / `1.6~10`）、`ok/abnormal/missing` 判定、
+  命中档位，外加规则结论原文与事件窗口。只回"结果已展示"会让模型退化成
+  「实测 X.X 秒（需查看图表）」，用户等于没拿到结论。同一份摘要也拼进结果卡片正文
+  （`digest_line`）供跨轮追问引用。
+  超预算时 `digest_payload` 按「结论原文 → verdicts → 最老的结果」逐级降级，
+  **保证序列化后仍落在 `TOOL_PAYLOAD_CLIP_CHARS` 内**，不留半截坏 JSON。
+  部分文件失败时另带 `failed` 字段，避免"有结果"掩盖"有些文件没跑出来"。
 - 档位守卫：`run_analysis_on_files` 未带 `profile` 且该功能声明了 `profiles` 时，引擎不执行
   分析，改落 `hop=profile` 面板并回一条 `tool` 应答。`hop=resolved` 只保证工况唯一、
   不保证档位唯一，离线路径本来就是"先选档再分析"，两条路径口径必须一致。
@@ -512,9 +521,10 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 
 其他注入口径（同为长度控制，但不由本节配置）：
 
-- 历史回灌只取 `kind ∈ {None, text}` 的 user/assistant 消息，条数上限
+- 历史回灌取 `kind ∈ {None, text, analysis_result}` 的 user/assistant 消息，条数上限
   `prompts.HISTORY_TAIL = 40`；条数只是保险丝，真正的长度由 token 预算决定。
-  `steps` / `target_options` / `analysis_result` 不进 prompt。
+  `analysis_result` 只回灌 `content`（含 §6.9 的数值行），`data` 里的图表数据不进 prompt；
+  `steps` / `target_options` / `attachment` 仍不进 prompt。
 - 单个工具结果写入上下文上限 `prompts.TOOL_PAYLOAD_CLIP_CHARS = 4000` 字。
 
 观测：`GET /api/context/stats?cid=` 返回当前会话上下文的估算 token 与两条阈值的关系；
