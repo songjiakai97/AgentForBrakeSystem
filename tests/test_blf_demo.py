@@ -394,6 +394,7 @@ class TestLoaderSelection:
         added, digests = eng._analyze(chat, "abs_full_brake_dry_asphalt_100kph", None)
         kinds = [m.kind for m in added]
         assert "analysis_result" in kinds, kinds
+        assert digests and digests[0]["samples"][0]["metrics"], "BLF 结果同样要出数值摘要"
         res = [m for m in added if m.kind == "analysis_result"][0]
         st = {x["key"].rsplit(".", 1)[1]: x["status"]
               for s in res.data["samples"] for x in s["metrics"]}
@@ -408,4 +409,5 @@ class TestLoaderSelection:
         added, digests = eng._analyze(chat, "abs_full_brake_dry_asphalt_100kph", None)
         errs = [m for m in added if m.kind == "error"]
         assert errs and "BLF" in errs[0].content
+        assert digests == [], "没跑出结果就不该给模型一份看起来成功的摘要"
         assert not [m for m in added if m.kind == "analysis_result"]
