@@ -647,30 +647,29 @@ def load_blf_config(config_dir: str = "configs",
                     f"信号 {name} 的 msg_id 非法: {msg_id!r}（约定 \"0x123\" 标准帧、"
                     "\"0x123x\" 扩展帧）")
 
-    known = set(registry) if registry is not None else (
-        set(logical_names) if logical_names is not None else None)
-    if known is not None:
+    # 三段校验各自独立，不以 registry 为前提：裸加载（不传 registry）是合法用法
+    if registry is not None:
         # 1) 不许自创逻辑名：同一物理量两侧必须同名，否则跨格式对齐只能靠人
-        stray = [n for n in signal_maps if n not in known]
+        stray = [n for n in signal_maps if n not in registry]
         if stray:
             raise ConfigError(
                 f"signals_blf.yaml 引用未登记的逻辑信号: {sorted(stray)}"
                 "（请先在 signals.yaml 登记；同一物理量两侧必须用同一逻辑名）")
-        # 2) 参与计算的信号一个不能少
-        if required_signals is not None:
-            lacking = [s for s in required_signals if s not in signal_maps]
-            if lacking:
-                raise ConfigError(
-                    f"signals_blf.yaml 缺少参与计算的信号: {lacking}"
-                    "（纯观测量可以不带，参与计算的必须带）")
-        # 单位/描述以登记表为准（格式侧声明已在上面拦下），candidates 保留格式侧声明
-        if registry is not None:
-            merged = {}
-            for name, spec in signal_maps.items():
-                entry = {k: v for k, v in spec.items() if k != "candidates"}
-                entry.update(registry.get(name) or {})
-                entry["candidates"] = spec["candidates"]
-                merged[name] = entry
-            signal_maps = merged
+    # 2) 参与计算的信号一个不能少
+    if required_signals is not None:
+        lacking = [s for s in required_signals if s not in signal_maps]
+        if lacking:
+            raise ConfigError(
+                f"signals_blf.yaml 缺少参与计算的信号: {lacking}"
+                "（纯观测量可以不带，参与计算的必须带）")
+    # 单位/描述以登记表为准（格式侧声明已在上面拦下），candidates 保留格式侧声明
+    if registry is not None:
+        merged = {}
+        for name, spec in signal_maps.items():
+            entry = {k: v for k, v in spec.items() if k != "candidates"}
+            entry.update(registry[name])
+            entry["candidates"] = spec["candidates"]
+            merged[name] = entry
+        signal_maps = merged
 
     return BlfConfigs(dbc_files=dbc_files, signal_maps=signal_maps)

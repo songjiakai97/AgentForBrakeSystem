@@ -229,6 +229,9 @@ brake-agent/
 - 传入 `registry`（`signals.yaml` 的 `logical_signals`）时，BLF 侧出现未登记的逻辑名即报错
   —— 这就是「相同的信号，逻辑名必须一致」的执行方式；`required_signals` 同时给出时，
   只要求参与计算的信号一个不缺，纯观测量允许缺席（§9.6 覆盖度约定）。
+  两条把关各自独立、都可省略：只想读结构（校验三元组、列候选）时裸调用
+  `load_blf_config(dir)` 即可，不必为它伪造一个 registry；此时信号条目就只有
+  `candidates`，不带 unit/description。
 - 单位/描述一律取自 `registry`，BLF 侧写了即报错；合并顺序也是 registry 覆盖格式侧。
 - 只校验结构，不加载 DBC —— 不在内核里硬绑 python-can/cantools；候选解析失败仍由
   `BLFLoader` 逐条回退。

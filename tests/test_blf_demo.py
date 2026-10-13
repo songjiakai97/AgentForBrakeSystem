@@ -188,6 +188,30 @@ class TestBlfConfig:
             load_blf_config(d, required_signals=cfg.required_signals,
                             registry=cfg.signal_registry)
 
+    def test_bare_load_without_registry_ok(self):
+        """不传 registry / required_signals 的裸加载是合法用法。
+
+        曾是回归点：覆盖度校验块里残留旧 `logical_names` 兜底分支，裸加载一执行到
+        那里就 NameError。而其它用例要么成对传 registry，要么在更早的结构校验里就
+        抛错了，没有一条真正走到这条分支 —— 结构校验用例（msg_id/alias/DBC 缺失）
+        用的正是裸调用，但错误发生在覆盖度校验之前。
+        """
+        b = load_blf_config(CONFIG_DIR)
+        assert "Ax" in b.signal_maps and b.signal_maps["Ax"]["candidates"]
+        # 没有登记表时不合并单位：格式侧本来就不声明 unit
+        assert "unit" not in b.signal_maps["Ax"]
+
+    def test_required_check_independent_of_registry(self, cfg, tmp_path):
+        """计算必需信号这条把关不依附 registry：只传 required_signals 也照样拦。"""
+        import yaml
+
+        d = _copy_config(tmp_path)
+        raw = yaml.safe_load(open(os.path.join(CONFIG_DIR, "signals_blf.yaml"), encoding="utf-8"))
+        raw["signal_maps"].pop("yaw_rate")
+        _write(d, "signals_blf.yaml", raw)
+        with pytest.raises(ConfigError, match="参与计算的信号"):
+            load_blf_config(d, required_signals=cfg.required_signals)
+
     def test_unregistered_logical_name_rejected(self, cfg, tmp_path):
         """同一物理量两侧必须同名：BLF 侧自创别名（vbox_speed）直接拦下。"""
         import yaml
