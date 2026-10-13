@@ -303,6 +303,40 @@ def test_steps_and_chart_groups(client):
     assert all(s.get("markArea") for s in opt["series"] if s["name"] == "speed_vbox")
 
 
+def test_chart_option_carries_tooltip_contract(client):
+    """游标读数的服务端半边：link 保留 + confine 兜底 + 每条系列带 groupIndex。
+
+    前端要靠 `series[].groupIndex` 把 tooltip 收窄到鼠标所在那一行（多行 link 会把
+    全部行的系列并进同一个浮层，高出绘图区就被裁 → "轮速那行有时只显示 4 个"）。
+    那是函数 formatter，进不了 JSON，所以这里只卡住它能工作的前提：
+    link 还在（跨行对齐不能为了修 tooltip 而牺牲）、confine 在（任何情况下都不裁切）、
+    groupIndex 与所在行一致（前端据此分组的依据）。
+    """
+    chat = client.post("/api/chats").json()
+    cid = chat["chat_id"]
+    _upload(client, cid, "abs_dry100_dist_abn.mf4")
+    r = client.post(f"/api/chats/{cid}/select", json={
+        "target_type": "condition",
+        "target_key": "abs_full_brake_dry_asphalt_100kph"}).json()
+    sid = [m for m in r["messages"] if m["kind"] == "analysis_result"][0][
+        "data"]["samples"][0]["sample_id"]
+    opt = client.get(f"/api/analyses/{sid}/timeseries").json()["chart_option"]
+
+    assert opt["tooltip"]["confine"] is True
+    assert opt["tooltip"]["axisPointer"]["link"] == [{"xAxisIndex": "all"}]
+    assert opt["axisPointer"]["link"] == [{"xAxisIndex": "all"}]
+    # 每条系列都要带 groupIndex，且等于它实际挂在第几行上
+    for s in opt["series"]:
+        assert s.get("groupIndex") == s["yAxisIndex"], s["name"]
+    rows = {g["index"]: set(g["signals"]) for g in opt["_groups"]}
+    for s in opt["series"]:
+        assert s["name"] in rows[s["groupIndex"]]
+    # 车速/轮速必须是同一行：这正是用户报"少了几条轮速"的那一行
+    speed_row = next(s["groupIndex"] for s in opt["series"] if s["name"] == "speed_vbox")
+    assert rows[speed_row] == {"speed_vbox", "wheelSpeed_FL", "wheelSpeed_FR",
+                               "wheelSpeed_RL", "wheelSpeed_RR"}
+
+
 def test_chart_layout_validation():
     from brake_analyzer.configs import AppConfigs, load_configs  # noqa: F401
 

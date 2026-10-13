@@ -170,7 +170,12 @@ def build_chart_option(
 
     option = {
         "title": {"text": title, "left": "center", "textStyle": {"fontSize": 13}},
-        "tooltip": {"trigger": "axis", "axisPointer": {"type": "cross", "link": [{"xAxisIndex": "all"}]}},
+        # link 让竖直游标跨行对齐（共享时间轴的读数体验），代价是 trigger:'axis' 的
+        # tooltip 会把**所有行**的系列并进同一个浮层：6 行 12 条 ≈ 494px，高出绘图区
+        # 就被裁，用户看到的是"这一行少了几条测线"。裁切先在这里兜住（confine），
+        # 「只列鼠标所在那一行」必须在前端做——formatter 是函数，进不了 JSON。
+        "tooltip": {"trigger": "axis", "confine": True,
+                    "axisPointer": {"type": "cross", "link": [{"xAxisIndex": "all"}]}},
         "axisPointer": {"link": [{"xAxisIndex": "all"}]},
         # 测线选择交给前端分组勾选，ECharts 图例关闭以免与多行标题抢空间
         "legend": {"show": False},

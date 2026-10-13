@@ -378,7 +378,14 @@ phases: list[str]
   - 支持多测线叠加、缩放、悬停、异常窗口高亮。
   - 分行方案来自 `configs/signals.yaml` 的 `chart_layout`（按逻辑信号名写，与数据格式无关，
     §9.6）：一行子图 = 一组同单位信号共用 y 轴；该段缺失时按 unit 自动分组。加载期已把
-    未编排的信号补成单信号分组，所以这里不需要再判断"漏了谁"。
+    未编排的信号补成单信号分组，所以这里不需要再判断"漏了谁"。分组内没有实际数据通道的行
+    整行不生成（`_groups_from_layout` 先过滤），所以 grid / 轴 / `groupIndex` 三者始终同序。
+  - **游标读数按行给**（§8.3）：多行共享 x 轴靠 `axisPointer.link=[{xAxisIndex:'all'}]`
+    实现，代价是 `trigger:'axis'` 的 tooltip 会把**所有行**的系列并进同一个浮层
+    （demo 6 行 12 条 ≈ 494px），高出绘图区就被裁 —— 用户看到的是"这一行少了几条测线"，
+    而且少的是谁随鼠标位置变化（hover 第一行只剩 16/30 条，hover 最后一行反而全）。
+    服务端只兜住裁切（`tooltip.confine: true`）并保证每条系列带 `groupIndex`；
+    「只列鼠标所在那一行」是函数 formatter，进不了 JSON option，只能在前端做。
 - 本期无静态图/报告导出，Markdown/HTML 报告与 PDF/Excel 导出列入 §15 后续扩展。
 
 ### 6.7 编排流水线（`pipeline.py`）
@@ -780,7 +787,13 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
   才发现，因为 chip 就在明细里，探针点不出来才去查。已删掉 `_curMid`，`toggle(key)`
   直接用模板传入的 key。教训：Vue 模板里的表达式（尤其 v-if 的 key 拼接）静态检查
   看不出问题，必须在真浏览器里点一次。
-- 点“查看图表”拉取事件窗口时序，ECharts 多信号叠画。
+- 点“查看图表”拉取事件窗口时序，ECharts 多行子图共享时间轴。
+- 游标（tooltip）只列**鼠标所在那一行**的测线，并带 `t = x.xxx s` 表头；整行被勾选隐藏时
+  明说「本行测线已隐藏」，而不是把别的行塞进来冒充。机制与取舍见 §6.6：`link` 让竖直游标
+  跨行对齐（这是共享时间轴的意义，不能为了修 tooltip 就砍掉），行归属由前端用
+  `chart.containPixel({gridIndex})` 对鼠标坐标做命中测试得到 —— link 模式下
+  `updateAxisPointer` 的 `axesInfo` 会把所有联动轴都报出来，取 `[0]` 永远是第一行，
+  不能当活动行用。命中不到行（行间空隙、y 轴标签区）时保持上一次的活动行。
 - 已上传文件在顶部 chips 展示，可移除，并按分析范围标记（§8.2 ①b）。
 
 ### 8.4 分析状态

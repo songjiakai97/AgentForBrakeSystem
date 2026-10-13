@@ -793,8 +793,52 @@ createApp({
         ax.axisLabel=Object.assign({}, ax.axisLabel, {color:'#94a3b8'});
       });
       (opt.series||[]).forEach(s=>{ s.lineStyle=Object.assign({width:1.2}, s.lineStyle); });
+
+      // 游标读数按「鼠标所在那一行」出：axisPointer.link 让 6 行的 x 轴联动，
+      // 于是 trigger:'axis' 的 tooltip 会把全部行的全部系列并进来（本例 12 条 ≈ 494px），
+      // 高出绘图区就被裁——表现就是"轮速那行有时只看到 4 个轮速、有时只看到 speed_vbox"，
+      // 少的是谁只取决于鼠标离容器底边多远。读数按行给 + confine 双保险。
+      // 活动行只能自己判：link 模式下 updateAxisPointer 的 axesInfo 会报出所有联动轴
+      // （取 [0] 永远是第一行），所以用 zr 的鼠标坐标做 grid 命中测试。
+      let activeRow=null;
+      const ch=this._chart;
+      const nGrid=(opt.grid||[]).length;
+      ch.getZr().on('mousemove', e=>{
+        // 命中不到具体行（行间空隙、轴标签区）时保持上一次的活动行：
+        // 退回 null 就等于把全部行塞回一个浮层，那正是这次要修的观感
+        for(let i=0;i<nGrid;i++){
+          if(ch.containPixel({gridIndex:i},[e.offsetX,e.offsetY])){ activeRow=i; break; }
+        }
+      });
+      const groupOf={};
+      (opt.series||[]).forEach(s=>{ groupOf[s.name]=s.groupIndex; });
+      const fmtRow=(params)=>{
+        if(!params||!params.length) return '';
+        let list=params;
+        if(activeRow!=null){
+          const f=params.filter(p=>groupOf[p.seriesName]===activeRow);
+          // 整行被勾掉了：明说，而不是把别的行塞进来冒充
+          if(!f.length) return `<div>${this.rowLabel(activeRow)}：本行测线已隐藏</div>`;
+          list=f;
+        }
+        const t=Array.isArray(list[0].value)?list[0].value[0]:null;
+        const head=t==null?'':`<div style="opacity:.7">t = ${Number(t).toFixed(3)} s</div>`;
+        return head+list.map(p=>{
+          const v=Array.isArray(p.value)?p.value[1]:p.value;
+          return `${p.marker}${p.seriesName}&nbsp;&nbsp;<b>${v==null?'—':v}</b>`;
+        }).join('<br/>');
+      };
+      opt.tooltip=Object.assign({}, opt.tooltip,
+        {trigger:'axis', confine:true, formatter:fmtRow});
+      // 跨行对齐的竖直游标要留着（这是多行共享时间轴的意义所在）
+      opt.axisPointer={link:[{xAxisIndex:'all'}]};
+
       this._chart.setOption(opt, true);
       this._chart.resize();
+    },
+    rowLabel(i){
+      const g=(this.chartGroups||[]).find(x=>x.index===i);
+      return g?g.label:`第 ${i+1} 行`;
     },
   }
 }).mount('#app');
