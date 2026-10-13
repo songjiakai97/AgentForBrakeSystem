@@ -19,11 +19,15 @@ SYSTEM_CHAT = """你是制动系统测试数据分析与标定指导助手，服
 - 工况目录不常驻在本提示里：需要时按功能调 list_conditions，只有当次请求能看到；
 - 只有 resolve_condition 返回 hop=resolved（唯一键精确命中）才可以直接分析；
   返回 hop=condition/function 表示信息不足，必须交用户确认，不得自选一条；
-- 功能声明了档位（目录里的「档位:」）而用户没说选哪个时，先问档位，不要默认挑一个；
+- 功能声明了档位（目录里的「档位:」）而用户没说选哪个时，先问档位，不要默认挑一个。
+  档位是多维各取一个（目录写 A1/A2 × B1/B2 即两维），拼接成 A1|B1 提交；
+  它不是四选一的候选，向用户提问时也按维度分别问；
+- 分析对象默认是最近一次上传的那批文件，不要重跑会话里的历史文件；
+  只有用户明确要对比多份或重复性核对时才用 file_indexes 点名；
 - 可标定量只能引用指标声明的 tuning_params，不得编造不存在的参数；
 - 区分「确定规则结论」（来自规则引擎）与「建议性判断」（你的推断）；
 - 不得基于 info 指标单独下异常结论，info 只能作为佐证或趋势描述；
-- 数据缺失（missing）时优先提示补测或检查通道映射，不得臆断性能结论；
+- 指标 missing 一律按结果里的 reason 说成因（图例随结果给出），不得自己推断；
 - 实测值一律直接引用 run_analysis_on_files 返回的 results（值/单位/限值/判定），
   不得让用户自查图表；
 - 回答使用简体中文，简洁、面向工程师。"""
@@ -52,11 +56,24 @@ def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> L
     # 档位：resolved 只保证工况唯一，不保证档位唯一。这里只描述、不设为 required ——
     # 设为必填会逼模型编一个档位，正确做法是先问用户，未选档时由引擎守卫弹面板（§6.9）
     scope_fn = cfg.function(scope_function) if scope_function else None
-    profile_desc = "档位标签，可选；多维度用竖线拼接如 4WD|DTCS"
+    profile_desc = ("档位标签，可选。多维档位用竖线拼接、每维各取一个标签，"
+                    "如 4WD|DTCS（不是从全部标签里挑一个）")
     if scope_fn is not None and scope_fn.profiles:
-        profile_desc = ("该功能声明了档位，取值 " + "|".join(scope_fn.profiles)
-                        + "（多维度用竖线拼接如 4WD|DTCS）。用户没说选哪个时不要自己定，"
-                        "先向用户确认；未带档位调用时引擎不会执行分析，而是给用户弹档位面板")
+        if scope_fn.profile_dims:
+            dims_txt = "，".join(
+                f"第{i + 1}维 {'/'.join(d)}" for i, d in enumerate(scope_fn.profile_dims))
+            combo = "|".join(d[0] for d in scope_fn.profile_dims)
+            profile_desc = (
+                f"该功能声明了 {len(scope_fn.profile_dims)} 个档位维度：{dims_txt}。"
+                f"取值是「每维各选一个」再用竖线拼接，例如 {combo}；"
+                "维度之间不是互斥候选，不要把 4 个标签当成 4 选 1 列给用户。"
+                "用户没说选哪个时不要自己定，按维度分别向用户确认；"
+                "未带档位调用时引擎不会执行分析，而是给用户弹档位面板")
+        else:
+            profile_desc = ("该功能声明了档位，取值 " + "|".join(scope_fn.profiles)
+                            + "（多维度用竖线拼接如 4WD|DTCS）。用户没说选哪个时不要自己定，"
+                            "先向用户确认；未带档位调用时引擎不会执行分析，"
+                            "而是给用户弹档位面板")
     return [
         {
             "type": "function",
@@ -110,7 +127,11 @@ def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> L
             "type": "function",
             "function": {
                 "name": "run_analysis_on_files",
-                "description": "对当前会话内全部已上传数据文件执行指定工况分析。仅在目标工况已确定后调用。",
+                "description": (
+                    "对会话内已上传数据文件执行指定工况分析。仅在目标工况已确定后调用。"
+                    "默认只分析「本轮默认对象」那批（即最近一次上传的文件）；"
+                    "需要对比历史文件或用户点名了某几份时，用 file_indexes 按编号指定。"
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -118,6 +139,14 @@ def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> L
                         "profile": {
                             "type": "string",
                             "description": profile_desc,
+                        },
+                        "file_indexes": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "description": (
+                                "要分析的文件编号（取自上下文「会话数据文件」的编号，1 起）。"
+                                "省略即分析最近一次上传的那批；只在用户明确要求对比多份时填写。"
+                            ),
                         },
                     },
                     "required": ["condition_id"],
@@ -146,10 +175,12 @@ def function_catalog_text(cfg: AppConfigs, include_conditions: bool = False) -> 
     """常驻目录只到功能层（§13）；工况层由 list_conditions 按需注入。
 
     include_conditions=True 保留旧的完整拼法，供离线展示与回归对比用。
+    档位按维度成对写（如「4WD/2WD × DTCS/TCS」）：写成 4WD,2WD,DTCS,TCS
+    看起来就是四个互斥候选，模型照着列给用户就变成 4 选 1。
     """
     lines = []
     for fn in cfg.functions.values():
-        prof = ",".join(fn.profiles) if fn.profiles else "-"
+        prof = _profiles_text(fn)
         base = (f"- {fn.key}（{fn.name}；别名: {','.join(fn.aliases)}；档位: {prof}；"
                 f"工况数: {len(cfg.conditions_of(fn.key))}）")
         if include_conditions:
@@ -158,6 +189,15 @@ def function_catalog_text(cfg: AppConfigs, include_conditions: bool = False) -> 
                     f"工况: {conds}）")
         lines.append(base)
     return "\n".join(lines)
+
+
+def _profiles_text(fn: FunctionConfig) -> str:
+    """档位展示：有维度串就按维度分组，否则退化为平铺标签。"""
+    if not fn.profiles:
+        return "-"
+    if fn.profile_dims:
+        return " × ".join("/".join(d) for d in fn.profile_dims)
+    return ",".join(fn.profiles)
 
 
 SUMMARY_SYSTEM = """你是对话压缩器。把制动测试分析对话的早期内容压成要点摘要，供后续轮次作为背景。
@@ -179,6 +219,31 @@ def summarize_request(transcript: str, budget_tokens: int) -> List[dict]:
     ]
 
 
+def _files_context(files: List) -> str:
+    """会话数据文件清单，并说明本轮默认分析哪一批。
+
+    「哪份是最新的」必须写成数据而不是让模型从历史消息里推断：原来只有一行平铺
+    文件名，模型看不出上传顺序，也无从表达「只分析刚传的那份」，于是每次都把会话
+    里的文件全跑一遍（§8.2 文件选择）。
+
+    只有一批时压成一行：编号与「默认对象」标注只在真的存在多批时才有信息量，
+    常驻 system prompt 不该为单批会话付这份 token（§13.1）。
+    """
+    if not files:
+        return "会话数据文件: （无，用户还没上传）"
+    batches = {f.get("batch_id") for f in files}
+    if len(batches) == 1:
+        return ("会话数据文件: " + ", ".join(f["name"] for f in files)
+                + "（本会话只上传过这一批，即本轮默认分析对象）")
+    new_batch = files[-1].get("batch_id")
+    lines = []
+    for i, f in enumerate(files, start=1):
+        fresh = " ← 本轮默认对象" if f.get("batch_id") == new_batch else ""
+        lines.append(f"  {i}. {f['name']}{fresh}")
+    return ("会话数据文件（编号即 run_analysis_on_files 的 file_indexes 取值）：\n"
+            + "\n".join(lines))
+
+
 def build_chat_messages(
     cfg: AppConfigs,
     history: List[dict],
@@ -186,10 +251,12 @@ def build_chat_messages(
     file_names: List[str],
     selected: dict,
     history_limit: int = HISTORY_TAIL,
+    files: Optional[List[dict]] = None,
 ) -> List[dict]:
     ctx = [
         f"可用功能目录:\n{function_catalog_text(cfg)}",
-        f"会话已上传文件: {', '.join(file_names) if file_names else '（无）'}",
+        _files_context(files if files is not None
+                       else [{"name": n, "batch_id": ""} for n in file_names]),
     ]
     if selected.get("condition"):
         ctx.append(f"当前已选定工况: {selected['condition']}" + (
@@ -231,6 +298,37 @@ def _limit_text(ok_range) -> str:
 
 _STATUS_CN = {"ok": "达标", "abnormal": "不合格", "missing": "不可算", "info": "仅记录"}
 
+# missing 成因图例。放在工具应答而不是常驻 system prompt 里：system prompt 每轮都要
+# 付费，而这张表只在结果真的出现 reason 时才需要被读到。
+MISSING_REASON_LEGEND = {
+    "no_valid_event": "本文件没切出该工况的有效事件窗口：试验过程不完整或工况选错，"
+                      "这【不是】信号缺失，别答成「缺少信号」，应建议补做该工况试验",
+    "signal_absent": "所需通道没有数据：未映射或该格式（如 CAN）未发布此信号，应补测或检查映射",
+    "not_computable": "窗口与通道都在但算不出值（如插值端点越界）",
+    "no_matching_entry": "所选档位下没有该指标的判定条目，需先选对档位",
+}
+
+# 结果卡片正文（会跨轮回灌）用的短注：那里没有 reason_legend 可读，
+# 所以必须写成人能看懂的词，而不是裸代码。
+_MISSING_REASON_CN = {
+    "no_valid_event": "未切出有效事件",
+    "signal_absent": "通道无数据",
+    "not_computable": "算不出值",
+    "no_matching_entry": "该档位无条目",
+}
+
+
+def reasons_present(digests: List[dict]) -> List[str]:
+    """本次结果里实际出现的 missing 成因（按出现顺序去重），供图例按需附带。"""
+    seen: List[str] = []
+    for d in digests:
+        for s in d.get("samples", []):
+            for m in s.get("metrics", []):
+                r = m.get("reason")
+                if r and r not in seen:
+                    seen.append(r)
+    return seen
+
 
 def _round3(v):
     """给 LLM 的数值统一保留 3 位：全精度既占字数也不像工程口径。"""
@@ -255,6 +353,10 @@ def digest_from_analysis(d: dict) -> dict:
                 "unit": m.get("unit"),
                 "status": m.get("status"),
             }
+            # missing 的成因必须原样带给模型：没有这个字段，模型只能从「没有值」
+            # 猜一个原因，而「没切出事件」和「缺通道」要给的结论是相反的。
+            if m.get("missing_reason"):
+                mi["reason"] = m["missing_reason"]
             lim = _limit_text(m.get("ok_range"))
             if lim:
                 mi["limit"] = lim
@@ -327,6 +429,7 @@ def digest_line(d: dict) -> str:
             + f" {_STATUS_CN.get(m['status'], m['status'])}"
             + (f"（限值 {m['limit']}" + (f"，档位 {m['profile']}" if m.get("profile") else "") + "）"
                if m.get("limit") else "")
+            + (f"[{_MISSING_REASON_CN.get(m['reason'], m['reason'])}]" if m.get("reason") else "")
             for m in s["metrics"]
         )
         runs.append(f"run{s.get('run')}·{s.get('file')}：{seg}")

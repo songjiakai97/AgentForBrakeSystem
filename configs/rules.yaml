@@ -4,10 +4,14 @@
 # fault_domain: stability | brake_performance | traction | powertrain_interaction | data_quality
 
 # 功能级：两功能共用同一组稳定性判定
+# 注意 missing 类规则的 message 只说「判定不成立」这一后果，不写成因：
+# 成因（缺通道 / 没切出事件 / 档位无条目）由 RuleVerdict.direction 按指标实际
+# missing_reason 给出。写死「yaw_rate 信号缺失」会在「试验没做出来」的文件上
+# 输出一句错话，而 LLM 只会照抄 message（design.md §6.5）。
 - {id: abs_yaw_abnormal,   scope: function, function: abs, metric: yaw_rate_max, status: abnormal, severity: critical,  fault_domain: stability,     kb_ref: abs_manual,  message: 制动过程横摆超限，车辆稳定性不足，检查前后轴制动力分配与介入时序}
-- {id: abs_yaw_missing,    scope: function, function: abs, metric: yaw_rate_max, status: missing,  severity: low,       fault_domain: data_quality, kb_ref: abs_manual,  message: yaw_rate 信号缺失，稳定性判定不成立}
+- {id: abs_yaw_missing,    scope: function, function: abs, metric: yaw_rate_max, status: missing,  severity: low,       fault_domain: data_quality, kb_ref: abs_manual,  message: 横摆稳定性指标不可算，本条无法给出稳定性判定}
 - {id: tcs_yaw_abnormal,   scope: function, function: tcs, metric: yaw_rate_max, status: abnormal, severity: critical,  fault_domain: stability,     kb_ref: tcs_manual,  message: 加速过程横摆超限，检查单轮制动干预与驱动扭矩爬升速率}
-- {id: tcs_yaw_missing,    scope: function, function: tcs, metric: yaw_rate_max, status: missing,  severity: low,       fault_domain: data_quality, kb_ref: tcs_manual,  message: yaw_rate 信号缺失，稳定性判定不成立}
+- {id: tcs_yaw_missing,    scope: function, function: tcs, metric: yaw_rate_max, status: missing,  severity: low,       fault_domain: data_quality, kb_ref: tcs_manual,  message: 横摆稳定性指标不可算，本条无法给出稳定性判定}
 
 # 工况级：指标异常 → 具体标定域结论
 - {id: abs_dist_abnormal,  scope: condition, function: abs, condition: abs_full_brake_dry_asphalt_100kph, metric: brake_distance, status: abnormal, severity: high, fault_domain: brake_performance, kb_ref: abs_manual, message: 高附着制动距离超限，检查增压响应与初始夹紧力}

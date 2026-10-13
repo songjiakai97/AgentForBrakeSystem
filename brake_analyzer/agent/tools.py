@@ -157,7 +157,9 @@ def run_analysis_on_files(
     profile: Optional[str] = None,
     blf_cfg=None,
 ) -> List[dict]:
-    """对会话内全部文件跑指定工况。files: [{file_id,name,path}]。
+    """对给定文件跑指定工况。files: [{file_id,name,path}]。
+
+    范围由调用方决定（引擎默认只传最近一批，§8.2），本函数不再假设"会话内全部"。
 
     blf_cfg 为 signals_blf.yaml 的校验结果；给出时 .blf 文件走 BLFLoader。
     """

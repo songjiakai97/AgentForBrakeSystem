@@ -23,11 +23,13 @@ from ..llm.context import ContextBudget, ContextCompressor
 from ..llm.kb import KnowledgeBase
 from ..llm.prompts import (
     TOOL_PAYLOAD_CLIP_CHARS,
+    MISSING_REASON_LEGEND,
     build_chat_messages,
     build_tool_specs,
     digest_from_analysis,
     digest_line,
     digest_payload,
+    reasons_present,
     summarize_request,
     suggestion_prompt,
 )
@@ -181,6 +183,7 @@ class ChatEngine:
     def _run_llm_stream(self, chat, text: str, state: Dict[str, bool],
                         stop_event=None):
         file_names = [f.name for f in chat.files]
+        files = [{"name": f.name, "batch_id": f.batch_id} for f in chat.files]
         selected = {
             "function": chat.selected_function,
             "condition": chat.selected_condition,
@@ -190,7 +193,8 @@ class ChatEngine:
             {"role": m.role, "kind": m.kind, "content": m.content}
             for m in chat.messages[:-1]
         ]
-        raw = build_chat_messages(self.cfg, history, text, file_names, selected)
+        raw = build_chat_messages(self.cfg, history, text, file_names, selected,
+                                  files=files)
         messages, step = self._fit_context(chat, raw)
         if step is not None:
             yield self._mevent(step)
@@ -212,7 +216,8 @@ class ChatEngine:
                 function_key=chat.selected_function,
             ),
             "run_analysis_on_files": lambda args: self._analyze(
-                chat, args.get("condition_id"), args.get("profile"), stop_event
+                chat, args.get("condition_id"), args.get("profile"), stop_event,
+                file_indexes=args.get("file_indexes"),
             ),
         }
         # 工具规格由配置生成（维度/工况 id 作 enum），已选定功能时进一步收窄取值域
@@ -319,13 +324,19 @@ class ChatEngine:
                             if digests:
                                 # 数值 + 判定 + 规则结论原文回灌：模型据此直接下结论。
                                 # 预算扣掉外层信封（ok/note），避免整段被硬截成坏 JSON
+                                kept = digest_payload(digests, TOOL_PAYLOAD_CLIP_CHARS - 256)
                                 payload = {
                                     "ok": True,
                                     "note": "results 为本次分析的实测值与判定，"
                                             "回答实测值直接引用它，不要让用户查看图表",
-                                    "results": digest_payload(
-                                        digests, TOOL_PAYLOAD_CLIP_CHARS - 256),
+                                    "results": kept,
                                 }
+                                # 成因图例只随实际送出的 reason 附带：缺信号与缺事件的
+                                # 建议相反，让模型从「无值」猜成因就会说错话（§10.1）
+                                legend = reasons_present(kept)
+                                if legend:
+                                    payload["reason_legend"] = {
+                                        r: MISSING_REASON_LEGEND.get(r, r) for r in legend}
                                 if failed:
                                     payload["failed"] = failed
                             else:
@@ -425,12 +436,18 @@ class ChatEngine:
 
     # ------------------------------------------------------------ 分析
     def _analyze(self, chat, condition_id: str, profile: Optional[str],
-                 stop_event=None) -> Tuple[List, List[dict]]:
+                 stop_event=None, file_indexes: Optional[List[int]] = None
+                 ) -> Tuple[List, List[dict]]:
         """执行分析并落库可见消息。
 
         返回 (消息列表, 数值摘要列表)。摘要与结果卡片同源，既拼进卡片正文
         （跨轮追问时由 history 回灌），也直接回灌给 LLM 当轮 tool 应答 ——
         否则模型只拿到"分析已完成"，正文会退化成让用户自己看图（§6.9）。
+
+        分析范围默认只取「最近一次上传的那批文件」（§8.2）：用户新传数据后说的
+        「分析」指的是新那份，把会话里的历史文件一起重跑，结论就混了上一趟的数据。
+        file_indexes 是模型按 prompt 里编号显式点名的文件（1 起），供「对比全部文件」
+        这类明确要求使用；点不名的编号忽略，不让模型凭空造范围。
         """
         cond = self.cfg.condition(condition_id or "")
         if cond is None:
@@ -438,6 +455,10 @@ class ChatEngine:
         if not chat.files:
             return [self._msg(chat, "error",
                               "会话内还没有数据文件，请先上传 .mf4/.blf 文件再分析。")], []
+        targets = self._pick_files(chat, file_indexes)
+        if not targets:
+            return [self._msg(chat, "error",
+                              "没有选中任何数据文件（file_indexes 与本会话文件对不上）。")], []
 
         chat.selected_function = cond.function
         chat.selected_condition = cond.id
@@ -445,21 +466,24 @@ class ChatEngine:
 
         # 新一轮动作（点选面板/工具调用）另起一个步骤块
         self._seal_steps(chat)
+        skipped = len(chat.files) - len(targets)
         step_msg = self._step_on(chat, [
             (f"run_analysis_on_files：{cond.name}",
-             f"文件 {len(chat.files)} 个 · 工况 {cond.id}"
+             f"文件 {len(targets)} 个"
+             + (f"（会话内另有 {skipped} 个非本轮范围，未重跑）" if skipped else "")
+             + f" · 工况 {cond.id}"
              + (f" · 档位 {profile}" if profile else ""), "run")])
         added: List = [step_msg]
 
         results: List[AnalysisResult] = []
         errors: List[str] = []
         stopped_early = False
-        for i, f in enumerate(chat.files):
+        for i, f in enumerate(targets):
             # 工具阶段是整轮最慢的一段，且期间没有 delta 可供上层检查停止：
             # 每个文件开始前自检，已完成的文件结果照常保留落库
             if self._stopped(stop_event):
                 stopped_early = True
-                self._step_on(chat, [(f"已停止：{len(chat.files) - i} 个文件未分析",
+                self._step_on(chat, [(f"已停止：{len(targets) - i} 个文件未分析",
                                       "前序文件的结果已保留", "warn")])
                 break
             sess = self.store.session(f.file_id)
@@ -497,6 +521,25 @@ class ChatEngine:
         elif not results and not errors:
             added.append(self._msg(chat, "error", "没有可分析的文件。"))
         return added, digests
+
+    @staticmethod
+    def _pick_files(chat, file_indexes: Optional[List[int]]) -> List:
+        """本轮要分析的文件。
+
+        默认 = 最近一次上传的那一批；file_indexes 给了就按编号取（1 起，越界丢弃），
+        让「把这几个文件对比一下」这类要求有明确出口，而不是只能全跑。
+        """
+        if not file_indexes:
+            return chat.latest_batch() if hasattr(chat, "latest_batch") else list(chat.files)
+        picked = []
+        for n in file_indexes:
+            try:
+                i = int(n)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= i <= len(chat.files) and chat.files[i - 1] not in picked:
+                picked.append(chat.files[i - 1])
+        return picked
 
     def _maybe_suggest(self, res: AnalysisResult, cond) -> None:
         """LLM 可用且有异常/缺失时，生成 calibration_actions；否则降级标记。"""
@@ -599,9 +642,14 @@ class ChatEngine:
     def _analysis_msg(self, chat, res: AnalysisResult):
         d = res.to_dict()
         n_bad = sum(1 for s in res.samples for m in s.metrics if m.status in ("abnormal", "missing"))
+        # 「没切出事件」必须在卡片标题就说明：否则卡片读起来像「1 个样本，指标全缺失」，
+        # 用户和模型都会把它当成通道没采到，而真实原因是这趟试验没做出来（§10.1）。
+        no_event = sum(1 for s in res.samples
+                       if any(m.missing_reason == "no_valid_event" for m in s.metrics))
         head = (
             f"工况「{res.condition_name}」分析完成：{len(res.samples)} 个事件样本"
             + (f"，{n_bad} 项异常/缺失" if n_bad else "，全部达标")
+            + (f"；其中 {no_event} 份未切出有效事件窗口（非信号缺失）" if no_event else "")
             + ("（LLM 建议不可用，仅规则结论）" if res.degraded else "")
         )
         # 正文带上数值+判定：卡片 kind 不是 text，默认不回灌 prompt，

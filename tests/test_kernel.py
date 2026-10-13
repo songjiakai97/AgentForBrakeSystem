@@ -273,9 +273,46 @@ def test_missing_channel_rule(cfg):
     res = _analyze(cfg, "abs_wet50_no_yaw.mf4", ABS50)
     ms = _metrics(res)
     assert ms["yaw_rate_max"].status == "missing"
+    assert ms["yaw_rate_max"].missing_reason == "signal_absent"
     v = res.samples[0].verdicts
     assert len(v) == 1 and v[0].rule_id == "abs_yaw_missing"
     assert v[0].fault_domain == "data_quality"
+    # 结论不能把成因写死成「信号缺失」之外的东西，也不该不提成因
+    assert "不可算" in v[0].message
+    assert "通道" in v[0].direction or "未映射" in v[0].direction
+
+
+def test_no_event_and_no_signal_have_different_reasons(cfg):
+    """「没切出事件」与「缺通道」必须可区分：给用户的建议是相反的。
+
+    两者过去都是 status=missing、值都是 None，模型与用户只能猜，于是
+    「这趟试验没做出来」被说成「传感器没装/信号缺失」（design.md §10.1）。
+    """
+    no_event = _metrics(_analyze(cfg, "abs_dry100_no_v0.mf4", ABS100))
+    no_signal = _metrics(_analyze(cfg, "abs_wet50_no_yaw.mf4", ABS50))
+    assert no_event["brake_distance"].missing_reason == "no_valid_event"
+    assert no_signal["yaw_rate_max"].missing_reason == "signal_absent"
+    # 同一指标在两种成因下状态相同、成因不同 —— 说明区分靠的是 reason 不是 status
+    assert no_event["brake_distance"].status == no_signal["yaw_rate_max"].status == "missing"
+    assert no_event["brake_distance"].value is None
+
+
+def test_degenerate_window_card_says_not_signal_absence(cfg):
+    """结果卡片标题要点明「未切出有效事件（非信号缺失）」，不能只说「N 项缺失」。"""
+    from brake_analyzer.llm.prompts import digest_line
+
+    res = _analyze(cfg, "abs_dry100_no_v0.mf4", ABS100)
+    d = res.to_dict()
+    line = digest_line(d)
+    assert "未切出有效事件" in line, line
+    assert "信号缺失" not in line
+
+
+def test_missing_reason_omitted_when_computable(cfg):
+    res = _analyze(cfg, "abs_dry100_dist_abn.mf4", ABS100)
+    d = res.to_dict()
+    m = [x for s in d["samples"] for x in s["metrics"]][0]
+    assert m["status"] != "missing" and "missing_reason" not in m
 
 
 def test_unreachable_crossover_missing(cfg):

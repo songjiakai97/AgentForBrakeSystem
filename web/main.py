@@ -5,6 +5,7 @@
 
 import json
 import os
+import uuid
 import warnings
 
 warnings.filterwarnings("ignore", module="asammdf")
@@ -245,6 +246,8 @@ def api_delete_chat(cid: str):
 @app.post("/api/chats/{cid}/files")
 async def api_upload(cid: str, files: List[UploadFile] = File(...)):
     chat = _chat_or_404(cid)
+    # 一次请求 = 一批（用户多选上传是一个动作），后续分析默认只取最新这批（§8.2）
+    batch_id = "fb_" + uuid.uuid4().hex[:8]
     out = []
     for uf in files:
         name = uf.filename or "unnamed.mf4"
@@ -254,7 +257,7 @@ async def api_upload(cid: str, files: List[UploadFile] = File(...)):
                 400, f"仅接受 {'/'.join(sorted(ALLOWED_EXT))} 上传，收到: {name}"
                      + ("" if BLF_READY else "（当前环境缺 python-can/cantools，BLF 不可用）"))
         content = await uf.read()
-        entry = STORE.add_file(chat, name, content)
+        entry = STORE.add_file(chat, name, content, batch_id=batch_id)
         out.append(entry.to_dict())
         STORE.add_message(chat, "assistant", "attachment",
                           content=f"已接收文件 {name}（{ext.lstrip('.')}）", data=entry.to_dict())

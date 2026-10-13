@@ -98,9 +98,13 @@ class MetricResult:
     raw: Dict[str, Any] = field(default_factory=dict)
     ok_range: Optional[list] = None
     profile: Optional[str] = None
+    # status=missing 时的成因：no_valid_event | signal_absent | not_computable |
+    # no_matching_entry。缺信号与缺事件给用户的建议完全相反（补测通道 vs 重做试验），
+    # 所以成因必须是数据，不能让下游（含 LLM）从「没有值」去猜。
+    missing_reason: Optional[str] = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "key": self.key,
             "name": self.name,
             "category": self.category,
@@ -111,6 +115,9 @@ class MetricResult:
             "ok_range": self.ok_range,
             "profile": self.profile,
         }
+        if self.missing_reason:
+            d["missing_reason"] = self.missing_reason
+        return d
 
 
 @dataclass

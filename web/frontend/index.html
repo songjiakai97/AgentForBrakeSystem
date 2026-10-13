@@ -103,6 +103,9 @@ body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-ser
 .fchip{background:var(--panel);border:1px solid #334155;border-radius:14px;padding:3px 10px;font-size:12px;display:flex;gap:6px;align-items:center}
 .fchip button{background:none;border:none;color:var(--abn);cursor:pointer;font-size:12px;padding:0}
 .uploaded{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+/* 不在本轮默认分析范围内的历史文件：压暗但保留可删，配合 uptag 说明「没重跑」 */
+.fchip.out{opacity:.5;border-style:dashed}
+.uptag{align-self:center;font-size:11px;color:var(--warn,#fbbf24)}
 .inputrow{display:flex;gap:8px;align-items:flex-end}
 .addbtn{width:38px;height:38px;border-radius:50%;border:1px solid #334155;background:var(--panel);color:var(--accent);font-size:20px;cursor:pointer;flex:none}
 textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:10px;color:var(--text);padding:9px 12px;font-size:14px;resize:none;height:38px;max-height:110px;font-family:inherit}
@@ -243,7 +246,7 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
             </div>
             <div v-if="opened[s.sample_id+':'+m.message_id]" class="detail">
               <div v-for="x in s.metrics" :key="x.key" class="mline">
-                <span>{{x.name}} <span class="chip" :class="x.status" style="cursor:default">{{x.status}}</span></span>
+                <span>{{x.name}} <span class="chip" :class="x.status" style="cursor:default">{{x.status}}{{x.missing_reason?('·'+MISSING_CN[x.missing_reason]):''}}</span></span>
                 <span>{{val(x)}} {{x.unit}} <span style="color:var(--muted)">限值 {{range(x)}}{{x.profile?(' · '+x.profile):''}}</span></span>
               </div>
               <div class="verdict" v-if="s.verdicts.length">
@@ -318,7 +321,10 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
 
     <div class="composer">
       <div class="uploaded" v-if="chat && chat.files.length">
-        <span v-for="f in chat.files" :key="f.file_id" class="fchip">✅ {{f.name}}
+        <span class="uptag" v-if="chat.files.length > latestBatchIds.size">本轮默认分析：只有最后一批，其余未重跑</span>
+        <span v-for="f in chat.files" :key="f.file_id" class="fchip" :class="{out:!latestBatchIds.has(f.file_id)}"
+              :title="latestBatchIds.has(f.file_id)?'在本轮分析范围内':'不在本轮范围；想让 Agent 对比它，直接说「把 xxx 一起对比」'">
+          {{latestBatchIds.has(f.file_id)?'✅':'🗂'}} {{f.name}}
           <button @click="delFile(f.file_id)">✕</button></span>
       </div>
       <div class="pending" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px" v-if="samples.length">
@@ -365,6 +371,10 @@ createApp({
     otherText:{}, pfSel:{}, opened:{}, openState:{},
     live: blankLive(), lastSeq: 0, currentRunId: '', runCid: '', stopping: false,
     chartData:null, chartTitle:'', chartGroups:[], chartHidden:[], chartFull:null, _chart:null,
+    // 与后端 _MISSING_REASON_CN / prompts.MISSING_REASON_LEGEND 同一口径：
+    // missing 的成因决定建议是「补测通道」还是「重做试验」，界面上不能都写成缺失。
+    MISSING_CN:{no_valid_event:'未切出有效事件',signal_absent:'通道无数据',
+                not_computable:'算不出值',no_matching_entry:'该档位无条目'},
   }},
   computed:{
     // 样例条带按格式分组显示：MF4 取前 6 个 + 全部 BLF，避免 BLF 被 MF4 挤出视野
@@ -386,6 +396,15 @@ createApp({
         if(m.kind==='target_options' && !this.consumed(m) && m.data) return m;
       }
       return null;
+    },
+    // 本轮默认分析范围 = 最后一次上传的那批（与后端 Chat.latest_batch 同口径）。
+    // 界面必须把它显示出来：默认范围收窄是看不见的行为，若还像原来那样给所有
+    // 文件打同一个 ✅，用户会以为历史文件也一起算了。
+    latestBatchIds(){
+      const fs = (this.chat && this.chat.files) || [];
+      if(!fs.length) return new Set();
+      const bid = fs[fs.length-1].batch_id || '';
+      return new Set(fs.filter(f => (f.batch_id || '') === bid).map(f => f.file_id));
     },
   },
   async mounted(){
@@ -717,8 +736,7 @@ createApp({
       this.$nextTick(()=>{ if(el) el.scrollTop=at; this.scroll(); });
     },
     scroll(){ const el=this.$refs.msgs; if(el) el.scrollTop=el.scrollHeight; },
-    toggle(sid,key){ const k=sid+':'+this._curMid(sid); this.opened[k]=!this.opened[k]; },
-    _curMid(){ return 'all'; },
+    toggle(key){ this.opened[key]=!this.opened[key]; },
     // ------------------------------------------------ 图表：多 grid 共享 x 轴
     async showChart(s){
       this.chartTitle=`${s.file_name} · run ${s.run_index}`;

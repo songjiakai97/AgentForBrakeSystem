@@ -63,7 +63,7 @@ Function（功能）
 | `name` | 显示名 |
 | `aliases` | 同义词/别名词表，供离线规则与 LLM 参考 |
 | `segmenter` | 绑定的事件分段模板 key（模板实现以代码注册表提供，见 §6.3） |
-| `profiles` | 可选；该功能支持的档位标签列表，供前端渲染选择面板 |
+| `profiles` | 可选；档位**组合**列表，每项用竖线分维度（`4WD|2WD`、`DTCS|TCS`）；加载期拆出扁平标签集 `fn.profiles` 与维度串 `fn.profile_dims`，前者只做合法性校验、后者供呈现（§9.2） |
 | `kb_section` | 知识库手册章节引用 |
 | `description` | 功能说明 |
 
@@ -366,6 +366,12 @@ phases: list[str]
 - 建议的标定方向草稿
 - 引用知识库片段
 
+`status: missing` 的规则，方向性说明**来自指标成因而不是规则文案**（`_MISSING_CAUSE`，
+按 `MetricResult.missing_reason` 取，§10.1）：「缺事件」与「缺通道」的建议是相反的，
+把成因写死在 rules.yaml 的 message 里必然有一边说错话。因此规则的 `message` 只写后果
+（如「横摆稳定性指标不可算，本条无法给出稳定性判定」），成因由 `direction` 带出；
+未知成因回退「无法计算（成因未知）」，不猜。
+
 ### 6.6 图表（`charts/`）
 
 - `html.py`：将选定信号时间序列转成 ECharts option JSON。
@@ -412,6 +418,15 @@ load(file)
 - 结构化 JSON 输出 `calibration_actions[]`；
 - 不得基于 info 指标单独下“异常”结论，只能作为佐证或趋势描述。
 
+要求还包括（本轮新增的三条，都是被真实错误回答逼出来的）：
+
+- 档位按**维度**呈现：目录里写 `档位: 4WD/2WD × DTCS/TCS`（`_profiles_text`），工具描述里
+  逐维列出取值并明说「不要把 4 个标签当成 4 选 1」。原来平铺成 `4WD|2WD|DTCS|TCS`，
+  模型据此给用户四选一，而正确答案是两个维度各选一个再竖线拼接（§9.2）。
+- 分析对象默认 = 最近一次上传的那一批文件，历史文件不重跑；只有用户明确要对比时才用
+  `file_indexes` 按编号点名（§8.2）。
+- 指标 `missing` 一律按结果里的 `reason` 说成因，不得自己推断（§10.1）。
+
 其他：
 
 - `context.py`：上下文预算、压缩与一次性内容折叠（§6.10），阈值来自 `.env`。
@@ -430,7 +445,9 @@ load(file)
   `run_analysis_on_files` 的 `condition_id` 进一步限定为 `scope_conditions(function)`。
 - `list_conditions(function_key)`：按需给出该功能全部工况（含唯一键属性），供模型填槽；
   结果标 `transient`，只服务当次定位（§6.10）。
-- `run_analysis_on_files(condition_id, profile?)`：对会话内全部已上传文件跑指定工况。
+- `run_analysis_on_files(condition_id, profile?, file_indexes?)`：对会话内已上传文件跑指定
+  工况。**默认只跑最近一次上传的那批**（`Chat.latest_batch()`，§8.2）；`file_indexes` 是
+  模型按 prompt 里编号点名的文件（1 起），供「把这几份对比一下」这类明确要求使用。
 - `recommend_targets(query, max_items)`：两跳规则打分，保留为**兜底与离线路径**——
   在线 LLM 不可用、或描述无法转成结构化槽位时使用，与离线路由同一实现，保证降级一致。
 
@@ -479,6 +496,15 @@ load(file)
   超预算时 `digest_payload` 按「结论原文 → verdicts → 最老的结果」逐级降级，
   **保证序列化后仍落在 `TOOL_PAYLOAD_CLIP_CHARS` 内**，不留半截坏 JSON。
   部分文件失败时另带 `failed` 字段，避免"有结果"掩盖"有些文件没跑出来"。
+- **missing 成因随结果给出图例**（`MISSING_REASON_LEGEND` / `reasons_present`，§10.1）：
+  digest 里每个 missing 指标带 `reason`，工具应答只在**本次结果真的出现过该成因**时附
+  `reason_legend`。图例刻意不写进常驻 system prompt——那是一段每轮都付费、却多数轮次
+  用不上的文本；而缺图例时模型只能猜，猜错就是把"没做这个试验"答成"信号没采"。
+- **分析范围是一等参数，不是提示词愿望**（`_pick_files`，§8.2）：默认取
+  `Chat.latest_batch()`（与最后一个文件的 `batch_id` 同批），`file_indexes` 命中编号越界
+  一律丢弃；全部点空时**报错**「没有选中任何数据文件（file_indexes 与本会话文件对不上）」，
+  绝不静默回退成"全跑一遍"。步骤行如实写明范围：
+  `文件 1 个（会话内另有 1 个非本轮范围，未重跑）`——范围收窄对用户不可见就等于偷改需求。
 - 档位守卫：`run_analysis_on_files` 未带 `profile` 且该功能声明了 `profiles` 时，引擎不执行
   分析，改落 `hop=profile` 面板并回一条 `tool` 应答。`hop=resolved` 只保证工况唯一、
   不保证档位唯一，离线路径本来就是"先选档再分析"，两条路径口径必须一致。
@@ -579,6 +605,11 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 
 - **Session**：绑定一个数据文件，缓存信号与各工况分析结果。
 - **Chat**：一次人机对话，含 `files`、`messages`、`selected_function`、`selected_condition`、`selected_profile`。
+- **FileEntry.batch_id**：同一次上传请求（= 用户的一个动作，多选也算一批）进来的文件共享
+  一个 `fb_<hex>` 标记，是「本轮默认分析范围」的唯一依据（§8.2）。`Chat.latest_batch()`
+  取与最后一个文件同批的那些；不经 API 加入的文件（脚本、测试）`batch_id` 为空，
+  天然自成一类，不会把真实批次切碎。批次只回答「哪一轮的对象」，不参与缓存键，
+  删掉一个文件不会改变其余文件的批次归属。
 
 生命周期与回收：
 
@@ -607,7 +638,7 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 | GET | `/api/chats` | 对话列表 |
 | GET | `/api/chats/{cid}` | 对话详情 |
 | DELETE | `/api/chats/{cid}` | 删除对话 |
-| POST | `/api/chats/{cid}/files` | 上传一个/多个数据文件（`.mf4`/`.blf`，按扩展名选 Loader） |
+| POST | `/api/chats/{cid}/files` | 上传一个/多个数据文件（`.mf4`/`.blf`，按扩展名选 Loader）；一次请求生成一个 `batch_id` |
 | DELETE | `/api/chats/{cid}/files/{fid}` | 移除文件 |
 | POST | `/api/chats/{cid}/messages` | 发送用户消息 |
 | POST | `/api/chats/{cid}/messages/stream` | SSE 流式发送 |
@@ -634,7 +665,9 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 ```
 
 - `target_type=function`：写入 `selected_function`，触发第二跳工况精排。
-- `target_type=condition`：写入 `selected_condition` 与 `selected_profile`，对全部文件执行分析。
+- `target_type=condition`：写入 `selected_condition` 与 `selected_profile`，执行分析。
+  与 LLM 路径同口径：**只分析最近一批文件**（`ENGINE._analyze` → `_pick_files`，§6.9），
+  不再是"会话里所有文件"。多份数据一起上传（同一个请求）仍是全部分析——它们本就是同一批。
 
 ---
 
@@ -659,6 +692,23 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
   两套映射（`signals_mf4.yaml` / `signals_blf.yaml`）由服务端固定，用户不提供映射配置。
 - 合成样例条带同时列 MF4 与 BLF（`/api/samples` 返回 `{name, format}`），BLF 条目带 `·blf` 标记。
 
+**①b 分析范围：默认只跑最新一批，且必须看得见**
+
+「我每次上传新的文件，希望分析的是最新的文件」原来在界面和 prompt 里都无法表达：
+上传条带是一行平铺文件名，不带顺序与批次，模型看不出"哪份是刚传的"，只能全跑。现在
+批次是数据（`batch_id`，§7.1），呈现与后果都要跟着说明：
+
+- 条带里每个文件按范围标记：在最新一批内 `✅`，否则 `🗂` 并压暗（`.fchip.out`，
+  `opacity:.5` + 虚线边框）；出现范围外文件时条带头部挂一行 `.uptag`
+  「本轮默认分析：只有最后一批，其余未重跑」。
+- 范围外文件的 `title` 给出出口：「想让 Agent 对比它，直接说『把 xxx 一起对比』」——
+  那句话会走 `file_indexes` 点名路径（§6.9），默认收窄不是把历史文件判了死刑。
+- 前端 `latestBatchIds` computed 与后端 `Chat.latest_batch()` 用同一条规则（最后一个文件
+  的 `batch_id`），不引入第二处判定，避免两边的"最新"不一致。
+- prompt 侧同样把顺序写成数据：多批时 `_files_context` 渲染带编号的清单并标
+  `← 本轮默认对象`（编号即 `file_indexes` 的取值）；只有一批时压成一行，不付这份
+  常驻 token（§13.1）。
+
 **② 功能面板（`hop=function`）**
 
 - 描述不足以判定功能时弹出，一行一个功能。
@@ -668,7 +718,8 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 **③ 工况面板（`hop=condition`）**
 
 - 在选中功能内，唯一键没填满或零命中时弹出，候选一律来自该功能范围。
-- 工况所属功能声明了 `profiles` 时，展开档位选择（单下拉），选完再确认。
+- 工况所属功能声明了 `profiles` 时，展开档位选择：**每个维度一个下拉**
+  （`dimsOf(m)` 读面板自带的 `profile_dims`，§9.2），确认后拼成 `4WD|DTCS` 提交。
 
 **④ 其他选项**
 
@@ -720,8 +771,17 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 - 每行显示：文件名、事件序号、查看图表、数据链接。**不做行级聚合状态 badge**——
   指标状态在展开明细中逐个展示，每行只显示各指标自身的状态 chip。
 - 状态配色：`ok` 绿 / `abnormal` 红 / `missing` 灰 / `info` 蓝。
+- 展开明细里 missing 的 chip 带成因后缀（`missing·未切出有效事件` / `missing·通道无数据`，
+  前端 `MISSING_CN` 表把后端 `missing_reason` 翻成短词，§10.1）：只写 `missing` 的话，
+  界面本身就在把两种相反的建议混成一个词。规则行下方同时显示成因句（`direction`）。
+- 展开明细的开关 key 是 `sample_id:message_id`（`opened` 状态表）。这里原先埋着一个
+  静默失效：`toggle()` 拼的是 `sample_id + ':all'`（历史遗留的 `_curMid()`），模板读的
+  key 里没有这段，两边永远对不上 —— 明细面板**从上线起就点不开**。本轮加成因 chip 时
+  才发现，因为 chip 就在明细里，探针点不出来才去查。已删掉 `_curMid`，`toggle(key)`
+  直接用模板传入的 key。教训：Vue 模板里的表达式（尤其 v-if 的 key 拼接）静态检查
+  看不出问题，必须在真浏览器里点一次。
 - 点“查看图表”拉取事件窗口时序，ECharts 多信号叠画。
-- 已上传文件在顶部 chips 展示，可移除。
+- 已上传文件在顶部 chips 展示，可移除，并按分析范围标记（§8.2 ①b）。
 
 ### 8.4 分析状态
 
@@ -776,6 +836,18 @@ functions:
     kb_section: <section_id>
     description: <说明>
 ```
+
+`profiles` 的每一项是「一个组合」，用竖线分成若干**维度**：`["4WD|2WD", "DTCS|TCS"]` 读作
+两维（驱动形式 × TCS 档位），加载期同时拆出
+
+- `profiles = [4WD, 2WD, DTCS, TCS]` —— 扁平标签集，只用于合法性校验（`/select` 拒非法 token）；
+- `profile_dims = [[4WD,2WD],[DTCS,TCS]]` —— 维度串，**所有给人和给模型的呈现都用它**。
+
+这条是修出来的：`profile_dims` 早期只有前端档位面板在用，工具描述与功能目录仍在拼
+`fn.profiles`（`取值 4WD|2WD|DTCS|TCS`、`档位: 4WD,2WD,DTCS,TCS`）——界面已经是两个下拉，
+模型看到的却是一串平铺标签，于是给用户"四选一"。现在两处都改读维度串
+（`profile_desc` 逐维列取值、`_profiles_text` 输出 `档位: 4WD/2WD × DTCS/TCS`）。
+无维度串的功能（`profiles: [A, B]` 单标签列表）仍退化为平铺展示。
 
 ### 9.3 conditions.yaml
 
@@ -1012,10 +1084,27 @@ ok | abnormal | missing | info
 
 - **ok**：有 `ok_range` 且落在区间内。
 - **abnormal**：有 `ok_range` 但落在区间外。
-- **missing**：信号缺失、工具无法计算，或所选条目为 `None`。
+- **missing**：算不出值，成因见下表。
 - **info**：无 `ok_range`，仅记录数值。
 
 规则引擎只对 `abnormal` / `missing` 触发。
+
+**missing 必须带成因**（`MetricResult.missing_reason`，由 `_missing_reason(signals, window, tmpl)`
+在置 missing 的同一处判定，`metrics/engine.py`）：
+
+| reason | 判据（顺序即优先级） | 该怎么办 |
+| --- | --- | --- |
+| `no_valid_event` | 事件窗口退化（`t_start`/`t_end` 缺失或 NaN，或 `t_end <= t_start`） | 补做该工况试验 / 换工况，**不是查信号映射** |
+| `signal_absent` | 窗口正常，但指标 `tmpl.inputs` 里某通道为空 | 补测或检查映射 |
+| `not_computable` | 窗口与通道都在，值算不出（插值端点越界等） | 查算法/数据质量 |
+| `no_matching_entry` | 所选档位下没有该指标的判定条目 | 先选对档位 |
+
+「缺事件」和「缺信号」的建议是相反的，而两者在旧实现里共用一个 `missing`：分段的
+`no_valid_event` 只写在 `window.phases` 里、`AnalysisResult.to_dict()` 又不导出窗口原因，
+digest 只带 status —— 模型手里没有成因数据，只能猜，于是把「这趟试验没做出来」答成
+「yaw_rate 信号缺失」。现在成因是一等字段，一路传到规则 `direction`（§6.5）、工具应答
+`reason` + 按需 `reason_legend`（§6.9）、卡片正文短注与前端 chip（§8.3）；
+`to_dict()` 只在非空时导出，可算的指标不多付一个字段。
 
 ### 10.2 MetricResult
 
@@ -1032,6 +1121,8 @@ class MetricResult:
     raw: dict
     ok_range: tuple | None    # 实际使用的区间
     profile: str | None       # 实际使用的档位
+    missing_reason: str | None  # 仅 missing 时有值：no_valid_event | signal_absent
+                                 # | not_computable | no_matching_entry（§10.1）
 ```
 
 ### 10.3 加载期：建索引
@@ -1306,6 +1397,16 @@ Trace 结构：
 | --- | --- | --- | --- |
 | 功能层 | **常驻** system prompt（`function_catalog_text(cfg)`，默认不含工况） | `key`、`name`、`aliases`、档位、该功能工况**条数** | 功能数 |
 | 工况层 | **按需**注入（`list_conditions`，仅当轮可见） | 该功能下全部工况 + 唯一键属性 | 单次请求，用完折叠 |
+
+会话状态部分（已上传文件、已选工况）同样常驻，但**按信息量付费**：只有一批文件时压成
+一行，出现多批才展开成带编号的清单（编号即 `file_indexes` 取值，§8.2）——编号与「默认对象」
+标注在单批会话里没有信息量，不该让每轮都为其付费。成因图例（§6.9）也走"随结果附带"而不是
+常驻。这条口径是实测出来的：三处补充一度把常驻基线（`build_chat_messages` 空会话）推到
+998 token，逐条改按需后落回 770（改动前同口径 647，净 +123，全部来自 `SYSTEM_CHAT` 里那
+三条口径——不写进系统提示就等于让模型猜）。文件清单按批数分档：无文件 770 / 单批 783 /
+两批 790，编号与「本轮默认对象」标注只在真有多批时才付。
+测试里压缩阈值同样不写死数字，而是按空会话实测地板放大得出（`tests/test_context.py`），
+否则测的是"地板有多高"而不是"未超限不压"。
 
 常驻部分刻意不含工况名。用 10 功能 × 15 工况 = 150 条的合成配置实测：功能层 276 token，
 把工况全拼进去是 1870 token（每条请求都要重付）；按需注入时单个功能的清单按工况数线性

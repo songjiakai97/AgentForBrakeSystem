@@ -196,6 +196,48 @@ def test_system_chat_forbids_autopick():
     assert "list_conditions" in SYSTEM_CHAT
 
 
+def test_profiles_presented_as_dimensions_not_flat_choices(cfg):
+    """档位必须按维度呈现：4WD/2WD 与 DTCS/TCS 是两维各取一个。
+
+    展平成「取值 4WD|2WD|DTCS|TCS」后，模型照着列给用户就变成四选一，
+    而配置里没有「4WD 与 DTCS 互斥」这种语义（design.md §9.2）。
+    """
+    from brake_analyzer.llm.prompts import function_catalog_text
+
+    text = function_catalog_text(cfg)
+    assert "4WD/2WD × DTCS/TCS" in text, text
+    assert "4WD,2WD,DTCS,TCS" not in text, "不能退回展平写法"
+
+    prof = ({s["function"]["name"]: s for s in build_tool_specs(cfg, "tcs")}
+            ["run_analysis_on_files"]["function"]["parameters"]["properties"]["profile"])
+    assert "第1维 4WD/2WD" in prof["description"]
+    assert "第2维 DTCS/TCS" in prof["description"]
+    assert "4 选 1" in prof["description"], "要显式挡住把四个标签当四选一"
+    # 提交格式仍是竖线拼接，并给出可照抄的示例
+    assert "4WD|DTCS" in prof["description"]
+
+
+def test_run_analysis_scopes_to_latest_upload(cfg):
+    """工具说明 + 文件清单都要写明「默认只分析最近一批」，否则模型没有依据收窄范围。"""
+    from brake_analyzer.llm.prompts import build_chat_messages
+
+    run = {s["function"]["name"]: s for s in build_tool_specs(cfg, "abs")}[
+        "run_analysis_on_files"]
+    assert "file_indexes" in run["function"]["parameters"]["properties"]
+    assert "默认只分析" in run["function"]["description"]
+    assert run["function"]["parameters"]["required"] == ["condition_id"]
+
+    sys1 = build_chat_messages(cfg, [], "分析一下", [], {}, files=[
+        {"name": "a.mf4", "batch_id": "b1"}])[0]["content"]
+    assert "a.mf4" in sys1 and "本轮默认分析对象" in sys1
+
+    sys2 = build_chat_messages(cfg, [], "分析一下", [], {}, files=[
+        {"name": "a.mf4", "batch_id": "b1"},
+        {"name": "b.blf", "batch_id": "b2"}])[0]["content"]
+    assert "1. a.mf4" in sys2 and "2. b.blf ← 本轮默认对象" in sys2
+    assert "还没上传" in build_chat_messages(cfg, [], "分析一下", [], {})[0]["content"]
+
+
 # ---------------------------------------------------------------- transient 折叠
 
 def _unit(payload, transient=True, tail=""):
@@ -377,6 +419,144 @@ def test_engine_allows_analysis_with_profile_or_no_profiles():
     # 没有上传文件 → _analyze 报"请先上传"，但绝不能是档位面板
     assert not [m for m in chat.messages if m.kind == "target_options"]
     assert errs and "上传" in errs[0].content
+
+
+def test_engine_analyses_only_latest_batch(tmp_path):
+    """分两批上传后，模型不带 file_indexes 也只该跑最新一批（用户诉求 §1 的原话）。
+
+    旧行为是无条件遍历 chat.files：新上传一份数据后问「帮我分析」，结果里会混进
+    上一趟的数据，而且会话越攒越慢。
+    """
+    data = os.path.join(ROOT, "tests", "data", "mf4", "abs_dry100_dist_abn.mf4")
+    older = os.path.join(ROOT, "tests", "data", "mf4", "abs_wet60_decel_abn.mf4")
+    if not (os.path.exists(data) and os.path.exists(older)):
+        pytest.skip("demo 数据未生成")
+    from brake_analyzer.agent.engine import ChatEngine
+    from brake_analyzer.llm.kb import KnowledgeBase
+    from web.store import Store
+
+    llm = ToolLlm([("run_analysis_on_files",
+                    {"condition_id": "abs_full_brake_dry_asphalt_100kph"})])
+    eng = ChatEngine(load_configs(CONFIG_DIR), llm,
+                     KnowledgeBase(os.path.join(ROOT, "knowledge")),
+                     Store(upload_dir=str(tmp_path / "uploads")))
+    chat = eng.store.create_chat()
+    with open(older, "rb") as f:
+        eng.store.add_file(chat, "old_batch.mf4", f.read(), batch_id="b1")
+    with open(data, "rb") as f:
+        eng.store.add_file(chat, "new_batch.mf4", f.read(), batch_id="b2")
+
+    for _ in eng.events(chat, "干沥青 100 全力制动帮我看看"):
+        pass
+    cards = [m for m in chat.messages if m.kind == "analysis_result"]
+    assert len(cards) == 1, [c.data["file_name"] for c in cards]
+    assert cards[0].data["file_name"] == "new_batch.mf4"
+    # 跳过的份数要在步骤里说明，否则用户以为两份都算了
+    detail = " ".join(i.get("detail", "") for m in chat.messages if m.kind == "steps"
+                      for i in (m.data or {}).get("items", []))
+    assert "非本轮范围" in detail, detail
+
+
+def test_engine_file_indexes_override_batch_default(tmp_path):
+    """用户点名对比时 file_indexes 必须能取回历史文件 —— 默认收窄不能变成拿不回来。"""
+    data = os.path.join(ROOT, "tests", "data", "mf4", "abs_dry100_dist_abn.mf4")
+    if not os.path.exists(data):
+        pytest.skip("demo 数据未生成")
+    from brake_analyzer.agent.engine import ChatEngine
+    from brake_analyzer.llm.kb import KnowledgeBase
+    from web.store import Store
+
+    llm = ToolLlm([("run_analysis_on_files",
+                    {"condition_id": "abs_full_brake_dry_asphalt_100kph",
+                     "file_indexes": [1, 2]})])
+    eng = ChatEngine(load_configs(CONFIG_DIR), llm,
+                     KnowledgeBase(os.path.join(ROOT, "knowledge")),
+                     Store(upload_dir=str(tmp_path / "uploads")))
+    chat = eng.store.create_chat()
+    blob = open(data, "rb").read()
+    eng.store.add_file(chat, "r1.mf4", blob, batch_id="b1")
+    eng.store.add_file(chat, "r2.mf4", blob, batch_id="b2")
+    for _ in eng.events(chat, "这两份重复性对比一下"):
+        pass
+    cards = [m for m in chat.messages if m.kind == "analysis_result"]
+    assert {c.data["file_name"] for c in cards} == {"r1.mf4", "r2.mf4"}
+
+    payload = json.loads([m for m in llm.calls[-1] if m.get("role") == "tool"][-1]["content"])
+    assert len(payload["results"]) == 2
+
+
+def test_engine_bad_file_indexes_fails_loudly(tmp_path):
+    """点不存在的编号：要说「一个都没选中」，不能悄悄回退成全跑或报「没文件」。"""
+    data = os.path.join(ROOT, "tests", "data", "mf4", "abs_dry100_dist_abn.mf4")
+    if not os.path.exists(data):
+        pytest.skip("demo 数据未生成")
+    from brake_analyzer.agent.engine import ChatEngine
+    from brake_analyzer.llm.kb import KnowledgeBase
+    from web.store import Store
+
+    llm = ToolLlm([("run_analysis_on_files",
+                    {"condition_id": "abs_full_brake_dry_asphalt_100kph",
+                     "file_indexes": [9]})])
+    eng = ChatEngine(load_configs(CONFIG_DIR), llm,
+                     KnowledgeBase(os.path.join(ROOT, "knowledge")),
+                     Store(upload_dir=str(tmp_path / "uploads")))
+    chat = eng.store.create_chat()
+    eng.store.add_file(chat, "a.mf4", open(data, "rb").read())
+    for _ in eng.events(chat, "分析"):
+        pass
+    errs = [m for m in chat.messages if m.kind == "error"]
+    assert errs and "没有选中任何数据文件" in errs[0].content
+    assert not [m for m in chat.messages if m.kind == "analysis_result"]
+
+
+def test_engine_sends_missing_reason_legend(tmp_path):
+    """missing 成因要连图例一起给模型：只给 status=missing 它就会把「没切出事件」
+    说成「信号缺失」，而两者要的建议正好相反（用户诉求 §3）。"""
+    data = os.path.join(ROOT, "tests", "data", "mf4", "abs_dry100_no_v0.mf4")
+    if not os.path.exists(data):
+        pytest.skip("demo 数据未生成")
+    from brake_analyzer.agent.engine import ChatEngine
+    from brake_analyzer.llm.kb import KnowledgeBase
+    from web.store import Store
+
+    llm = ToolLlm([("run_analysis_on_files",
+                    {"condition_id": "abs_full_brake_dry_asphalt_100kph"})])
+    eng = ChatEngine(load_configs(CONFIG_DIR), llm,
+                     KnowledgeBase(os.path.join(ROOT, "knowledge")),
+                     Store(upload_dir=str(tmp_path / "uploads")))
+    chat = eng.store.create_chat()
+    eng.store.add_file(chat, "no_v0.mf4", open(data, "rb").read())
+    for _ in eng.events(chat, "干沥青 100 全力制动"):
+        pass
+
+    payload = json.loads([m for m in llm.calls[-1] if m.get("role") == "tool"][-1]["content"])
+    reasons = [m.get("reason") for s in payload["results"][0]["samples"] for m in s["metrics"]]
+    assert "no_valid_event" in reasons, reasons
+    legend = payload["reason_legend"]
+    assert "no_valid_event" in legend
+    assert "不是】信号缺失" in legend["no_valid_event"]
+
+
+def test_engine_no_legend_when_nothing_missing(tmp_path):
+    """没有 missing 就不该附带图例 —— 常驻成本要按实际内容给。"""
+    data = os.path.join(ROOT, "tests", "data", "mf4", "abs_dry100_dist_abn.mf4")
+    if not os.path.exists(data):
+        pytest.skip("demo 数据未生成")
+    from brake_analyzer.agent.engine import ChatEngine
+    from brake_analyzer.llm.kb import KnowledgeBase
+    from web.store import Store
+
+    llm = ToolLlm([("run_analysis_on_files",
+                    {"condition_id": "abs_full_brake_dry_asphalt_100kph"})])
+    eng = ChatEngine(load_configs(CONFIG_DIR), llm,
+                     KnowledgeBase(os.path.join(ROOT, "knowledge")),
+                     Store(upload_dir=str(tmp_path / "uploads")))
+    chat = eng.store.create_chat()
+    eng.store.add_file(chat, "a.mf4", open(data, "rb").read())
+    for _ in eng.events(chat, "干沥青 100 全力制动"):
+        pass
+    payload = json.loads([m for m in llm.calls[-1] if m.get("role") == "tool"][-1]["content"])
+    assert "reason_legend" not in payload
 
 
 def test_engine_returns_numbers_to_llm_after_analysis(tmp_path):

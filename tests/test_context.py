@@ -214,7 +214,13 @@ class FakeLlm:
         return None
 
 
-def _engine(tool_rounds=0):
+def _engine(tool_rounds=0, max_tokens=1200, compress_tokens=700):
+    """小预算引擎：预算数值是刻意选小的，好让压缩在几轮对话内就触发。
+
+    注意 resident 部分（system prompt + 功能目录 + 文件清单）本身就有几百 token，
+    压不出这个量级的用例（如「未超限就不压」）必须把 compress 阈值放在这个地板之上，
+    否则测的是阈值选得准不准，不是引擎压不压。
+    """
     import os
 
     from brake_analyzer.agent.engine import ChatEngine
@@ -226,7 +232,8 @@ def _engine(tool_rounds=0):
     llm = FakeLlm(tool_rounds=tool_rounds)
     eng = ChatEngine(load_configs(os.path.join(root, "configs")), llm,
                      KnowledgeBase(os.path.join(root, "knowledge")), Store(),
-                     budget=ContextBudget(max_tokens=1200, compress_tokens=700))
+                     budget=ContextBudget(max_tokens=max_tokens,
+                                          compress_tokens=compress_tokens))
     return eng, llm
 
 
@@ -261,11 +268,25 @@ def test_engine_compresses_before_sending_and_logs_step():
 
 
 def test_engine_no_compression_when_within_budget():
-    eng, llm = _engine()
+    """未过压缩阈值 → 一个字都不该改，也不该有压缩步骤。
+
+    阈值按「空会话实测 token」放大得出，不写死数字：resident 部分（system prompt
+    + 功能目录 + 文件清单）会随提示词演进变长，写死 700 之类的值一旦低于这个地板，
+    用例测的就变成「地板有多高」，而不是「未超限不压」这条行为。
+    """
+    from brake_analyzer.llm.prompts import build_chat_messages as _bcm
+
+    probe, _ = _engine()
+    floor = estimate_message_tokens(_bcm(probe.cfg, [], "x", [], {}))
+    eng, llm = _engine(max_tokens=int(floor * 1.8), compress_tokens=int(floor * 1.5))
+
     chat = eng.store.create_chat()
     eng.store.add_message(chat, "user", "text", content="短提问")
     for _ in eng.events(chat, "再问一句"):
         pass
+    sent = llm.calls[0]
+    assert estimate_message_tokens(sent) < eng.budget.compress_tokens, \
+        "前提失效：这条短对话本身就该被压，测不到『未超限不压』"
     steps = [m for m in chat.messages if m.kind == "steps"]
     labels = [it["label"] for m in steps for it in (m.data or {}).get("items", [])]
     assert "上下文压缩" not in labels

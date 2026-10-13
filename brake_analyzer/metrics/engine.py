@@ -2,6 +2,8 @@
 
 from typing import List, Optional
 
+import numpy as np
+
 from ..configs import pick
 from ..schemas import ConditionConfig, EventWindow, MetricResult
 from .base import get_tool
@@ -16,6 +18,24 @@ def _classify(value, entry: dict) -> str:
     lo, hi = entry["ok_range"]
     ok = (lo is None or value >= lo) and (hi is None or value <= hi)
     return "ok" if ok else "abnormal"
+
+
+def _missing_reason(signals: dict, window, tmpl) -> str:
+    """missing 的成因。三种不能混为一谈，否则给用户的话就错了：
+
+    - no_valid_event：分段器没切出该工况的完整过程（没踩到门限、没达到判定车速）。
+      这是「试验没做出来 / 工况选错」，跟通道有没有无关。
+    - signal_absent：窗口是好的，但指标要用的通道没有数据（未映射、CAN 上没发布）。
+    - not_computable：窗口和通道都在，工具算不出值（如插值点落在信号范围外）。
+    """
+    t0, t1 = getattr(window, "t_start", None), getattr(window, "t_end", None)
+    if (t0 is None or t1 is None or np.isnan(t0) or np.isnan(t1) or t1 <= t0):
+        return "no_valid_event"
+    for name in tmpl.inputs or []:
+        sig = signals.get(name)
+        if sig is None or len(sig.ts) == 0:
+            return "signal_absent"
+    return "not_computable"
 
 
 def compute_metrics(
@@ -49,6 +69,7 @@ def compute_metrics(
                     raw={"reason": "no_matching_entry"},
                     ok_range=None,
                     profile=profile,
+                    missing_reason="no_matching_entry",
                 )
             )
             continue
@@ -77,6 +98,7 @@ def compute_metrics(
             raw, value = {"error": str(e)}, None
 
         status = _classify(value, entry)
+        reason = _missing_reason(signals, window, tmpl) if status == "missing" else None
 
         results.append(
             MetricResult(
@@ -90,6 +112,7 @@ def compute_metrics(
                 raw=raw,
                 ok_range=entry.get("ok_range"),
                 profile=entry.get("profile"),
+                missing_reason=reason,
             )
         )
     return results

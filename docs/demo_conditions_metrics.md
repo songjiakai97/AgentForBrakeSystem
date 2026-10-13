@@ -36,7 +36,7 @@
 | key | 名称 | segmenter | profiles（档位标签） |
 | --- | --- | --- | --- |
 | `abs` | ABS 全力制动 | `seg_abs_full_brake` | 无（阈值工况自包含，无档位维度） |
-| `tcs` | TCS 全油门加速 | `seg_tcs_full_throttle` | `4WD` `2WD` `DTCS` `TCS` |
+| `tcs` | TCS 全油门加速 | `seg_tcs_full_throttle` | 两维：驱动形式 `4WD`/`2WD` × 控制模式 `DTCS`/`TCS`（配置写法 `["4WD|2WD", "DTCS|TCS"]`） |
 
 ### 3.2 Condition
 
@@ -70,11 +70,13 @@ condition_id 命名约定：`{function}_{maneuver}_{surface}_{v0}kph`。表中�
    ```
 
 2. 未声明 profile 的指标条目（通用条目）在任何档位下都生效——横摆角速度即如此。
-3. **待 demo 验证的引擎缺口**：一次分析只带一个 `profile` 标量，而 2.2/2.3 需要
-   `4WD`+`DTCS` 两维同时生效。两种解法：
-   - 引擎侧把单维标签**子串匹配**进复合标签（选 `4WD_DTCS` 时，profile 为 `4WD`
-     和 `DTCS` 的条目都命中）——改动最小，推荐；
-   - 或按 design.md §2.2 原生的复合标签自由拼装（配置膨胀，需展开全部组合）。
+3. **引擎缺口（已落地）**：一次分析只带一个 `profile` 标量，而 2.2/2.3 需要
+   `4WD`+`DTCS` 两维同时生效。按推荐方案实现——`pick()` 把传入标签按 `|`/`,` 拆成
+   分量逐维精确匹配 `by_profile`，再回退子串匹配（条目 `4WD` 命中传入 `4WD_DTCS`），
+   最后回退通用条目（design.md §10.4）。
+   配置侧保持单维标签，不展开全部组合；展示侧由 `profile_dims` 恢复两维语义，
+   界面是两个下拉、prompt 里按维呈现（`档位: 4WD/2WD × DTCS/TCS`），
+   避免模型把 4 个标签读成"四选一"（design.md §9.2）。
 4. 同一 key 的多个 profile 条目全部不匹配、又无通用条目时按 design.md 判 missing；
    demo 数据应始终显式传 profile，避免踩这条路径。
 
@@ -168,7 +170,7 @@ functions:
     name: TCS 全油门加速
     aliases: [TCS, DTCS, 牵引力控制, 防滑, 全油门加速, 加速时间, 打滑]
     segmenter: seg_tcs_full_throttle
-    profiles: [4WD, 2WD, DTCS, TCS]
+    profiles: ["4WD|2WD", "DTCS|TCS"]   # 维度串：每项一维，竖线分维内取值
     kb_section: tcs_manual
     description: 低附路面起步全油门加速，评价横摆稳定性、加速能力与驱动轮打滑量
 ```
@@ -318,9 +320,9 @@ metrics:
 ```yaml
 # 功能级：两功能共用同一组稳定性判定
 - {id: abs_yaw_abnormal,   scope: function, function: abs, metric: yaw_rate_max, status: abnormal, severity: critical,  fault_domain: stability,     kb_ref: abs_manual,  message: 制动过程横摆超限，车辆稳定性不足，检查前后轴制动力分配与介入时序}
-- {id: abs_yaw_missing,    scope: function, function: abs, metric: yaw_rate_max, status: missing,  severity: low,       fault_domain: data_quality, kb_ref: abs_manual,  message: yaw_rate 信号缺失，稳定性判定不成立}
+- {id: abs_yaw_missing,    scope: function, function: abs, metric: yaw_rate_max, status: missing,  severity: low,       fault_domain: data_quality, kb_ref: abs_manual,  message: 横摆稳定性指标不可算，本条无法给出稳定性判定}
 - {id: tcs_yaw_abnormal,   scope: function, function: tcs, metric: yaw_rate_max, status: abnormal, severity: critical,  fault_domain: stability,     kb_ref: tcs_manual,  message: 加速过程横摆超限，检查单轮制动干预与驱动扭矩爬升速率}
-- {id: tcs_yaw_missing,    scope: function, function: tcs, metric: yaw_rate_max, status: missing,  severity: low,       fault_domain: data_quality, kb_ref: tcs_manual,  message: yaw_rate 信号缺失，稳定性判定不成立}
+- {id: tcs_yaw_missing,    scope: function, function: tcs, metric: yaw_rate_max, status: missing,  severity: low,       fault_domain: data_quality, kb_ref: tcs_manual,  message: 横摆稳定性指标不可算，本条无法给出稳定性判定}
 
 # 工况级：指标异常 → 具体标定域结论
 - {id: abs_dist_abnormal,  scope: condition, function: abs, condition: abs_full_brake_dry_asphalt_100kph, metric: brake_distance, status: abnormal, severity: high, fault_domain: brake_performance, kb_ref: abs_manual, message: 高附着制动距离超限，检查增压响应与初始夹紧力}
@@ -402,6 +404,9 @@ BLF 侧（`signals_blf.yaml`）同样只填 `[dbc_alias, msg_id, signal_name]` �
    验证计时起点为 0.8 kph 上升穿越。
 3. 2.2 分别选 `4WD` / `2WD` / `DTCS` / `TCS` 档位各跑一次，验证 pick 回退与 §3.3 两维匹配。
 4. 无 `OPENAI_API_KEY` 环境下六工况全部跑通（纯规则链路）。
-5. 信号缺失注入（删除 `yaw_rate` 通道）→ 状态 missing、规则命中 `data_quality`。
-6. 交叉点不可达注入（车速从未到 100 kph 或从未降到 0.8 kph）→ 窗口退化、指标 missing。
+5. 信号缺失注入（删除 `yaw_rate` 通道）→ 状态 missing、`missing_reason=signal_absent`、
+   规则命中 `data_quality`，结论说「所需通道无数据」。
+6. 交叉点不可达注入（车速从未到 100 kph 或从未降到 0.8 kph）→ 窗口退化、指标 missing，
+   且 `missing_reason=no_valid_event`：同样不可算，但结论必须指向「本文件未切出该工况的
+   有效事件窗口」，不能答成信号缺失（design.md §10.1）。
 

@@ -17,6 +17,10 @@ class FileEntry:
     path: str
     size: int
     uploaded_at: float = field(default_factory=time.time)
+    # 同一次上传请求进来的一组文件共享 batch_id。默认分析范围是「最新一批」而不是
+    # 「会话内全部」：多选上传是一个动作（一批），之后每次新上传都只想看新数据
+    # （design.md §8.2 文件选择）。
+    batch_id: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -24,6 +28,7 @@ class FileEntry:
             "name": self.name,
             "size": self.size,
             "uploaded_at": self.uploaded_at,
+            "batch_id": self.batch_id,
         }
 
 
@@ -77,6 +82,18 @@ class Chat:
 
     def touch(self):
         self.updated_at = time.time()
+
+    def latest_batch(self) -> List["FileEntry"]:
+        """会话内「最近一次上传」的那批文件。
+
+        默认只分析这批：用户的「分析」意图几乎总是针对刚传的数据，把历史文件一起
+        重跑既慢又会让结论混进上一趟的数据。同一次上传请求（多选）算一批，
+        未分批登记的文件（脚本 / 测试直接 add_file）batch_id 为空，天然归为同一批。
+        """
+        if not self.files:
+            return []
+        bid = self.files[-1].batch_id
+        return [f for f in self.files if f.batch_id == bid]
 
     def summary(self) -> dict:
         return {
@@ -141,14 +158,16 @@ class Store:
             return True
 
     # ---------------- file / session ----------------
-    def add_file(self, chat: Chat, name: str, content: bytes) -> FileEntry:
+    def add_file(self, chat: Chat, name: str, content: bytes,
+                 batch_id: str = "") -> FileEntry:
         with self._lock:
             fid = "fx_" + uuid.uuid4().hex[:8]
             safe = f"{fid}_{os.path.basename(name)}"
             path = os.path.join(self.upload_dir, safe)
             with open(path, "wb") as f:
                 f.write(content)
-            entry = FileEntry(file_id=fid, name=os.path.basename(name), path=path, size=len(content))
+            entry = FileEntry(file_id=fid, name=os.path.basename(name), path=path,
+                              size=len(content), batch_id=batch_id)
             chat.files.append(entry)
             self.sessions[fid] = Session(file_id=fid)
             chat.touch()

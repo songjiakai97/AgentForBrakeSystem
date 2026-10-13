@@ -406,13 +406,22 @@ def test_blf_missing_channel_reported(client):
 
 
 def test_mixed_formats_in_one_chat(client):
-    """同一会话混放 MF4 与 BLF：两个文件都出结果，Loader 各按扩展名选。"""
+    """同一次上传（多选）混放 MF4 与 BLF：两个文件都出结果，Loader 各按扩展名选。
+
+    两个文件走同一个请求 = 同一批，因此都落在默认分析范围内（§8.2）。
+    """
     if not _blf_ready(client) or not os.path.isdir(BLF_DATA):
         pytest.skip("环境无 python-can/cantools 或缺 BLF demo 数据")
     chat = client.post("/api/chats").json()
     cid = chat["chat_id"]
-    _upload(client, cid, "abs_dry100_dist_abn.mf4")
-    _upload_blf(client, cid, "abs_dry100_dist_abn.blf")
+    with open(os.path.join(DATA, "abs_dry100_dist_abn.mf4"), "rb") as f1, \
+         open(os.path.join(BLF_DATA, "abs_dry100_dist_abn.blf"), "rb") as f2:
+        r = client.post(f"/api/chats/{cid}/files", files=[
+            ("files", ("abs_dry100_dist_abn.mf4", f1, "application/octet-stream")),
+            ("files", ("abs_dry100_dist_abn.blf", f2, "application/octet-stream")),
+        ])
+    assert r.status_code == 200, r.text
+    assert len(r.json()["files"]) == 2
     r = client.post(f"/api/chats/{cid}/select", json={
         "target_type": "condition",
         "target_key": "abs_full_brake_dry_asphalt_100kph"}).json()
@@ -426,7 +435,53 @@ def test_mixed_formats_in_one_chat(client):
         assert st["brake_distance"] == "abnormal"
 
 
+def test_second_upload_only_analyses_latest_batch(client):
+    """分两次上传 → 第三次分析只跑最新那份（用户诉求：新上传的就分析新的）。
+
+    旧行为是把会话内所有文件一起重跑：结论会混进上一趟数据，而且文件越攒越多、
+    每轮越来越慢。历史文件仍在会话里，要对比时用 file_indexes 点名。
+    """
+    if not _blf_ready(client) or not os.path.isdir(BLF_DATA):
+        pytest.skip("环境无 python-can/cantools 或缺 BLF demo 数据")
+    chat = client.post("/api/chats").json()
+    cid = chat["chat_id"]
+    _upload(client, cid, "abs_dry100_dist_abn.mf4")        # 第一批
+    _upload_blf(client, cid, "abs_dry100_dist_abn.blf")    # 第二批 = 最新
+    r = client.post(f"/api/chats/{cid}/select", json={
+        "target_type": "condition",
+        "target_key": "abs_full_brake_dry_asphalt_100kph"}).json()
+    msg = [m for m in r["messages"] if m["kind"] == "analysis_result"]
+    assert len(msg) == 1, r
+    assert msg[0]["data"]["file_name"] == "abs_dry100_dist_abn.blf"
+    # 未重跑要说得出来，否则用户以为两份都算了
+    steps = [m for m in r["messages"] if m["kind"] == "steps"]
+    detail = " ".join(i.get("detail", "") for m in steps for i in (m.get("data") or {}).get("items", []))
+    assert "非本轮范围" in detail, detail
+
+
 def test_debug_pages(client):
     assert client.get("/debug").status_code == 200
     assert isinstance(client.get("/api/debug/traces").json(), list)
     assert client.get("/").status_code == 200 or client.get("/index.html").status_code == 200
+
+
+def test_detail_toggle_key_matches_template():
+    """结果卡片的明细展开：toggle 收到的 key 必须就是 `opened` 表的索引 key。
+
+    这里埋过一个静默失效——`toggle()` 自己又拼了 `sample_id + ':all'`（残留的
+    `_curMid()`），而模板 `v-if="opened[s.sample_id+':'+m.message_id]"` 读的是另一个串，
+    两边永远对不上，明细面板（含 missing 成因 chip）从上线起就点不开。Vue 模板表达式
+    静态解析不报错、也不影响页面加载，只能在浏览器里点出来（本轮由 Playwright 探针发现）；
+    这条测试把不变式变成跑得红的：key 只在模板里算一次，方法只用形参查表，不再二次拼接。
+    """
+    import re
+
+    path = os.path.join(ROOT, "web", "frontend", "index.html")
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
+    key = re.search(r'v-if="opened\[(.+?)\]"', src)
+    assert key, "模板里找不到明细展开的状态表 key"
+    key = key.group(1)
+    assert re.search(r'toggle\((\w+)\)\{\s*this\.opened\[\1\]=!', src), \
+        "toggle 形参应与 opened 的索引 key 同名且不经过二次拼接"
+    assert f'@click="toggle({key})"' in src, f"模板传入的 key 与 v-if 读的 key 不一致：{key}"

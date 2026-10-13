@@ -10,9 +10,19 @@ from typing import Dict, List
 from ..schemas import MetricResult, RuleConfig, RuleVerdict
 
 
+# missing 的三种成因给出的建议是相反的，规则结论必须跟着成因走：
+# 缺通道 → 补测/查映射；没切出事件 → 这趟试验本身没做出来或工况选错。
+_MISSING_CAUSE = {
+    "no_valid_event": "本文件未切出该工况的有效事件窗口（试验过程不完整或工况选错）",
+    "signal_absent": "指标所需通道无数据（未映射 / 未发布）",
+    "not_computable": "窗口与通道都在，但量值算不出（端点越界等）",
+    "no_matching_entry": "该档位下没有对应的指标条目",
+}
+
+
 def _direction(m: MetricResult) -> str:
     if m.status == "missing":
-        return "无法计算（信号缺失、窗口退化或档位条目未命中）"
+        return _MISSING_CAUSE.get(m.missing_reason or "", "无法计算（成因未知）")
     if m.ok_range is None:
         return ""
     lo, hi = m.ok_range
@@ -21,6 +31,7 @@ def _direction(m: MetricResult) -> str:
     if hi is not None and m.value > hi:
         return f"高于上界 {hi}{m.unit}"
     return ""
+
 
 
 def run_rules(
