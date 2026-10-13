@@ -314,7 +314,13 @@ async def api_send_stream(cid: str, body: MessageIn):
         raise HTTPException(400, "消息为空")
     run, started = RUNS.start(ENGINE, chat, body.text.strip())
     if not started:
-        raise HTTPException(409, f"本对话已有一轮在进行中：{run.run_id}")
+        # detail 带 run_id：前端据此连上正在跑的那一轮（拿到进度、也能停止它），
+        # 而不是只弹一条「请求失败」——那会让界面死在既停不掉又等不出的状态。
+        raise HTTPException(409, {
+            "message": f"本对话已有一轮在进行中：{run.run_id}",
+            "run_id": run.run_id,
+            "status": run.status,
+        })
     return StreamingResponse(_run_stream(run, -1), media_type="text/event-stream")
 
 

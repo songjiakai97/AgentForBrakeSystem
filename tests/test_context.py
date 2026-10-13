@@ -257,7 +257,8 @@ def test_engine_compresses_before_sending_and_logs_step():
     assert est <= eng.budget.max_tokens, f"引擎把超预算的上下文发出去了：{est}"
     summaries = [m for m in sent if is_summary(m)]
     assert len(summaries) == 1 and llm.summary_calls, "应通过 LLM 摘要而非只用抽取式"
-    assert sent[-1]["content"] == "那后轴呢"
+    # 本轮消息 = 文件清单块 + 原话：清单贴着提问送（§6.8），所以只断言问题仍在末尾
+    assert sent[-1]["role"] == "user" and sent[-1]["content"].endswith("那后轴呢")
 
     steps = [m for m in chat.messages if m.kind == "steps"]
     labels = [it["label"] for m in steps for it in (m.data or {}).get("items", [])]

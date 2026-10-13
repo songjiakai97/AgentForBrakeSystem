@@ -113,6 +113,11 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
 .sendbtn:disabled{opacity:.4}
 /* 一轮进行中：发送键变停止键（红色 + 方块），刷新不会停本轮，只有点这里才停 */
 .sendbtn.stop{background:var(--abn);color:#fff;min-width:74px}
+/* 忙但没有轮号（面板点选/服务端同步执行）：按不动，说清为什么按不动 */
+.sendbtn.busywait{background:#1e293b;color:var(--muted);cursor:not-allowed;min-width:74px}
+.notice{font-size:12px;color:var(--warn,#fbbf24);border:1px dashed #78350f;background:#1a1206;
+  border-radius:8px;padding:6px 10px;margin-bottom:8px;line-height:1.6}
+.notice .nx{color:var(--accent);cursor:pointer;margin-left:8px;text-decoration:underline}
 .chartbox{position:fixed;inset:4vh 6vw;background:var(--bg);border:1px solid #334155;border-radius:14px;z-index:50;display:flex;flex-direction:column}
 .chartbox .cb-head{display:flex;justify-content:space-between;padding:10px 16px;border-bottom:1px solid #1e293b;font-size:13px}
 .chartbox .cb-body{flex:1;min-height:0}
@@ -334,14 +339,16 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
       <div class="pending" v-if="pending.length">
         <span v-for="(p,i) in pending" :key="i" class="fchip">📎 {{p.name}}<button @click="pending.splice(i,1)">✕</button></span>
       </div>
+      <div class="notice" v-if="notice">{{notice}}
+        <span class="nx" @click="notice=''">知道了</span></div>
       <div class="inputrow">
         <button class="addbtn" @click="$refs.file.click()" title="支持 .mf4 / .blf">+</button>
         <input ref="file" type="file" :accept="acceptAttr" multiple style="display:none" @change="pickFiles">
         <textarea v-model="draft" placeholder="描述要分析的功能/工况，如：干沥青 100kph 全力制动" @keydown.enter.exact.prevent="send"></textarea>
-        <button class="sendbtn" :class="{stop:busy && currentRunId}"
-                :disabled="busy && !currentRunId"
-                :title="busy ? (currentRunId ? '停止本轮：已流出的正文会落库，未分析的文件不再分析（刷新页面不会停止）' : '这一步在服务端同步执行，刷新本来也不会停止它') : '发送'"
-                @click="busy ? stopRun() : send()">{{busy ? (currentRunId ? '■ 停止' : '处理中…') : '发送'}}</button>
+        <button class="sendbtn" :class="{stop:busy && (currentRunId || stopping), busywait:busy && !currentRunId && !stopping}"
+                :disabled="stopping"
+                :title="busy ? (currentRunId ? (stopping ? '已请求停止：引擎在下一个检查点收尾（每个流式块 / 每个工具 / 每个文件）' : '停止本轮：已流出的正文会落库，未分析的文件不再分析（刷新页面不会停止）') : '没有可停止的运行 id：点这里会先找回正在跑的那一轮再停；若它其实是一步同步操作（面板点选），会给出说明') : '发送'"
+                @click="busy ? stopRun() : send()">{{busy ? (stopping ? '正在停止…' : (currentRunId ? '■ 停止' : '■ 停止（找回本轮）')) : '发送'}}</button>
       </div>
     </div>
   </div>
@@ -370,6 +377,7 @@ createApp({
     draft:'', pending:[], busy:false, samples:[],
     otherText:{}, pfSel:{}, opened:{}, openState:{},
     live: blankLive(), lastSeq: 0, currentRunId: '', runCid: '', stopping: false,
+    notice: '',
     chartData:null, chartTitle:'', chartGroups:[], chartHidden:[], chartFull:null, _chart:null,
     // 与后端 _MISSING_REASON_CN / prompts.MISSING_REASON_LEGEND 同一口径：
     // missing 的成因决定建议是「补测通道」还是「重做试验」，界面上不能都写成缺失。
@@ -624,7 +632,24 @@ createApp({
       const r = await fetch(`/api/chats/${this.chatId}/messages/stream`,
         {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
       if(!r.ok){
-        let detail='请求失败'; try{ detail=(await r.json()).detail||detail; }catch(e){}
+        let detail='请求失败'; let runId='';
+        try{
+          const d=(await r.json()).detail;
+          if(d && typeof d==='object'){ detail=d.message||detail; runId=d.run_id||''; }
+          else detail=d||detail;
+        }catch(e){}
+        // 409：本会话还有一轮在跑。这不是「发送失败」而是「有一轮没收尾」——
+        // 原来只弹一条错误，界面就停在既没有轮号（停止键按不动）又等不出结果的状态。
+        // 现在拿它给的 run_id 直接连上去：进度补回来，停止键也有对象了。
+        if(r.status===409 && runId){
+          this.currentRunId = runId;
+          // 字与说明当场给出，而不是等接上的那一轮跑完才回填（那一轮可能还要很久）
+          if(!this.draft) this.draft = text;
+          this.notice = '上一轮还没收尾：已连上那一轮的进度，可以直接按「■ 停止」结束它；'
+                      + '本次输入留在输入框里，等它收尾后再发。';
+          await this.followRun(runId);
+          return {ok:true, attached:true};
+        }
         return {ok:false, detail};
       }
       const finished = await this.consumeStream(r);
@@ -636,16 +661,22 @@ createApp({
       const text=this.draft.trim();
       if(!text && !this.pending.length) return;
       if(this.busy) return;
-      this.busy=true;
+      this.busy=true; this.notice='';
+      const tmpId='tmp_u'+Date.now();
       try{
         if(!(await this.uploadPending())) return;
         if(!text) { await this.openChat(this.chatId); return; }
         this.draft='';
-        this.chat.messages.push({message_id:'tmp_u'+Date.now(),role:'user',kind:'text',content:text,meta:{}});
+        this.chat.messages.push({message_id:tmpId,role:'user',kind:'text',content:text,meta:{}});
         this.$nextTick(this.scroll);
         const res = await this.streamSend(text);
         if(!res.ok){
           this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:res.detail,meta:{}});
+        } else if(res.attached){
+          // 这一句并没有真的发出去（上一轮还占着会话）：把乐观推上去的气泡撤掉，
+          // 否则界面上留着一条「我说了」而服务端历史记录里根本没有它
+          const i=this.chat.messages.findIndex(x=>x.message_id===tmpId);
+          if(i>=0) this.chat.messages.splice(i,1);
         }
         await this.loadChats();
         await this.openChatKeepScroll();
@@ -702,11 +733,18 @@ createApp({
       this.otherText[m.message_id]='';
       // 改用手打目标：本面板作废（服务端本轮开始同样会标记 consumed）
       m.meta = Object.assign({}, m.meta, {consumed:true});
-      this.busy=true;
+      this.busy=true; this.notice='';
+      const tmpId='tmp_u'+Date.now();
       try{
-        this.chat.messages.push({message_id:'tmp_u'+Date.now(),role:'user',kind:'text',content:t,meta:{}});
+        this.chat.messages.push({message_id:tmpId,role:'user',kind:'text',content:t,meta:{}});
         const res = await this.streamSend(t);
         if(!res.ok) this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:res.detail,meta:{}});
+        else if(res.attached){
+          // 同 send()：被上一轮挡住的那句没有真的发出去，撤掉乐观气泡（字已退回输入框）
+          if(!this.draft) this.draft = t;
+          const i=this.chat.messages.findIndex(x=>x.message_id===tmpId);
+          if(i>=0) this.chat.messages.splice(i,1);
+        }
         await this.openChatKeepScroll();
       } finally{
         this.busy=false;
@@ -715,9 +753,27 @@ createApp({
       }
     },
     async stopRun(){
-      // 只置服务端标记：引擎在下一个检查点（每个 delta / 每个文件）自己收尾，
+      // 只置服务端标记：引擎在下一个检查点（每个流式块 / 每个工具 / 每个文件）自己收尾，
       // 已流出的正文会落成消息，事件流照常走到 done，前端不用断开重连。
-      if(!this.busy || !this.currentRunId || this.stopping) return;
+      if(!this.busy || this.stopping) return;
+      // 没有轮号时不能再静默 return —— 那正是「点了停止没反应」：界面以为 busy
+      // 就有轮可停，实际 currentRunId 空着（上一轮 409 没拿到号 / 切换会话后失联）。
+      // 先问服务端本会话到底还有没有进行中的一轮，有就拿它的号继续停。
+      if(!this.currentRunId){
+        let run=null;
+        try{ run=(await (await fetch(`/api/chats/${this.chatId}/run`)).json()).run; }catch(e){}
+        if(!run){
+          // 确实没有可停的一轮：这一步是服务端的同步动作（面板点选），说清楚而不是静默
+          this.notice = '当前没有可停止的运行：这一步在服务端同步执行（面板点选/分析），等它返回即可；'
+                      + '刷新页面不会中断它。';
+          return;
+        }
+        // 只补轮号，不再另开一条订阅：本会话的流若正在读，双连接会把同一批事件
+        // 各派发一遍（正文重复出现）；没在读的，停止后照常由发起方收尾。
+        // runCid 不动：它由发起这一轮的 send/followRun 设，这里抢过来会把那一条流
+        // 的归属判给别的会话，事件会被 onEvent 直接丢掉。
+        this.currentRunId = run.run_id;
+      }
       this.stopping = true;
       try{
         const r = await fetch(`/api/runs/${this.currentRunId}/stop`, {method:'POST'});

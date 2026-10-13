@@ -218,6 +218,12 @@ def test_conflict_while_running(slow):
 
     dup = client.post(f"/api/chats/{cid}/messages/stream", json={"text": "第二轮"})
     assert dup.status_code == 409, dup.text
+    # 409 必须把 run_id 带出去：前端拿它才能连上正在跑的那一轮（进度 + 停止）。
+    # 只回一句话时界面既没有轮号（停止键按不动）也等不出结果 —— 用户看到的就是
+    # 「点了停止没反应」，这正是 §6.9 记录过的那次投诉。
+    detail = dup.json()["detail"]
+    assert isinstance(detail, dict) and detail["run_id"] == run.run_id, detail
+    assert detail["status"] == "running"
     assert client.post(f"/api/chats/{cid}/messages", json={"text": "第二轮"}).status_code == 409
     sel = client.post(f"/api/chats/{cid}/select",
                       json={"target_type": "condition",

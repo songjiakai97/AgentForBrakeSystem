@@ -58,6 +58,10 @@ class ChatEngine:
 
     def _summarize_with_llm(self, transcript: str, budget_tokens: int) -> str:
         """压缩器注入的摘要回调；摘要请求失败时由压缩器退化到抽取式。"""
+        if self._stopped(self._tls_stop):
+            # 摘要是一次非流式请求，阻塞期间没有任何检查点：已被要求停止就走
+            # 抽取式兜底（纯本地，不花钱也不等），让本轮尽快收尾
+            return ""
         r = self.llm.chat(
             summarize_request(transcript, budget_tokens),
             chat_id=getattr(self._tls, "chat_id", ""),
@@ -65,6 +69,17 @@ class ChatEngine:
             round_no=0, user_text="context_summary",
         )
         return "" if r.error else r.content
+
+    @property
+    def _tls_stop(self):
+        """本轮的停止标记（线程局部）。
+
+        stop_event 只在 events() 调用内传递，不存实例属性——ENGINE 是全局单例，
+        多会话并行跑线程。但有两处拿不到形参：压缩器的摘要回调和 _maybe_suggest，
+        两者都是一次非流式 LLM 请求、阻塞期间没有任何 delta 可做检查点。
+        threading.local 既满足「不跨线程串号」，又让这两处能看到本轮的停止意图。
+        """
+        return getattr(self._tls, "stop_event", None)
 
     # ------------------------------------------------------------ 入口
     def events(self, chat, text: str, stop_event=None):
@@ -90,6 +105,16 @@ class ChatEngine:
 
     # ------------------------------------------------------------ 核心调度
     def _run_stream(self, chat, text: str, stop_event=None):
+        # 摘要/标定建议两处拿不到形参（见 _tls_stop），本轮的标记挂在线程局部；
+        # 收尾一定清掉：RunManager 的线程名按 run 建，但 uvicorn 等会复用线程，
+        # 留着旧标记会让下一轮刚开口就被判成「已停止」。
+        self._tls.stop_event = stop_event
+        try:
+            yield from self._run_stream_body(chat, text, stop_event)
+        finally:
+            self._tls.stop_event = None
+
+    def _run_stream_body(self, chat, text: str, stop_event=None):
         self.store.add_message(chat, "user", "text", content=text)
         # 用户另起一轮提问：此前的候选面板视为已回答，前端折叠为「已选择」
         self.store.mark_panels_consumed(chat)
@@ -233,7 +258,7 @@ class ChatEngine:
                 stop_mid = False
                 for ev in self.llm.chat_stream(
                         messages, tools=tool_specs, chat_id=chat.chat_id,
-                        user_text=text, round_no=rnd):
+                        user_text=text, round_no=rnd, stop_event=stop_event):
                     if ev["type"] == "delta":
                         yield self._delta(ev["channel"], ev["text"])
                         if ev["channel"] == "content":
@@ -244,8 +269,10 @@ class ChatEngine:
                             break
                     else:
                         reply = ev["reply"]
-                if stop_mid:
-                    # 已流出的预览落库，本轮就此结束（不写回 messages，不回退离线）
+                if stop_mid or (reply is not None and reply.error == "llm_stopped"):
+                    # 停止有两种来路：外层每个 delta 自检命中，或者客户端在块与块之间
+                    # 自检命中（工具参数没有 delta，只有后者能覆盖）。两种都按方案 (a)
+                    # 收尾，都不算失败。
                     yield from self._finish_stopped(chat, state, preview_buf,
                                                    note="用户已停止本轮（回答未完整）")
                     return
@@ -289,6 +316,15 @@ class ChatEngine:
 
                 for tc in reply.tool_calls:
                     name, args = tc["name"], tc["arguments"]
+                    # 工具执行没有 delta，是停止检查点之间的真空区：每个工具开始前自检。
+                    # 多个 tool_calls 连发时，前面的已经落库，剩下的不再跑。
+                    if self._stopped(stop_event):
+                        yield from self._finish_stopped(
+                            chat, state, preview_buf,
+                            note=f"用户已停止本轮（{name} 未执行）",
+                            receipt=f"本轮已按你的要求停止：工具 {name} 未执行，"
+                                    "之前的步骤结果都已保留。")
+                        return
                     arg_s = json.dumps(args, ensure_ascii=False)[:160]
                     yield self._mevent(self._step_on(chat, [(f"调用工具 {name}", f"参数: {arg_s}", "run")]))
                     fn = exec_tools.get(name)
@@ -385,12 +421,16 @@ class ChatEngine:
             state["failed"] = True
 
     def _finish_stopped(self, chat, state: Dict[str, bool],
-                        previewed: List[str], note: str = "用户已停止本轮"):
+                        previewed: List[str], note: str = "用户已停止本轮",
+                        receipt: Optional[str] = None):
         """方案 (a)：把已经流出的半截正文落成消息再结束，信息不丢。
 
         预览正文此前只以 delta 形式流出、尚未落库；停止后若直接结束，刷新就看不到它。
         这里补一条带「已停止」标记的 text 消息，并置 state["stopped"]，
         让上层知道这不是失败（绝不能回退离线路由，否则凭空多出一段离线结论）。
+
+        receipt：一个字都还没出来时的回执。停止点不同（工具没跑 vs 正文写了一半），
+        用户看到的后果不同，所以调用方可以把话说具体，而不是都停在同一句。
         """
         self._seal_steps(chat)
         text = "".join(previewed).strip()
@@ -402,7 +442,9 @@ class ChatEngine:
             yield self._mevent(m)
         else:
             # 一个字都还没出来：给一行明确回执，避免界面停在「处理中…」
-            yield self._mevent(self._msg(chat, "text", "本轮已按你的要求停止。"))
+            yield self._mevent(self._msg(
+                chat, "text", receipt or "本轮已按你的要求停止。",
+                meta={"stopped": True}))
         state["stopped"] = True
 
     def _profile_guard(self, chat, condition_id: str):
@@ -545,6 +587,12 @@ class ChatEngine:
         """LLM 可用且有异常/缺失时，生成 calibration_actions；否则降级标记。"""
         fn = self.cfg.function(cond.function)
         if not self.llm.available:
+            res.degraded = True
+            return
+        if self._stopped(self._tls_stop):
+            # 用户已经按了停止：这是整轮里唯一一处「停下来还要再等一次 LLM」的阻塞
+            # （一次非流式请求，没有 delta 可做检查点）。跳过建议只让本轮早点返回，
+            # 结果卡片与规则结论都已落库，不损失已有信息。
             res.degraded = True
             return
         snippets = self._kb_snippets(res, fn)

@@ -22,8 +22,9 @@ SYSTEM_CHAT = """你是制动系统测试数据分析与标定指导助手，服
 - 功能声明了档位（目录里的「档位:」）而用户没说选哪个时，先问档位，不要默认挑一个。
   档位是多维各取一个（目录写 A1/A2 × B1/B2 即两维），拼接成 A1|B1 提交；
   它不是四选一的候选，向用户提问时也按维度分别问；
-- 分析对象默认是最近一次上传的那批文件，不要重跑会话里的历史文件；
-  只有用户明确要对比多份或重复性核对时才用 file_indexes 点名；
+- 分析对象默认是「会话数据文件」清单里标了本轮默认对象的那批（清单随每条用户消息
+  给出，不在本提示里）；不要重跑会话里的历史文件，只有用户明确要对比多份或重复性
+  核对时才用 file_indexes 点名；
 - 可标定量只能引用指标声明的 tuning_params，不得编造不存在的参数；
 - 区分「确定规则结论」（来自规则引擎）与「建议性判断」（你的推断）；
 - 不得基于 info 指标单独下异常结论，info 只能作为佐证或趋势描述；
@@ -144,7 +145,7 @@ def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> L
                             "type": "array",
                             "items": {"type": "integer"},
                             "description": (
-                                "要分析的文件编号（取自上下文「会话数据文件」的编号，1 起）。"
+                                "要分析的文件编号（取自本轮消息「会话数据文件」清单的编号，1 起）。"
                                 "省略即分析最近一次上传的那批；只在用户明确要求对比多份时填写。"
                             ),
                         },
@@ -220,28 +221,38 @@ def summarize_request(transcript: str, budget_tokens: int) -> List[dict]:
 
 
 def _files_context(files: List) -> str:
-    """会话数据文件清单，并说明本轮默认分析哪一批。
+    """本轮的文件清单正文（不带标签），并说明本轮默认分析哪一批。
 
     「哪份是最新的」必须写成数据而不是让模型从历史消息里推断：原来只有一行平铺
     文件名，模型看不出上传顺序，也无从表达「只分析刚传的那份」，于是每次都把会话
     里的文件全跑一遍（§8.2 文件选择）。
 
-    只有一批时压成一行：编号与「默认对象」标注只在真的存在多批时才有信息量，
-    常驻 system prompt 不该为单批会话付这份 token（§13.1）。
+    只有一批时压成一行：编号与「默认对象」标注只在真的存在多批时才有信息量。
     """
     if not files:
-        return "会话数据文件: （无，用户还没上传）"
+        return "（无，用户还没上传）"
     batches = {f.get("batch_id") for f in files}
     if len(batches) == 1:
-        return ("会话数据文件: " + ", ".join(f["name"] for f in files)
+        return (", ".join(f["name"] for f in files)
                 + "（本会话只上传过这一批，即本轮默认分析对象）")
     new_batch = files[-1].get("batch_id")
     lines = []
     for i, f in enumerate(files, start=1):
         fresh = " ← 本轮默认对象" if f.get("batch_id") == new_batch else ""
-        lines.append(f"  {i}. {f['name']}{fresh}")
-    return ("会话数据文件（编号即 run_analysis_on_files 的 file_indexes 取值）：\n"
+        lines.append(f"{i}. {f['name']}{fresh}")
+    return ("（编号即 run_analysis_on_files 的 file_indexes 取值，1 起）\n"
             + "\n".join(lines))
+
+
+def turn_context_block(files: List) -> str:
+    """随本轮消息一起送的文件清单块。
+
+    放这里而不是常驻 system prompt：清单是「每次发送时的瞬时状态」，写在 system
+    里就离本轮提问几百 token 远，模型更容易当成背景而不去点名最新那份；贴着提问
+    给，默认对象是谁就在眼前。历史消息里存的是用户原话，不带这份清单，所以旧轮次
+    不会留着过期文件表互相打架（§6.8 / §8.2）。
+    """
+    return "<会话数据文件>\n" + _files_context(files) + "\n</会话数据文件>"
 
 
 def build_chat_messages(
@@ -253,11 +264,7 @@ def build_chat_messages(
     history_limit: int = HISTORY_TAIL,
     files: Optional[List[dict]] = None,
 ) -> List[dict]:
-    ctx = [
-        f"可用功能目录:\n{function_catalog_text(cfg)}",
-        _files_context(files if files is not None
-                       else [{"name": n, "batch_id": ""} for n in file_names]),
-    ]
+    ctx = [f"可用功能目录:\n{function_catalog_text(cfg)}"]
     if selected.get("condition"):
         ctx.append(f"当前已选定工况: {selected['condition']}" + (
             f"（档位 {selected['profile']}）" if selected.get("profile") else ""))
@@ -267,7 +274,10 @@ def build_chat_messages(
     tail = [h for h in history if is_injected(h)][-history_limit:]
     for h in tail:
         messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": user_text})
+    # 文件清单贴着本轮提问：它属于「这次发送」而不是「这个会话的设定」
+    files = files if files is not None else [{"name": n, "batch_id": ""} for n in file_names]
+    messages.append({"role": "user",
+                     "content": turn_context_block(files) + "\n\n" + user_text})
     return messages
 
 

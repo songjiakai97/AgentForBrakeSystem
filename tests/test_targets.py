@@ -218,7 +218,11 @@ def test_profiles_presented_as_dimensions_not_flat_choices(cfg):
 
 
 def test_run_analysis_scopes_to_latest_upload(cfg):
-    """工具说明 + 文件清单都要写明「默认只分析最近一批」，否则模型没有依据收窄范围。"""
+    """工具说明 + 文件清单都要写明「默认只分析最近一批」，否则模型没有依据收窄范围。
+
+    清单必须贴着本轮提问（在最后一条 user 消息里），不能只写进常驻 system prompt：
+    system 与本句之间隔着整段历史，模型把它当背景而不是本轮对象。
+    """
     from brake_analyzer.llm.prompts import build_chat_messages
 
     run = {s["function"]["name"]: s for s in build_tool_specs(cfg, "abs")}[
@@ -227,15 +231,31 @@ def test_run_analysis_scopes_to_latest_upload(cfg):
     assert "默认只分析" in run["function"]["description"]
     assert run["function"]["parameters"]["required"] == ["condition_id"]
 
-    sys1 = build_chat_messages(cfg, [], "分析一下", [], {}, files=[
-        {"name": "a.mf4", "batch_id": "b1"}])[0]["content"]
-    assert "a.mf4" in sys1 and "本轮默认分析对象" in sys1
+    def sent(files, history=None):
+        msgs = build_chat_messages(cfg, history or [], "分析一下", [], {}, files=files)
+        return msgs[0]["content"], msgs[-1]["content"]
 
-    sys2 = build_chat_messages(cfg, [], "分析一下", [], {}, files=[
-        {"name": "a.mf4", "batch_id": "b1"},
-        {"name": "b.blf", "batch_id": "b2"}])[0]["content"]
-    assert "1. a.mf4" in sys2 and "2. b.blf ← 本轮默认对象" in sys2
-    assert "还没上传" in build_chat_messages(cfg, [], "分析一下", [], {})[0]["content"]
+    system, last = sent([{"name": "a.mf4", "batch_id": "b1"}])
+    assert "a.mf4" in last and "本轮默认分析对象" in last
+    assert last.startswith("<会话数据文件>") and last.endswith("分析一下")
+    assert "a.mf4" not in system, "清单不该常驻在 system prompt 里"
+
+    system2, last2 = sent([{"name": "a.mf4", "batch_id": "b1"},
+                           {"name": "b.blf", "batch_id": "b2"}])
+    assert "1. a.mf4" in last2 and "2. b.blf ← 本轮默认对象" in last2
+    assert "file_indexes" in last2, "编号的取值口径要写在清单旁边"
+    assert "1. a.mf4" not in system2
+
+    # 历史轮次不留旧清单：存的是用户原话，避免过期文件表互相打架
+    hist = [{"role": "user", "kind": "text", "content": "上一轮的问法"}]
+    _s, last3 = sent([{"name": "a.mf4", "batch_id": "b1"}], history=hist)
+    assert hist[0]["content"] not in last3 and "会话数据文件" not in hist[0]["content"]
+
+    _s, last4 = sent([])
+    assert "还没上传" in last4
+    # 兼容旧签名：只给 file_names 时同样落在本轮消息里
+    tail = build_chat_messages(cfg, [], "分析一下", ["x.mf4"], {})[-1]["content"]
+    assert "x.mf4" in tail and tail.endswith("分析一下")
 
 
 # ---------------------------------------------------------------- transient 折叠

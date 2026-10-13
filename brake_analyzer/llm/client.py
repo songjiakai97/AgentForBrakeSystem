@@ -26,6 +26,16 @@ except Exception:  # SDK 未安装 → 离线模式
     OpenAI = None
 
 
+# 流式请求的读超时（秒）：按「相邻两个数据块之间的最大间隔」计，不限制整轮总时长。
+# 端点挂住不吐字节时，SDK 的读循环阻塞在 socket 上，任何停止标记都自检不到——
+# 没有这个上界，那一种「点了停止没反应」永远无解，会话还会一直被这一轮占着（409）。
+STREAM_READ_TIMEOUT_SEC = 60.0
+
+# 非流式请求的整轮超时（秒）：chat() 用于摘要与标定建议，都在工具/分析阶段中间，
+# 阻塞期间没有任何停止检查点，所以必须有上界（openai 默认是 10 分钟，太久了）。
+REQUEST_TIMEOUT_SEC = 120.0
+
+
 @dataclass
 class LlmReply:
     content: str = ""
@@ -103,6 +113,9 @@ class LlmClient:
                 tools=tools or None,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                # 非流式调用（摘要、标定建议）都夹在工具/分析阶段中间，阻塞期间
+                # 一个停止检查点都没有；SDK 默认 10 分钟太久，这里给硬上界
+                timeout=REQUEST_TIMEOUT_SEC,
             )
         except Exception as e:
             self._trace(messages, None, [], chat_id, user_text, round_no, error=str(e))
@@ -128,12 +141,19 @@ class LlmClient:
     # ------------------------------------------------------------ 流式 chat
     def chat_stream(self, messages: List[dict], tools: Optional[List[dict]] = None,
                     chat_id: str = "", user_text: str = "", round_no: int = 1,
-                    temperature: float = 0.2, max_tokens: int = 1600):
+                    temperature: float = 0.2, max_tokens: int = 1600,
+                    stop_event=None):
         """流式对话：yield 事件 dict，最后必发一个 {"type":"finish","reply":LlmReply}。
 
         事件：
         - {"type":"delta","channel":"content"|"reasoning","text":str}
         - {"type":"finish","reply":LlmReply}   # reply.error 非空表示失败
+
+        stop_event：用户按「停止」时置位。这里必须自己逐块检查——工具调用的参数是
+        一个字符一个字符流回来的，不产生 delta，外层引擎的「每个 delta 自检」
+        在这段完全没有检查点，于是要等整段工具参数（甚至整轮回答）跑完才停手，
+        这就是「点了停止没反应、过好久才停止」。命中后立刻 break 并 close() 断流，
+        以 error="llm_stopped" 收尾（调用方据此判定为停止，不是失败）。
         """
         if not self.available:
             yield {"type": "finish", "reply": LlmReply(error="llm_unavailable")}
@@ -146,6 +166,10 @@ class LlmClient:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=True,
+                # read 超时按「两个块之间的最大间隔」计，不限制总时长：块与块之间
+                # 长期静默（端点挂住）时让这一轮有界失败，而不是永远等下去——
+                # 那时停止标记也无从自检，用户只会看到「点了停止没反应」。
+                timeout=STREAM_READ_TIMEOUT_SEC,
             )
         except Exception as e:
             self._trace(messages, None, [], chat_id, user_text, round_no, error=str(e))
@@ -156,8 +180,13 @@ class LlmClient:
         reasoning_parts: List[str] = []
         calls: dict = {}          # index -> {id,name,arguments}
         finish = "stop"
+        stopped = False
         try:
             for chunk in stream:
+                # 每个块都是一次自检机会：工具参数、思维链空白期、首 token 之前都覆盖到
+                if stop_event is not None and stop_event.is_set():
+                    stopped = True
+                    break
                 if not getattr(chunk, "choices", None):
                     continue
                 ch = chunk.choices[0]
@@ -189,6 +218,24 @@ class LlmClient:
         except Exception as e:  # 中断的流：已完成部分随 error 一并上报
             self._trace(messages, None, [], chat_id, user_text, round_no, error=str(e))
             yield {"type": "finish", "reply": LlmReply(error=f"llm_stream_error: {e}")}
+            return
+        finally:
+            # 断掉 HTTP 流：上层 break 出这个生成器时（外层也是靠 refcount 才 close，
+            # 未必立刻发生），留着连接只是白占端点的并发额度
+            try:
+                closer = getattr(stream, "close", None)
+                if closer is not None:
+                    closer()
+            except Exception:
+                pass
+
+        if stopped or (stop_event is not None and stop_event.is_set()):
+            # 停止单独一条 error 通道：调用方要把它和「端点出错」分开处理——
+            # 停止不回退离线路由，失败要回退（§6.9）。
+            # 循环自然跑完时才置位的也要认：那一轮的半截工具参数已经拼好了，
+            # 当成正常回复返回就会被上层立刻执行——停止又慢了一整步。
+            self._trace(messages, None, [], chat_id, user_text, round_no, error="stopped")
+            yield {"type": "finish", "reply": LlmReply(error="llm_stopped")}
             return
 
         tool_calls = []
