@@ -112,14 +112,21 @@ def write_dbc(path: str) -> str:
 
 
 def check_layout(db: Database, config_dir: str = None) -> None:
-    """自检：signals_blf.yaml 与 DBC 对得上，且 8 字节 / 位不重叠 / 单位一致。"""
+    """自检：signals_blf.yaml 与 DBC 对得上，且 8 字节 / 位不重叠 / 单位一致。
+
+    覆盖度按 BLF 侧自己声明的信号集校验，不要求等于 MF4 侧：demo 里两侧恰好相同，
+    但真实 BLF 只有 CAN 上发布的信号，MF4 的额外观测量本来就不该出现在这里。
+    """
     from brake_analyzer.configs import load_configs
     from brake_analyzer.loaders.base import _parse_msg_id     # 只依赖 numpy
 
     cfg = load_configs(config_dir or os.path.join(ROOT, "configs"))
-    blf_cfg = load_blf_config(config_dir or os.path.join(ROOT, "configs"),
-                              logical_names=set(cfg.signal_maps))
-    logical = set(cfg.signal_maps)
+    d = config_dir or os.path.join(ROOT, "configs")
+    blf_cfg = load_blf_config(d, required_signals=cfg.required_signals,
+                              registry=cfg.signal_registry)
+    # 登记表是单位/描述的唯一出处；本脚本生成的 DBC 必须与它一致
+    registry = cfg.signal_registry
+    declared = set(blf_cfg.signal_maps)
 
     ids = [m.frame_id for m in db.messages]
     assert len(ids) == len(set(ids)), "frame_id 重复"
@@ -128,16 +135,16 @@ def check_layout(db: Database, config_dir: str = None) -> None:
         assert not msg.is_extended_frame, f"{msg.name} 应为标准帧（候选 id 写作 0x100）"
         used: Dict[int, str] = {}
         for sig in msg.signals:
-            assert sig.name in logical, f"{msg.name}.{sig.name} 不是已定义的逻辑信号"
-            expect = str(cfg.signal_maps[sig.name].get("unit") or "")
+            assert sig.name in declared, f"{msg.name}.{sig.name} 不在 signals_blf.yaml 声明内"
+            expect = str(registry[sig.name].get("unit") or "")
             assert (sig.unit or "") == expect, (
-                f"{sig.name} 单位 {sig.unit!r} 与 signals_mf4.yaml {expect!r} 不一致")
+                f"{sig.name} 单位 {sig.unit!r} 与 signals.yaml {expect!r} 不一致")
             for bit in range(sig.start, sig.start + sig.length):
                 assert bit not in used, (
                     f"{msg.name} 位冲突：{sig.name} 与 {used[bit]} 抢占 bit {bit}")
                 used[bit] = sig.name
-    missing = logical - {s.name for m in db.messages for s in m.signals}
-    assert not missing, f"DBC 信号未覆盖全部逻辑信号：{sorted(missing)}"
+    missing = declared - {s.name for m in db.messages for s in m.signals}
+    assert not missing, f"DBC 信号未覆盖 signals_blf.yaml 声明的信号：{sorted(missing)}"
 
     # yaml 侧候选三元组必须能在 DBC 里解析到，且 alias 的 channel 与本帧一致
     for name, spec in blf_cfg.signal_maps.items():

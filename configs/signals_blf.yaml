@@ -1,5 +1,8 @@
 # BLF 信号映射（design.md §9.6）
 #
+# 只回答一件事：逻辑信号在 CAN/DBC 侧叫什么、在哪一帧。
+# 单位与描述在 configs/signals.yaml 登记一次，这里不重复写。
+#
 # demo 约定：一份 DBC 管全部逻辑信号（configs/dbc/brake_demo.dbc，由
 # scripts/generate_demo_blf.py 用 cantools 生成并提交入库），实车信号名 = 逻辑名，
 # 所有报文都发在通道 0（dbc_files.channel: 0，BLFLoader 按
@@ -14,6 +17,10 @@
 #
 # 接入真实数据时：把真实 DBC 追加为另一个 alias，并在对应信号的 candidates 前面
 # 插入 [真实alias, "0x123", 真实信号名]；扩展帧 id 写作 "0x123x"。
+#
+# 覆盖度：BLF 只有总线上发布的信号，允许比 MF4 少带纯观测量（如 Ax、状态位）；
+# 参与计算的信号（metrics.yaml inputs ∪ 分段器通道）一个都不能少，
+# 由 load_blf_config(required_signals=...) 在启动期把关。
 dbc_files:
   BRAKE:
     path: configs/dbc/brake_demo.dbc
@@ -21,62 +28,38 @@ dbc_files:
 
 signal_maps:
   speed_vbox:
-    description: vbox 实际车速
-    unit: km/h
     candidates:
       - [BRAKE, "0x102", speed_vbox]
   distance_vbox:
-    description: vbox 距离
-    unit: m
     candidates:
       - [BRAKE, "0x102", distance_vbox]
   wheelSpeed_FL:
-    description: 左前轮速
-    unit: km/h
     candidates:
       - [BRAKE, "0x100", wheelSpeed_FL]
   wheelSpeed_FR:
-    description: 右前轮速
-    unit: km/h
     candidates:
       - [BRAKE, "0x100", wheelSpeed_FR]
   wheelSpeed_RL:
-    description: 左后轮速
-    unit: km/h
     candidates:
       - [BRAKE, "0x101", wheelSpeed_RL]
   wheelSpeed_RR:
-    description: 右后轮速
-    unit: km/h
     candidates:
       - [BRAKE, "0x101", wheelSpeed_RR]
   yaw_rate:
-    description: 横摆角速度
-    unit: deg/s
     candidates:
       - [BRAKE, "0x104", yaw_rate]
   Ax:
-    description: 纵向加速度
-    unit: m/s2
     candidates:
       - [BRAKE, "0x102", Ax]
   ABS_Active:
-    description: ABS 激活
-    unit: ""
     candidates:
       - [BRAKE, "0x103", ABS_Active]
   TCS_Active:
-    description: TCS 激活
-    unit: ""
     candidates:
       - [BRAKE, "0x103", TCS_Active]
   BrakePedalPos:
-    description: 制动踏板深度
-    unit: "%"
     candidates:
       - [BRAKE, "0x103", BrakePedalPos]
   ThrottlePedalPos:
-    description: 油门踏板深度
-    unit: "%"
     candidates:
       - [BRAKE, "0x103", ThrottlePedalPos]

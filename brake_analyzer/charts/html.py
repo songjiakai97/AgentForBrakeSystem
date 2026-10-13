@@ -1,6 +1,6 @@
 """图表（design.md §6.6）：信号时序 → ECharts option JSON。
 
-多 y 轴共享 x 轴：按 configs/signals_mf4.yaml 的 chart_layout 分组成
+多 y 轴共享 x 轴：按 configs/signals.yaml 的 chart_layout 分组成
 「多行一列」子图，同组信号共用一个 y 轴；事件窗口在每行都画 markArea。
 """
 

@@ -128,7 +128,8 @@ brake-agent/
 ├── pyproject.toml / requirements.txt
 ├── .env.example
 ├── configs/
-│   ├── signals_mf4.yaml
+│   ├── signals.yaml            # 格式无关层：logical_signals 登记表 + chart_layout 分组（§9.6）
+│   ├── signals_mf4.yaml        # MF4 侧：只声明候选通道名（§9.6）
 │   ├── signals_blf.yaml        # BLF 侧：dbc_files + 三元组候选（§9.6）
 │   ├── dbc/
 │   │   └── brake_demo.dbc      # demo 唯一 DBC，由 scripts/generate_demo_blf.py 生成后入库
@@ -193,6 +194,17 @@ brake-agent/
 
 加载期做以下构建与校验：
 
+- 先读 `signals.yaml`（格式无关层，§9.6）：`logical_signals` 必须非空，它就是逻辑信号名的
+  唯一出处；`signals_mf4.yaml` 只能声明 `signal_maps`，引用未登记的逻辑名即报错，条目里
+  再写 `unit`/`description` 也直接报错（两处口径早晚漂移，宁可启动期失败）。
+- `chart_layout` 同样只在 `signals.yaml` 里读：分组引用未登记信号、同一信号重复分组都报错；
+  未编排的信号各自补一个单信号分组，保证图表不静默丢通道。
+- 搬运后残留的顶层段（如把 `chart_layout` 留在 `signals_mf4.yaml`）由 `_reject_unknown_sections`
+  拒绝并指回 `signals.yaml` —— "看着还生效"的死配置比缺失更难查。
+- `required_signals`（参与计算的信号集）= 每个功能分段器读取的通道（`SEGMENTER_SIGNALS`，
+  在 `events/segment.py` 声明，因为只有那个模块知道自己读什么）∪ 所有 metric 模板的 `inputs`。
+  加载到最后校验它是否都在 `signal_maps` 里，缺一个都不启动：这类缺失的后果是整窗切不出来、
+  指标全 missing，属于静默失效。
 - 校验 `conditions.yaml` 顶层键都存在于 `functions.yaml`。
 - 校验每个 `condition.id` 全局唯一。
 - 校验每个工况的 metrics list 中，同一 `(key, profile)` 不重复。
@@ -206,15 +218,18 @@ brake-agent/
 
 加载失败即报出可读错误，阻止启动。
 
-`signals_blf.yaml` 由同文件的 `load_blf_config(config_dir, logical_names=None)` 加载校验
-（与 `load_configs` 分开，因为 BLF 是可选能力，内核启动不强依赖它）：
+`signals_blf.yaml` 由同文件的 `load_blf_config(config_dir, required_signals=None, registry=None)`
+加载校验（与 `load_configs` 分开，因为 BLF 是可选能力，内核启动不强依赖它）：
 
 - `dbc_files` 必须非空，`channel` 必须是 int；`path` 解析成绝对路径后必须存在
   （相对路径先按 `config_dir` 解析，再按仓库根解析，故 yaml 里可写
   `configs/dbc/brake_demo.dbc`，进程从任意 cwd 启动都能找到）。
 - 每条候选必须是 `[alias, msg_id, signal_name]` 三元组，alias 在 `dbc_files` 内，
   `msg_id` 符合 `"0x123"` / `"0x123x"` / int 约定。
-- 传入 `logical_names`（MF4 侧的逻辑信号集）时校验两侧集合完全一致，避免 BLF 少配信号。
+- 传入 `registry`（`signals.yaml` 的 `logical_signals`）时，BLF 侧出现未登记的逻辑名即报错
+  —— 这就是「相同的信号，逻辑名必须一致」的执行方式；`required_signals` 同时给出时，
+  只要求参与计算的信号一个不缺，纯观测量允许缺席（§9.6 覆盖度约定）。
+- 单位/描述一律取自 `registry`，BLF 侧写了即报错；合并顺序也是 registry 覆盖格式侧。
 - 只校验结构，不加载 DBC —— 不在内核里硬绑 python-can/cantools；候选解析失败仍由
   `BLFLoader` 逐条回退。
 
@@ -228,6 +243,8 @@ brake-agent/
 - 每个逻辑信号角色返回独立 `SignalData`。
 - 缺失信号返回空 `ts`/`values`，不抛异常，由指标/规则层标记 missing。
 - 信号映射全局共享；功能与工况差异只体现在指标集、参数、阈值。
+  逻辑信号名与单位只在 `configs/signals.yaml` 登记一次，MF4/BLF 各有一张「逻辑名 →
+  本格式候选名」的映射（§9.6）；参与计算的信号两侧都有，纯观测量允许只出现在一种格式里。
 - 每个 `SignalData` 的 `ts` 统一相对起点偏移，便于跨文件对齐。
 - demo 阶段 Web 入口接受 `.mf4` 与 `.blf`：Loader 按扩展名选（`pipeline.make_loader`），
   BLF 走 `signals_blf.yaml` + 唯一一份 demo DBC，映射仍由服务端固定，用户不提供映射配置。
@@ -350,6 +367,9 @@ phases: list[str]
 
 - `html.py`：将选定信号时间序列转成 ECharts option JSON。
   - 支持多测线叠加、缩放、悬停、异常窗口高亮。
+  - 分行方案来自 `configs/signals.yaml` 的 `chart_layout`（按逻辑信号名写，与数据格式无关，
+    §9.6）：一行子图 = 一组同单位信号共用 y 轴；该段缺失时按 unit 自动分组。加载期已把
+    未编排的信号补成单信号分组，所以这里不需要再判断"漏了谁"。
 - 本期无静态图/报告导出，Markdown/HTML 报告与 PDF/Excel 导出列入 §15 后续扩展。
 
 ### 6.7 编排流水线（`pipeline.py`）
@@ -735,7 +755,10 @@ conditions.yaml  ← 按 function_key 索引的工况清单：动作/路面/参�
 metrics.yaml     ← 指标模板：工具绑定、category、unit、tuning_params
      │ 引用
      ▼
-signals_*.yaml   ← 逻辑信号角色 → 物理信号映射
+signals.yaml     ← 逻辑信号登记表（名称/单位/描述）+ chart_layout 分组，格式无关
+     │ 登记
+     ▼
+signals_*.yaml   ← 各格式侧：逻辑信号名 → 该格式里的物理候选名
 ```
 
 ### 9.2 functions.yaml
@@ -869,21 +892,64 @@ fault_domain: stability | brake_performance | traction | powertrain_interaction 
   message: <结论>
 ```
 
-### 9.6 signals_*.yaml
+### 9.6 signals.yaml + signals_*.yaml
+
+信号配置分三层，边界是「谁与数据格式无关」：
+
+```text
+configs/signals.yaml     格式无关：logical_signals（名称/单位/描述）+ chart_layout（分组）
+configs/signals_mf4.yaml 格式相关：这个逻辑信号在 MF4 里叫什么通道名
+configs/signals_blf.yaml 格式相关：这个逻辑信号在 BLF 里是哪条 CAN 信号（+ dbc_files）
+```
+
+**覆盖度约定**（取代早期"两侧逻辑信号集必须完全相同"）：
+
+1. 名字必须在登记表里 —— `signals_mf4.yaml` / `signals_blf.yaml` 只能引用 `logical_signals`
+   里已登记的逻辑名，出现未登记的名字直接报错。这一条就是「相同的信号，逻辑名必须一致」
+   的执行方式：改名、造别名在启动期就被拦住，而不是运行到某个指标才发现取不到数。
+2. 参与计算的信号两侧都必须有 —— 必需集 `required_signals` 不是手写的，而是
+   `SEGMENTER_SIGNALS`（分段器读取的通道）∪ 所有 metric 模板的 `inputs` 推出来的，
+   少一个即报错。
+3. 纯观测量允许只出现在一种格式里 —— MF4 常带额外测量通道，BLF 只有 CAN 上发布的信号。
+   这类通道（demo 里如 `Ax`、`ABS_Active`、`TCS_Active`）只出现在一侧时不报错：另一侧的
+   Loader 返回空 `ts`/`values`，图表层跳过空通道。（当前 demo 的 DBC 恰好把 12 个都发了，
+   `tests/test_blf_demo.py::test_observation_only_signal_may_be_absent` 用"摘掉 Ax"验证规则本身。）
+
+#### signals.yaml
+
+```yaml
+logical_signals:
+  <逻辑名称>:
+    description: <字符串>
+    unit: <字符串>
+
+chart_layout:
+  - label: <行标题>
+    unit: <该行共用的 y 轴单位>
+    signals: [<逻辑名称>, ...]
+```
+
+- 逻辑名、单位、描述只在这里定义一次。同一个物理量在两个格式文件里各写一遍单位，
+  迟早漂移，而"以谁为准"只有人眼能判断 —— 所以格式侧再写 `unit`/`description`
+  是启动期错误（`_reject_signal_extras`），不是"被忽略"。
+- `chart_layout` 按逻辑信号名写，天然与格式无关：同一份分析不该因为数据来自 MF4 还是
+  BLF 就换一种分行。分组引用未登记信号、同一信号重复分组都报错；未编排的信号各自补成
+  单信号分组，保证图表不静默丢通道。
+- 段落搬走后残留在格式文件里的顶层段由 `_reject_unknown_sections` 拒绝并指回本文件
+  （"看着还生效"的死配置比缺失更难查）。
 
 #### signals_mf4.yaml
 
 ```yaml
 signal_maps:
   <逻辑名称>:
-    description: <字符串，可选>
-    unit: <字符串，可选>
     candidates:
       - <候选通道名1>
       - <候选通道名2>
       - ...
 ```
 
+- 顶层只允许 `signal_maps` 段；条目只允许 `candidates`。
 - `candidates` 为 MF4 中的物理通道名，按顺序尝试，首个 `whereis` 命中即采用。
 - 全部候选未命中：该逻辑信号返回空 `ts`/`values`，不报错。
 
@@ -897,13 +963,12 @@ dbc_files:
 
 signal_maps:
   <逻辑名称>:
-    description: <字符串，可选>
-    unit: <字符串，可选>
     candidates:
       - [<dbc_alias>, <msg_id>, <signal_name>]
       - ...
 ```
 
+- 顶层只允许 `dbc_files` + `signal_maps`；条目同样只允许 `candidates`。
 - `dbc_files`：CAN 报文库清单；`path` 指向 `.dbc` 文件，`channel` 为该 DBC 对应的 CAN 通道号，用于帧索引匹配。
 - `candidates` 每条为三元组 `[dbc_alias, msg_id, signal_name]`，按顺序解析，首个在 DBC 中可解析的即采用。
 - `msg_id` 约定：字符串 `"0x123"` 标准帧、`"0x123x"`（十六进制 + `x` 后缀）扩展帧、裸 int 按标准帧兼容处理。

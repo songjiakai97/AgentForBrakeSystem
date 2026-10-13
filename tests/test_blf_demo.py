@@ -49,7 +49,8 @@ def cfg():
 
 @pytest.fixture(scope="module")
 def blf_cfg(cfg):
-    return load_blf_config(CONFIG_DIR, logical_names=set(cfg.signal_maps))
+    return load_blf_config(CONFIG_DIR, required_signals=cfg.required_signals,
+                           registry=cfg.signal_registry)
 
 
 @pytest.fixture(scope="module")
@@ -82,10 +83,15 @@ class TestBlfConfig:
         # 不依赖进程 cwd（pytest 可能在任意目录启动）
         assert BLFLoader(blf_cfg.dbc_files, blf_cfg.signal_maps) is not None
 
-    def test_signal_set_matches_mf4_side(self, cfg, blf_cfg):
-        assert set(blf_cfg.signal_maps) == set(cfg.signal_maps)
-        for name in cfg.signal_maps:
-            assert blf_cfg.signal_maps[name]["unit"] == cfg.signal_maps[name].get("unit", "")
+    def test_coverage_contract(self, cfg, blf_cfg):
+        """两侧不再要求信号集相同；卡的是「逻辑名已登记 + 计算必需信号齐全」。"""
+        assert set(blf_cfg.signal_maps) <= set(cfg.signal_registry)
+        assert set(cfg.required_signals) <= set(blf_cfg.signal_maps)
+        # 单位/描述来自登记表，Loader 拿到的就是它
+        for name in blf_cfg.signal_maps:
+            assert blf_cfg.signal_maps[name]["unit"] == cfg.signal_registry[name]["unit"]
+            assert blf_cfg.signal_maps[name]["description"] == \
+                cfg.signal_registry[name]["description"]
 
     def test_candidates_all_resolvable_in_dbc(self, blf_cfg):
         db = cantools.database.load_file(blf_cfg.dbc_files["BRAKE"]["path"])
@@ -145,15 +151,71 @@ class TestBlfConfig:
         with pytest.raises(ConfigError, match="不存在"):
             load_blf_config(d)
 
-    def test_signal_set_mismatch_rejected(self, tmp_path):
+    def test_observation_only_signal_may_be_absent(self, cfg, tmp_path):
+        """只用于观测量（Ax 不参与 metrics/分段）→ BLF 侧可以不带，这是 §9.6 的放宽。
+
+        旧口径要求两侧逻辑信号集完全相同，逼着 CAN 上根本没有的通道也得编一个
+        候选出来；现在只卡「参与计算的信号一个不缺」。
+        """
         import yaml
 
+        from brake_analyzer.loaders import BLFLoader
+
+        assert "Ax" not in cfg.required_signals, "Ax 若变成计算必需，本用例前提失效"
         d = _copy_config(tmp_path)
         raw = yaml.safe_load(open(os.path.join(CONFIG_DIR, "signals_blf.yaml"), encoding="utf-8"))
         raw["signal_maps"].pop("Ax")
         _write(d, "signals_blf.yaml", raw)
-        with pytest.raises(ConfigError, match="不一致"):
-            load_blf_config(d, logical_names=set(load_configs(CONFIG_DIR).signal_maps))
+        blf_cfg = load_blf_config(d, required_signals=cfg.required_signals,
+                                  registry=cfg.signal_registry)
+        assert "Ax" not in blf_cfg.signal_maps
+        # 计算必需的信号仍在，缺的观测量由 Loader 回退成"该通道不存在"
+        assert "speed_vbox" in blf_cfg.signal_maps
+        data = BLFLoader(blf_cfg.dbc_files, blf_cfg.signal_maps).load(
+            _require("abs_dry100_normal.blf"))
+        assert "Ax" not in data and "speed_vbox" in data
+
+    def test_required_signal_missing_rejected(self, cfg, tmp_path):
+        """参与计算的信号（speed_vbox：metrics + 两个分段器都要）缺了就拒绝启动。"""
+        import yaml
+
+        assert "speed_vbox" in cfg.required_signals
+        d = _copy_config(tmp_path)
+        raw = yaml.safe_load(open(os.path.join(CONFIG_DIR, "signals_blf.yaml"), encoding="utf-8"))
+        raw["signal_maps"].pop("speed_vbox")
+        _write(d, "signals_blf.yaml", raw)
+        with pytest.raises(ConfigError, match="参与计算的信号"):
+            load_blf_config(d, required_signals=cfg.required_signals,
+                            registry=cfg.signal_registry)
+
+    def test_unregistered_logical_name_rejected(self, cfg, tmp_path):
+        """同一物理量两侧必须同名：BLF 侧自创别名（vbox_speed）直接拦下。"""
+        import yaml
+
+        d = _copy_config(tmp_path)
+        raw = yaml.safe_load(open(os.path.join(CONFIG_DIR, "signals_blf.yaml"), encoding="utf-8"))
+        raw["signal_maps"]["vbox_speed"] = {"candidates": [["BRAKE", "0x102", "speed_vbox"]]}
+        _write(d, "signals_blf.yaml", raw)
+        with pytest.raises(ConfigError, match="未登记"):
+            load_blf_config(d, required_signals=cfg.required_signals,
+                            registry=cfg.signal_registry)
+
+    def test_unit_declared_in_blf_file_rejected(self, cfg, tmp_path):
+        """单位只有 signals.yaml 一个出处：格式侧再写一份直接拒，不静默忽略。"""
+        import yaml
+
+        d = _copy_config(tmp_path)
+        raw = yaml.safe_load(open(os.path.join(CONFIG_DIR, "signals_blf.yaml"), encoding="utf-8"))
+        raw["signal_maps"]["speed_vbox"]["unit"] = "mph"      # 故意与登记表冲突
+        _write(d, "signals_blf.yaml", raw)
+        with pytest.raises(ConfigError, match="不该声明"):
+            load_blf_config(d, required_signals=cfg.required_signals,
+                            registry=cfg.signal_registry)
+
+    def test_registry_unit_reaches_loader(self, cfg, blf_cfg):
+        """正常路径下 Loader 拿到的单位就是登记表里的值。"""
+        assert blf_cfg.signal_maps["speed_vbox"]["unit"] == \
+            cfg.signal_registry["speed_vbox"]["unit"] == "km/h"
 
 
 def _parse(msg_id):

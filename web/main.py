@@ -65,8 +65,10 @@ except ConfigError as e:
     raise RuntimeError(f"配置加载失败，服务拒绝启动：{e}")
 
 # BLF 侧配置同样启动期校验（结构非法直接拒绝启动；缺库只影响 .blf 文件本身）
+# 只要求 BLF 覆盖「参与计算的信号」，纯观测量允许缺席（CAN 上没有就不带）
 try:
-    BLF_CFG = load_blf_config(CONFIG_DIR, logical_names=set(CFG.signal_maps))
+    BLF_CFG = load_blf_config(CONFIG_DIR, required_signals=CFG.required_signals,
+                              registry=CFG.signal_registry)
 except ConfigError as e:
     raise RuntimeError(f"BLF 配置加载失败，服务拒绝启动：{e}")
 

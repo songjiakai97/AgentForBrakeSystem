@@ -49,6 +49,101 @@ def test_bad_config_dir(tmp_path):
         load_configs(str(tmp_path))
 
 
+def _copy_configs(tmp_path):
+    import shutil
+
+    d = str(tmp_path / "configs")
+    if not os.path.isdir(d):
+        shutil.copytree(CONFIG_DIR, d)
+    return d
+
+
+def _patch_yaml(d, name, mutate):
+    import yaml
+
+    path = os.path.join(d, name)
+    raw = yaml.safe_load(open(path, encoding="utf-8"))
+    mutate(raw)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(raw, f, allow_unicode=True, sort_keys=False)
+
+
+def test_registry_is_single_source_of_unit(cfg):
+    """单位/描述只在 signals.yaml 出现一次；MF4 侧合并后拿到的就是登记值。"""
+    assert cfg.signal_registry["speed_vbox"]["unit"] == "km/h"
+    assert cfg.signal_maps["speed_vbox"]["unit"] == "km/h"
+    assert cfg.signal_maps["speed_vbox"]["description"] == "vbox 实际车速"
+
+
+def test_required_signals_cover_metrics_and_segmenters(cfg):
+    """计算必需集 = metrics.yaml inputs ∪ 分段器读取的通道（§9.6 覆盖度口径的依据）。"""
+    from brake_analyzer.events.segment import SEGMENTER_SIGNALS
+
+    want = {i for m in cfg.metrics.values() for i in m.inputs}
+    for fn in cfg.functions.values():
+        want |= set(SEGMENTER_SIGNALS.get(fn.segmenter, []))
+    assert set(cfg.required_signals) == want
+    # 踏板门控与车速是切事件窗口的命脉，必须在里面
+    assert {"speed_vbox", "BrakePedalPos", "ThrottlePedalPos"} <= set(cfg.required_signals)
+    # Ax 只用于看图，不参与计算 → 允许某一种格式不带
+    assert "Ax" not in cfg.required_signals
+
+
+def test_mf4_missing_required_signal_rejected(tmp_path):
+    d = _copy_configs(tmp_path)
+    _patch_yaml(d, "signals_mf4.yaml",
+                lambda raw: raw["signal_maps"].pop("speed_vbox"))
+    with pytest.raises(ConfigError, match="参与计算的信号"):
+        load_configs(d)
+
+
+def test_mf4_unregistered_logical_name_rejected(tmp_path):
+    """MF4 侧也不能自创逻辑名：同一物理量两侧必须同名。"""
+    d = _copy_configs(tmp_path)
+    _patch_yaml(d, "signals_mf4.yaml",
+                lambda raw: raw["signal_maps"].__setitem__(
+                    "vbox_speed", {"candidates": ["vbox_speed"]}))
+    with pytest.raises(ConfigError, match="未登记"):
+        load_configs(d)
+
+
+def test_moved_section_in_format_file_rejected(tmp_path):
+    """chart_layout 搬到 signals.yaml 后，留在 signals_mf4.yaml 里必须报错，
+    而不是"看着还生效"地静默失效。"""
+    d = _copy_configs(tmp_path)
+    _patch_yaml(d, "signals_mf4.yaml",
+                lambda raw: raw.__setitem__("chart_layout", [{"signals": ["Ax"]}]))
+    with pytest.raises(ConfigError, match="signals.yaml"):
+        load_configs(d)
+
+
+def test_observation_only_signal_may_appear_in_one_format_only(tmp_path):
+    """MF4 侧少带一个纯观测量是合法的（两侧信号集不必相同）。"""
+    d = _copy_configs(tmp_path)
+    _patch_yaml(d, "signals_mf4.yaml", lambda raw: raw["signal_maps"].pop("Ax"))
+    cfg2 = load_configs(d)
+    assert "Ax" not in cfg2.signal_maps
+    assert "Ax" in cfg2.signal_registry          # 仍登记在册，只是这个格式没候选
+    assert "Ax" not in cfg2.required_signals
+    # 图表分组里那一行仍在（按登记表编排），运行时缺通道由画图层跳过
+    assert any("Ax" in g.signals for g in cfg2.chart_layout)
+
+
+def test_chart_layout_lives_in_registry_file(cfg):
+    """分组按逻辑信号名写，与数据格式无关 → 归属 signals.yaml。"""
+    raw = __import__("yaml").safe_load(
+        open(os.path.join(CONFIG_DIR, "signals.yaml"), encoding="utf-8"))
+    assert raw.get("chart_layout"), "chart_layout 应在 signals.yaml"
+    mf4 = __import__("yaml").safe_load(
+        open(os.path.join(CONFIG_DIR, "signals_mf4.yaml"), encoding="utf-8"))
+    assert "chart_layout" not in mf4
+    assert cfg.chart_layout[0].label == "车速 / 轮速"
+    # 未编排的信号自动补为独立行，图表不静默丢通道
+    placed = {s for g in cfg.chart_layout for s in g.signals}
+    assert set(cfg.signal_registry) == placed
+
+
+
 # ---------------------------------------------------------------- 交叉点插值
 def test_crossings_linear():
     ts = [0.0, 1.0, 2.0]

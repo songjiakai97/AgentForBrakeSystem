@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from .events.segment import SEGMENTERS
+from .events.segment import SEGMENTERS, SEGMENTER_SIGNALS
 from .schemas import ConditionConfig, FunctionConfig, MetricTemplate, RuleConfig
 
 SEVERITIES = {"info", "low", "high", "critical"}
@@ -39,6 +39,38 @@ def _load_yaml(path: str) -> Any:
     if data is None:
         raise ConfigError(f"配置文件 {path} 为空")
     return data
+
+
+# 段落搬家后留下的"看着还生效"的配置是最难查的：它不报错，只是不起作用。
+# 因此格式侧文件只允许声明自己该声明的段，其余顶层键直接拒绝。
+_MOVED_HINTS = {
+    "chart_layout": "已移到 configs/signals.yaml（分组按逻辑信号名写，与数据格式无关）",
+    "logical_signals": "已移到 configs/signals.yaml（名称/单位/描述的唯一出处）",
+}
+
+
+def _reject_unknown_sections(raw: Any, allowed: set, fname: str) -> None:
+    if not isinstance(raw, dict):
+        return                      # 类型错误由各自的必需段检查报，信息更具体
+    for key in raw:
+        if key in allowed:
+            continue
+        hint = _MOVED_HINTS.get(str(key))
+        raise ConfigError(
+            f"{fname} 不支持顶层段 '{key}'" + (f"：{hint}" if hint else "（未识别的段）"))
+
+
+def _reject_signal_extras(spec: dict, fname: str, name: str) -> None:
+    """格式侧信号条目只允许 candidates（+ 少量格式专属键）。
+
+    unit/description 属于登记表；允许写在格式文件里就等于允许两处口径，
+    而"以谁为准"最终只有人眼能判断。宁可启动期报错，也不静默忽略。
+    """
+    bad = [k for k in spec if k in ("unit", "description")]
+    if bad:
+        raise ConfigError(
+            f"{fname} 信号 {name} 不该声明 {sorted(bad)}：单位与描述只在 "
+            f"configs/signals.yaml 的 logical_signals 里定义一次")
 
 
 # ---------------------------------------------------------------- 索引构建
@@ -114,7 +146,7 @@ def _profile_tokens(profile: str) -> List[str]:
 
 @dataclass
 class ChartGroup:
-    """图表一行子图：同单位信号共用 y 轴（signals_mf4.yaml chart_layout）。"""
+    """图表一行子图：同单位信号共用 y 轴（signals.yaml chart_layout）。"""
     label: str
     unit: str
     signals: List[str]
@@ -146,6 +178,11 @@ class AppConfigs:
     rules: List[RuleConfig] = field(default_factory=list)
     signal_maps: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     chart_layout: List[ChartGroup] = field(default_factory=list)
+    # 参与计算的信号：metrics.yaml 的 inputs ∪ 分段器读取的通道。
+    # 每种数据格式都必须覆盖它；纯观测量允许只出现在某一种格式里（§9.6）。
+    required_signals: List[str] = field(default_factory=list)
+    # 逻辑信号登记表（signals.yaml）：名称 → {description, unit}
+    signal_registry: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # ---- 查询辅助 ----
     def function(self, key: str) -> Optional[FunctionConfig]:
@@ -226,22 +263,48 @@ class AppConfigs:
 def load_configs(config_dir: str = "configs") -> AppConfigs:
     cfg = AppConfigs(config_dir=config_dir)
 
-    # ---- signals_mf4.yaml ----
+    # ---- signals.yaml：格式无关的一层（逻辑信号登记 + 图表分行）----
+    # 名称/单位/描述只在这里定义一次；signals_mf4.yaml / signals_blf.yaml 只回答
+    # 「该逻辑信号在这个格式里叫什么」。同一个物理量写两遍必然漂移，而漂移只有人眼能发现。
+    reg_raw = _load_yaml(os.path.join(config_dir, "signals.yaml"))
+    _reject_unknown_sections(reg_raw, {"logical_signals", "chart_layout"}, "signals.yaml")
+    registry = reg_raw.get("logical_signals") if isinstance(reg_raw, dict) else None
+    if not isinstance(registry, dict) or not registry:
+        raise ConfigError("signals.yaml 缺少非空 logical_signals 段")
+    for name, spec in registry.items():
+        if not isinstance(spec, dict):
+            raise ConfigError(f"signals.yaml 逻辑信号 {name} 必须是映射（description/unit）")
+    cfg.signal_registry = {k: dict(v) for k, v in registry.items()}
+    logical_names = set(registry)
+
+    # ---- signals_mf4.yaml：只声明候选通道名 ----
     sig_raw = _load_yaml(os.path.join(config_dir, "signals_mf4.yaml"))
-    signal_maps = sig_raw.get("signal_maps") if isinstance(sig_raw, dict) else None
-    if not isinstance(signal_maps, dict) or not signal_maps:
+    _reject_unknown_sections(sig_raw, {"signal_maps"}, "signals_mf4.yaml")
+    mf4_maps = sig_raw.get("signal_maps") if isinstance(sig_raw, dict) else None
+    if not isinstance(mf4_maps, dict) or not mf4_maps:
         raise ConfigError("signals_mf4.yaml 缺少非空 signal_maps 段")
-    for name, spec in signal_maps.items():
-        if not isinstance(spec, dict) or not isinstance(spec.get("candidates"), list) or not spec["candidates"]:
+    unknown = [n for n in mf4_maps if n not in logical_names]
+    if unknown:
+        raise ConfigError(
+            f"signals_mf4.yaml 引用未登记的逻辑信号: {unknown}（请先在 signals.yaml 登记）")
+    signal_maps: Dict[str, Dict[str, Any]] = {}
+    for name, spec in mf4_maps.items():
+        if not isinstance(spec, dict) or not isinstance(spec.get("candidates"), list) \
+                or not spec["candidates"]:
             raise ConfigError(f"信号 {name} 缺少非空 candidates 列表")
+        _reject_signal_extras(spec, "signals_mf4.yaml", name)
+        # 单位/描述只认登记表；格式侧再写一份就是第二处口径，直接拒（见 §9.6）
+        merged = dict(registry[name])
+        merged.update({k: v for k, v in spec.items() if k != "candidates"})
+        merged["candidates"] = spec["candidates"]
+        signal_maps[name] = merged
     cfg.signal_maps = signal_maps
-    logical_names = set(signal_maps)
 
     # chart_layout：一行子图 = 一组同单位信号（可选段，缺失时图表按单位自动分组）
-    layout_raw = sig_raw.get("chart_layout") if isinstance(sig_raw, dict) else None
+    layout_raw = reg_raw.get("chart_layout") if isinstance(reg_raw, dict) else None
     if layout_raw is not None:
         if not isinstance(layout_raw, list) or not layout_raw:
-            raise ConfigError("signals_mf4.yaml 的 chart_layout 必须是非空列表")
+            raise ConfigError("signals.yaml 的 chart_layout 必须是非空列表")
         placed: set = set()
         groups: List[ChartGroup] = []
         for i, g in enumerate(layout_raw):
@@ -252,7 +315,7 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
                 raise ConfigError(f"chart_layout[{i}] 缺少非空 signals")
             unknown = [s for s in sigs if s not in logical_names]
             if unknown:
-                raise ConfigError(f"chart_layout[{i}] 引用未定义信号: {unknown}")
+                raise ConfigError(f"chart_layout[{i}] 引用未登记信号: {unknown}")
             dup = [s for s in sigs if s in placed]
             if dup:
                 raise ConfigError(f"chart_layout 信号重复分组: {dup}")
@@ -260,9 +323,9 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             groups.append(ChartGroup(label=str(g.get("label") or sigs[0]),
                                      unit=str(g.get("unit") or ""), signals=sigs))
         # 未编排的信号各自成组，保证图表不静默丢通道
-        for name in signal_maps:
+        for name in registry:
             if name not in placed:
-                groups.append(ChartGroup(label=name, unit=str(signal_maps[name].get("unit") or ""),
+                groups.append(ChartGroup(label=name, unit=str(registry[name].get("unit") or ""),
                                          signals=[name]))
         cfg.chart_layout = groups
 
@@ -300,6 +363,15 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
         )
     fn_keys = set(cfg.functions)
 
+    # 分段器读取的通道同样是计算必需：缺了就切不出事件窗口，指标全判 missing。
+    for fn in cfg.functions.values():
+        for sig in SEGMENTER_SIGNALS.get(fn.segmenter, []):
+            if sig not in logical_names:
+                raise ConfigError(
+                    f"功能 {fn.key} 的分段器 {fn.segmenter} 读取未登记信号: {sig}")
+            if sig not in cfg.required_signals:
+                cfg.required_signals.append(sig)
+
     # ---- metrics.yaml ----
     mt_raw = _load_yaml(os.path.join(config_dir, "metrics.yaml"))
     mt_list = mt_raw.get("metrics") if isinstance(mt_raw, dict) else None
@@ -317,6 +389,9 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
         unknown = [i for i in inputs if i not in logical_names]
         if unknown:
             raise ConfigError(f"指标 {key} 引用未定义信号: {unknown}")
+        for i in inputs:
+            if i not in cfg.required_signals:
+                cfg.required_signals.append(i)
         cfg.metrics[key] = MetricTemplate(
             key=key,
             name=item.get("name", key),
@@ -472,6 +547,14 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
                 f"规则 {rule.id} 引用的指标 {rule.metric} 在目标工况均为 info（无 ok_range），不允许触发规则"
             )
 
+    # 计算必需的信号，MF4 侧必须齐全（MF4Loader 无条件启用）。
+    # 观测量不参与这项检查：它们只出现在某一种格式里是正常情况。
+    missing = [s for s in cfg.required_signals if s not in cfg.signal_maps]
+    if missing:
+        raise ConfigError(
+            f"signals_mf4.yaml 缺少参与计算的信号: {missing}"
+            f"（这些信号被 metrics.yaml 或分段器读取；纯观测量才允许只在单一格式出现）")
+
     return cfg
 
 
@@ -504,16 +587,27 @@ def _resolve_config_path(path: str, config_dir: str) -> str:
 
 
 def load_blf_config(config_dir: str = "configs",
-                    logical_names: Optional[set] = None) -> BlfConfigs:
+                    required_signals: Optional[List[str]] = None,
+                    registry: Optional[Dict[str, Dict[str, Any]]] = None) -> BlfConfigs:
     """加载并校验 signals_blf.yaml（结构错误抛 ConfigError，阻止启动）。
 
     只校验结构，不加载 DBC（不引入 python-can/cantools 依赖）：候选三元组解析失败
     由 BLFLoader 逐条回退，最终缺信号返回空序列。
+
+    覆盖度口径（§9.6）：BLF 是 CAN 报文，天然只有总线上发布的信号；MF4 常额外带
+    观测量。所以两侧不要求信号集相同，只要求
+      1) 用到的逻辑名都在登记表里（名字必须一致，不允许各起一名）；
+      2) required_signals（参与计算的信号）一个不缺。
+    观测量缺失是正常情况，BLFLoader 对其返回空序列，图表按现有逻辑跳过该行。
+
+    registry（signals.yaml 的 logical_signals）给出时，单位/描述以它为准，
+    格式侧不再重复声明。
     """
     path = os.path.join(config_dir, "signals_blf.yaml")
     raw = _load_yaml(path)          # 缺失/空文件由 _load_yaml 抛 ConfigError
     if not isinstance(raw, dict):
         raise ConfigError("signals_blf.yaml 顶层必须是映射（dbc_files + signal_maps）")
+    _reject_unknown_sections(raw, {"dbc_files", "signal_maps"}, "signals_blf.yaml")
 
     dbc_raw = raw.get("dbc_files")
     if not isinstance(dbc_raw, dict) or not dbc_raw:
@@ -538,6 +632,7 @@ def load_blf_config(config_dir: str = "configs",
         if not isinstance(spec, dict) or not isinstance(spec.get("candidates"), list) \
                 or not spec["candidates"]:
             raise ConfigError(f"signals_blf.yaml 信号 {name} 缺少非空 candidates 列表")
+        _reject_signal_extras(spec, "signals_blf.yaml", name)
         for cand in spec["candidates"]:
             if not isinstance(cand, (list, tuple)) or len(cand) != 3:
                 raise ConfigError(
@@ -552,11 +647,30 @@ def load_blf_config(config_dir: str = "configs",
                     f"信号 {name} 的 msg_id 非法: {msg_id!r}（约定 \"0x123\" 标准帧、"
                     "\"0x123x\" 扩展帧）")
 
-    if logical_names is not None:
-        got, want = set(signal_maps), set(logical_names)
-        if got != want:
+    known = set(registry) if registry is not None else (
+        set(logical_names) if logical_names is not None else None)
+    if known is not None:
+        # 1) 不许自创逻辑名：同一物理量两侧必须同名，否则跨格式对齐只能靠人
+        stray = [n for n in signal_maps if n not in known]
+        if stray:
             raise ConfigError(
-                f"signals_blf.yaml 与 signals_mf4.yaml 的逻辑信号集不一致："
-                f"BLF 侧缺 {sorted(want - got)}，多 {sorted(got - want)}")
+                f"signals_blf.yaml 引用未登记的逻辑信号: {sorted(stray)}"
+                "（请先在 signals.yaml 登记；同一物理量两侧必须用同一逻辑名）")
+        # 2) 参与计算的信号一个不能少
+        if required_signals is not None:
+            lacking = [s for s in required_signals if s not in signal_maps]
+            if lacking:
+                raise ConfigError(
+                    f"signals_blf.yaml 缺少参与计算的信号: {lacking}"
+                    "（纯观测量可以不带，参与计算的必须带）")
+        # 单位/描述以登记表为准（格式侧声明已在上面拦下），candidates 保留格式侧声明
+        if registry is not None:
+            merged = {}
+            for name, spec in signal_maps.items():
+                entry = {k: v for k, v in spec.items() if k != "candidates"}
+                entry.update(registry.get(name) or {})
+                entry["candidates"] = spec["candidates"]
+                merged[name] = entry
+            signal_maps = merged
 
     return BlfConfigs(dbc_files=dbc_files, signal_maps=signal_maps)

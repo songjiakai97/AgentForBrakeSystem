@@ -333,27 +333,48 @@ metrics:
 - {id: tcs_slip_tile_abnormal, scope: condition, function: tcs, condition: tcs_full_throttle_wet_tile_0to50kph, metric: slip_max,  status: abnormal, severity: high, fault_domain: traction, kb_ref: tcs_manual, message: 瓷砖打滑量超限，收紧扭矩爬升或提前滑移干预}
 ```
 
-### 6.5 configs/signals_mf4.yaml（demo 用）
+### 6.5 configs/signals.yaml + configs/signals_mf4.yaml（demo 用）
+
+名称/单位/描述在格式无关的 `signals.yaml` 登记一次（含 `chart_layout` 分组，见 design.md §9.6）：
+
+```yaml
+logical_signals:
+  speed_vbox:      {description: vbox 实际车速, unit: km/h}
+  distance_vbox:   {description: vbox 距离,     unit: m}
+  wheelSpeed_FL:   {description: 左前轮速,      unit: km/h}
+  wheelSpeed_FR:   {description: 右前轮速,      unit: km/h}
+  wheelSpeed_RL:   {description: 左后轮速,      unit: km/h}
+  wheelSpeed_RR:   {description: 右后轮速,      unit: km/h}
+  yaw_rate:        {description: 横摆角速度,    unit: deg/s}
+  Ax:              {description: 纵向加速度,    unit: m/s2}
+  ABS_Active:      {description: ABS 激活,      unit: ""}
+  TCS_Active:      {description: TCS 激活,      unit: ""}
+  BrakePedalPos:   {description: 制动踏板深度,  unit: "%"}
+  ThrottlePedalPos: {description: 油门踏板深度, unit: "%"}
+```
+
+`signals_mf4.yaml` 只回答「这个逻辑信号在 MF4 里叫什么通道名」：
 
 ```yaml
 # demo：物理通道名 = 逻辑名（合成数据按此命名写入 MF4）
 # 接入真实数据时，只需在 candidates 前面追加真实通道名
 signal_maps:
-  speed_vbox:      {description: vbox 实际车速, unit: km/h, candidates: [speed_vbox]}
-  distance_vbox:   {description: vbox 距离,     unit: m,    candidates: [distance_vbox]}
-  wheelSpeed_FL:   {description: 左前轮速,      unit: km/h, candidates: [wheelSpeed_FL]}
-  wheelSpeed_FR:   {description: 右前轮速,      unit: km/h, candidates: [wheelSpeed_FR]}
-  wheelSpeed_RL:   {description: 左后轮速,      unit: km/h, candidates: [wheelSpeed_RL]}
-  wheelSpeed_RR:   {description: 右后轮速,      unit: km/h, candidates: [wheelSpeed_RR]}
-  yaw_rate:        {description: 横摆角速度,    unit: deg/s, candidates: [yaw_rate]}
-  Ax:              {description: 纵向加速度,    unit: m/s2,  candidates: [Ax]}
-  ABS_Active:      {description: ABS 激活,      unit: "",    candidates: [ABS_Active]}
-  TCS_Active:      {description: TCS 激活,      unit: "",    candidates: [TCS_Active]}
-  BrakePedalPos:   {description: 制动踏板深度,  unit: "%",   candidates: [BrakePedalPos]}
-  ThrottlePedalPos: {description: 油门踏板深度, unit: "%",   candidates: [ThrottlePedalPos]}
+  speed_vbox:      {candidates: [speed_vbox]}
+  distance_vbox:   {candidates: [distance_vbox]}
+  wheelSpeed_FL:   {candidates: [wheelSpeed_FL]}
+  wheelSpeed_FR:   {candidates: [wheelSpeed_FR]}
+  wheelSpeed_RL:   {candidates: [wheelSpeed_RL]}
+  wheelSpeed_RR:   {candidates: [wheelSpeed_RR]}
+  yaw_rate:        {candidates: [yaw_rate]}
+  Ax:              {candidates: [Ax]}
+  ABS_Active:      {candidates: [ABS_Active]}
+  TCS_Active:      {candidates: [TCS_Active]}
+  BrakePedalPos:   {candidates: [BrakePedalPos]}
+  ThrottlePedalPos: {candidates: [ThrottlePedalPos]}
 ```
 
-BLF 侧（`signals_blf.yaml`）待真实 DBC 到位后填写 `[dbc_alias, msg_id, signal_name]` 映射，逻辑名保持不变。
+BLF 侧（`signals_blf.yaml`）同样只填 `[dbc_alias, msg_id, signal_name]` 候选，逻辑名保持不变；
+参与计算的信号（metrics.yaml 的 inputs ∪ 分段器通道）必须两侧齐全，纯观测量可以只带一侧。
 
 ## 7. 指标口径确认结论（2026-09-22）
 

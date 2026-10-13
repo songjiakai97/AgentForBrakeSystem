@@ -1,35 +1,24 @@
-# MF4 信号映射（design.md §9.6 / demo_conditions_metrics.md §6.5）
-# demo：物理通道名 = 逻辑名（合成数据按此命名写入 MF4）
-# 接入真实数据时，只需在 candidates 前面追加真实通道名
+# MF4 信号映射（design.md §9.6）
+#
+# 只回答一件事：逻辑信号在该格式里叫什么。
+# 单位与描述在 configs/signals.yaml 登记一次，这里不重复写 —— 同一个物理量
+# 写两遍必然漂移，而且漂移只有人眼能发现。
+#
+# demo：物理通道名 = 逻辑名（合成数据按此命名写入 MF4）。
+# 接入真实数据时，只需在 candidates 前面追加真实通道名。
+#
+# 覆盖度：MF4 侧可以比 BLF 侧多带观测量（也允许少带），但参与计算的信号
+# 两侧都必须有，缺失由 load_configs / load_blf_config 在启动期拦下。
 signal_maps:
-  speed_vbox:      {description: vbox 实际车速, unit: km/h, candidates: [speed_vbox]}
-  distance_vbox:   {description: vbox 距离,     unit: m,    candidates: [distance_vbox]}
-  wheelSpeed_FL:   {description: 左前轮速,      unit: km/h, candidates: [wheelSpeed_FL]}
-  wheelSpeed_FR:   {description: 右前轮速,      unit: km/h, candidates: [wheelSpeed_FR]}
-  wheelSpeed_RL:   {description: 左后轮速,      unit: km/h, candidates: [wheelSpeed_RL]}
-  wheelSpeed_RR:   {description: 右后轮速,      unit: km/h, candidates: [wheelSpeed_RR]}
-  yaw_rate:        {description: 横摆角速度,    unit: deg/s, candidates: [yaw_rate]}
-  Ax:              {description: 纵向加速度,    unit: m/s2,  candidates: [Ax]}
-  ABS_Active:      {description: ABS 激活,      unit: "",    candidates: [ABS_Active]}
-  TCS_Active:      {description: TCS 激活,      unit: "",    candidates: [TCS_Active]}
-  BrakePedalPos:   {description: 制动踏板深度,  unit: "%",   candidates: [BrakePedalPos]}
-  ThrottlePedalPos: {description: 油门踏板深度, unit: "%",   candidates: [ThrottlePedalPos]}
-
-# 图表布局约束：多行一列共享 x 轴（design.md §6.6 扩展）
-# 每个 group = 一行子图，组内信号共用一个 y 轴（同单位才有意义）
-chart_layout:
-  - label: 车速 / 轮速
-    unit: km/h
-    signals: [speed_vbox, wheelSpeed_FL, wheelSpeed_FR, wheelSpeed_RL, wheelSpeed_RR]
-  - label: 纵向加速度
-    unit: m/s2
-    signals: [Ax]
-  - label: 横摆角速度
-    unit: deg/s
-    signals: [yaw_rate]
-  - label: 踏板开度
-    unit: "%"
-    signals: [BrakePedalPos, ThrottlePedalPos]
-  - label: 激活标志
-    unit: ""
-    signals: [ABS_Active, TCS_Active]
+  speed_vbox:      {candidates: [speed_vbox]}
+  distance_vbox:   {candidates: [distance_vbox]}
+  wheelSpeed_FL:   {candidates: [wheelSpeed_FL]}
+  wheelSpeed_FR:   {candidates: [wheelSpeed_FR]}
+  wheelSpeed_RL:   {candidates: [wheelSpeed_RL]}
+  wheelSpeed_RR:   {candidates: [wheelSpeed_RR]}
+  yaw_rate:        {candidates: [yaw_rate]}
+  Ax:              {candidates: [Ax]}
+  ABS_Active:      {candidates: [ABS_Active]}
+  TCS_Active:      {candidates: [TCS_Active]}
+  BrakePedalPos:   {candidates: [BrakePedalPos]}
+  ThrottlePedalPos: {candidates: [ThrottlePedalPos]}

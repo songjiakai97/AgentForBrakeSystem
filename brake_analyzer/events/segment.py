@@ -172,6 +172,14 @@ SEGMENTERS: Dict[str, Segmenter] = {
     "seg_tcs_full_throttle": seg_tcs_full_throttle,
 }
 
+# 分段器实际读取的通道。配置层据此算出「参与计算的信号集」（§9.6）：
+# 这些通道任何数据格式都必须提供，缺了就不是判定偏严，而是根本切不出事件窗口。
+# 写在这里而不是让 configs.py 猜函数体，是因为只有本模块知道自己读了什么。
+SEGMENTER_SIGNALS: Dict[str, List[str]] = {
+    "seg_abs_full_brake": ["speed_vbox", "BrakePedalPos"],
+    "seg_tcs_full_throttle": ["speed_vbox", "ThrottlePedalPos"],
+}
+
 
 def degenerate_window(reason: str) -> EventWindow:
     """无有效事件时的退化窗口：指标层对其一律返回 missing。"""
