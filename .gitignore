@@ -6,3 +6,7 @@ __pycache__/
 
 # 合成样例可再生（scripts/generate_demo_data.py / tests/conftest.py）
 tests/data/
+
+# 外部 MCP 白名单是运维本机配置，里面可能有凭据（Bearer / 子进程 env 值）
+# （design.md §6.11）；模板 mcp.yaml.example 入库，实体文件不入库。
+configs/mcp.yaml

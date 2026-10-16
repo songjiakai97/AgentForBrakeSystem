@@ -91,12 +91,15 @@ Analysis Core
         ├── configs/metrics.yaml
         ├── configs/rules.yaml
         ├── configs/signals_*.yaml
+        ├── configs/mcp.yaml（可选）── 外部 MCP server（stdio / streamable-http）
         └── knowledge/manual + knowledge/cases
 ```
 
 约束：
 
 - 前端请求全部经由 `agent/` 编排引擎。
+- 外部 MCP server 只作为**被调用的工具来源**接入（本 Agent 是客户端，§6.11）；
+  它不参与目标识别、不参与指标计算、不参与规则判定。
 - LLM 只负责槽位抽取（从描述里取 maneuver/路面/参数）、语言化标定建议；
   「哪条工况」由配置索引精确匹配决定（§13），模型不在相似工况名之间挑。
 - 客观指标与异常判定完全由确定性内核完成。
@@ -115,6 +118,7 @@ Analysis Core
 | Web 前端 | Vue 3 + ECharts | 对话式 UI、图表 |
 | 规则引擎 | 自研规则 DSL / Pydantic 规则表 | 异常判定 |
 | LLM | openai SDK，OpenAI Compatible base_url | 标定建议生成 |
+| MCP 客户端 | `mcp` SDK（可选，仅 stdio 用 anyio 起子进程） | 接入外部工具（§6.11） |
 | 配置 | pydantic-settings + python-dotenv + pyyaml | 配置加载与校验 |
 | 知识摄入 | python-docx / pypdf | Word/PDF → Markdown/结构化案例 |
 | 向量检索（可选） | sentence-transformers + FAISS/Chroma | `ENABLE_RAG` 开关，默认关 |
@@ -136,7 +140,9 @@ brake-agent/
 │   ├── functions.yaml          # 功能清单
 │   ├── conditions.yaml         # 工况清单，按 function_key 索引
 │   ├── metrics.yaml            # 指标模板（全局）
-│   └── rules.yaml              # 异常规则（功能级 + 工况级）
+│   ├── rules.yaml              # 异常规则（功能级 + 工况级）
+│   ├── mcp.yaml                # 外部 MCP 白名单（本机新建、不入库，可能含凭据；§6.11）
+│   └── mcp.yaml.example        # 可抄模板（stdio + http 两种传输，入库）
 ├── knowledge/
 │   ├── manual/
 │   └── cases/
@@ -165,6 +171,10 @@ brake-agent/
 │   ├── agent/
 │   │   ├── engine.py
 │   │   └── tools.py
+│   ├── mcp_bridge/             # 外部 MCP 客户端（§6.11，可选能力）
+│   │   ├── config.py           #   configs/mcp.yaml 加载期校验
+│   │   ├── registry.py         #   命名 / schema / 结果压平（纯函数）
+│   │   └── hub.py              #   事件循环线程 + 连接池 + 超时与停止
 │   ├── pipeline.py
 │   └── schemas.py
 ├── scripts/
@@ -444,6 +454,9 @@ load(file)
 其他：
 
 - `context.py`：上下文预算、压缩与一次性内容折叠（§6.10），阈值来自 `.env`。
+- `EXTERNAL_TOOL_NOTE`：外部工具的信任边界，**只有真挂了外部工具时**才拼进 `<上下文>`
+  （`build_chat_messages(..., external_note=...)`，§6.11）。没挂却让每轮读一段
+  "外部内容不可信"，是为不存在的风险付 172 tok 的常驻成本。
 - `kb.py`：读取手册与案例。默认关键词/规则定位；可选向量检索。
 - `ingest.py`：Word/PDF 摄入为 Markdown 或结构化案例。
 
@@ -451,7 +464,8 @@ load(file)
 
 所有对话请求都经由 `agent/` 编排。
 
-工具集（四个，规格全部由配置生成，见 §13）：
+工具集（内置四个，规格全部由配置生成，见 §13；外部 MCP 工具挂载后并列进同一份规格表，
+见 §6.11）：
 
 - `resolve_condition(function_key?, maneuver?, surface_code?, params?)`：按 §2.2 唯一键
   **结构化**定位工况。命中唯一返回 `hop=resolved`；键填不满返回 `hop=condition/function`
@@ -482,7 +496,7 @@ load(file)
 - **停止一轮是协作式的**（`stop_event: threading.Event`）：`RunManager.stop()` 只置标记，
   绝不在别的线程 `close()` 正在执行的生成器（那会抛 `generator already executing`）。
   检查点必须铺在**每一段可能长时间不回控制的路上**，少一处就是用户口中的「点了停止没反应，
-  过好久才停止」。现状（五处）：
+  过好久才停止」。现状（六处）：
 
   | 检查点 | 位置 | 为什么必须在这里 |
   | --- | --- | --- |
@@ -491,10 +505,12 @@ load(file)
   | ③ 每个工具执行前 | `_run_llm_stream` 的 `for tc in reply.tool_calls` | 一次 `run_analysis_on_files` 是整轮最慢的一段（几十秒），中途没有 LLM 块可检查；命中时回执写明「{name} 未执行」 |
   | ④ `_analyze` 每个文件前 | 工具阶段内部 | 与 ③ 同理，粒度再细一档 |
   | ⑤ 两个非流式子请求前 | `context.py` 摘要回调、`_maybe_suggest` | 它们不在流式循环里，拿不到 `stop_event` 参数——用 `threading.local`（`self._tls.stop_event`，由 `_run_stream` 进出时设置/清空）取，命中则摘要返回空串（退化成抽取式）、标定建议标 `degraded` 直接返回 |
+  | ⑥ 每次外部 MCP 调用前 | `McpHub.call`（把 `stop_event` 一路传进去） | 外部工具是一次**同步阻塞**的第三方调用，中间没有 LLM 块也没有文件循环，是 ③ 之后新出现的最长一段无检查点路径；命中时直接返回 `stopped` 载荷、**不发给 server**（§6.11） |
 
   另有两条兜底：**socket 挂住时没有任何检查点**（阻塞在读上，Python 不在我们手里），所以
   HTTP 必须有界——流式 `STREAM_READ_TIMEOUT_SEC=60`（按相邻两块的间隔计，不限总时长）、
-  非流式 `REQUEST_TIMEOUT_SEC=120`（SDK 默认 10 分钟太久）。停止的收尾走方案 (a)：
+  非流式 `REQUEST_TIMEOUT_SEC=120`（SDK 默认 10 分钟太久）。同一条理由管着外部 MCP 调用：
+  每个 server 必须有 `timeout_sec` 上界，且加载期就拒绝没有上界的配置（§6.11）。停止的收尾走方案 (a)：
   `_finish_stopped` 封存步骤、把**已经流出的半截正文落成消息**（正文末尾
   追加「—— 用户已停止本轮（回答未完整）」，`meta.stopped=True`；正文此前只以 delta 流出，
   故同时标 `meta.streamed=True` 让前端 live 气泡让位给落库版本），未流出一个字则回一行
@@ -544,6 +560,9 @@ load(file)
 
 - 无 `OPENAI_API_KEY` 时完全绕过 LLM。
 - 离线路由 + 规则结论仍可跑通整链路。
+- **外部 MCP 工具的失败不触发这条回退**（§6.11）：`hub.call` 永不抛异常，外部挂了只回
+  一条模型读得懂的错误说明。否则"第三方进程没起来"会被记成"LLM 失败"→ 回退离线路由，
+  凭空多出一段离线结论，这是最难解释给用户的一种串味。
 
 ### 6.10 上下文预算与压缩（`llm/context.py`）
 
@@ -626,6 +645,189 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 观测：`GET /api/context/stats?cid=` 返回当前会话上下文的估算 token 与两条阈值的关系；
 `GET /api/meta` 的 `context` 字段回显生效的预算与摘要方式（`llm` / `extractive`）。
 
+### 6.11 外部 MCP 工具（`mcp_bridge/`）
+
+**方向只有一个**：本 Agent 是 MCP **客户端**，把第三方 MCP server 的工具挂进编排；
+不把自己暴露成 MCP server（§15 已排除项）。典型用法是接 MathWorks 的
+MATLAB MCP Server，让模型能 `evaluate_matlab_code` / `run_matlab_file`，
+把"标定建议"落到能真跑一遍 MATLAB 的高度。
+
+三层，各层职责单一，因为这三类错误的排查手段完全不同：
+
+| 层 | 文件 | 性质 | 出错的形态 |
+| --- | --- | --- | --- |
+| 配置 | `mcp_bridge/config.py` | 加载期校验 | 配错 → **拒绝启动** |
+| 注册表 | `mcp_bridge/registry.py` | 纯函数，无 asyncio 无网络 | 命名/schema/压平 → 单测覆盖 |
+| 连接池 | `mcp_bridge/hub.py` | 专用事件循环线程 | 连不上/超时 → 只记状态，不抛 |
+
+#### 配置：`configs/mcp.yaml` 是运维白名单，不是用户输入
+
+写的是"允许往这台机器上挂什么"（可执行文件路径、URL、要透传的环境变量），因此
+**没有 API 能改它**，前端也传不进任何参数；改文件 + 重启生效，或 `POST /api/mcp/reconnect`
+让对方服务刚起来时不必重启。文件不存在 = 没有外部工具，**不是错误**（离线单机是正常形态）。
+
+结构（完整注释见 `configs/mcp.yaml.example`）：
+
+```yaml
+mcp_servers:
+  - name: matlab                 # [a-z0-9][a-z0-9_-]{0,31}，要做工具名前缀
+    transport: stdio             # stdio | http，默认 stdio
+    command: /opt/matlab-mcp-server/matlab-mcp-server-linux-x64
+    args: ["--matlab-display-mode=nodesktop"]
+    env: {LM_LICENSE_FILE: "..."}   # 额外给的键，见下方"环境"一条
+    timeout_sec: 120             # 单次调用上界，0.5~300
+    tools: [evaluate_matlab_code, check_matlab_code]   # 白名单，空 = 全接
+    exclude: []
+    desc_chars: 400              # 该 server 工具描述进 prompt 的字数上限
+  - name: teamkb
+    transport: http
+    url: http://10.0.0.7:8123/mcp
+    headers: {Authorization: "Bearer ..."}
+    enabled: false               # 留着配置但不连
+```
+
+加载期拒绝（`ConfigError`，与 §6.1 同一异常、同一"不启动"后果）：未知顶层段、未知键、
+非法 name/transport/enabled/desc_chars、`timeout_sec` 越界、stdio 缺 `command`、
+http 的 url 不是 `http(s)://`、服务重名、`tools` 内有重复项。
+**连不上不在这里拒**——第三方进程起不来是常态，属于运行期状态，看 `GET /api/mcp`。
+
+环境变量的口径值得说清，因为它和直觉相反：`env` 里写的是**额外**要给的键，
+stdio 子进程实际拿到的是 SDK 的 `get_default_environment() | env`。前者是一份安全白名单
+（POSIX：`HOME`/`LOGNAME`/`PATH`/`SHELL`/`TERM`/`USER`；Windows 另含 `APPDATA`/
+`LOCALAPPDATA`/`PATHEXT`/`SYSTEMROOT`/`TEMP` 等）。也就是说：
+
+- `PATH` 是有默认值的 → 依赖 PATH 找 MATLAB 的 server 不会被本实现坑到（实测子进程
+  环境键为 `HOME/LC_CTYPE/PATH/TERM` + 配置里点名的键）；
+- 本进程的 `OPENAI_API_KEY` **不会**进去 → 这是刻意不做全量继承的理由；
+- 其它变量（MATLAB 的 `MW_MCP_SERVER_*`、`LM_LICENSE_FILE`）必须在这里点名，
+  否则子进程看不到。
+
+MATLAB 侧还要注意：`--matlab-root` / `--initialize-matlab-on-startup` /
+`--initial-working-folder` 这类是 **server 的 CLI 参数**（写进 `args`），它们各有
+环境变量等价形式（前缀 `MW_MCP_SERVER_` + 大写 + `-`→`_`，CLI 优先）；
+首次启动 MATLAB 很慢，`timeout_sec` 默认 20 s 不够，建议 120~300；
+`--matlab-session-mode=existing` 需要一次性执行 `matlab-mcp-server --setup-matlab`
+安装 MATLAB MCP Server Toolbox，并在已运行的 MATLAB 里 `shareMATLABSession()`。
+
+#### 命名与规格注入
+
+外部工具在 LLM 眼里叫 `mcp__<server>__<清洗后的原名>`：
+
+- 内部四个工具名（`resolve_condition` 等）都不含 `__`，所以带前缀的名字**结构上不可能**
+  与内部工具撞车，不需要维护"哪些名字被占了"。
+- 原名先按 `[A-Za-z0-9_-]` 清洗（`get file`→`get_file`，全中文→`tool`），因为
+  OpenAI 兼容端点对 function name 的实际约束是 `[a-zA-Z0-9_-]{1,64}`；不清洗的后果是
+  报错发生在 LLM 请求里 → 整轮被记成"LLM 失败"→ 回退离线路由，用户完全看不出是工具名的锅。
+- 清洗后撞名（`get file` 与 `get/file`）时**加序号而不是覆盖**（`get_file` / `get_file_2`），
+  且序号先占位再截断，保证截完仍 ≤64：一个坏名字会让整份工具表被端点拒掉。
+- 名字要截断时截原名、保前缀——前缀是"这是外部工具"的唯一线索。
+- 描述注入前剥掉 `<...>` 标签 + 压空白 + 按 `desc_chars` 截断，并加 `[外部 MCP · <server>]`
+  前缀。理由是描述会被拼进工具规格，等于让第三方 server 给我们的模型写提示词；
+  去标签防它仿冒本仓库自己的 `<会话数据文件>`／`<上下文>` 标签。这**不是**完整防御（§15）。
+- `input_schema` 只保证"一定是一个合法的 object schema"（非 object 改 type、
+  `properties` 缺失补空、`required` 里点名不存在的键剔掉），其余键原样透传。
+- 命名在汇总期**全局**算一次（`_rebuild_specs`），不是各 server 各算：跨 server 的
+  同名工具只有看到彼此才能正确编号。连接期只做"清洗 + 截断"，汇总期不二次截断。
+
+#### 线程模型
+
+编排引擎在 `RunManager` 工作线程上产出**同步生成器**，而 MCP SDK 只有异步 API。
+每次调用 `asyncio.run(...)` 最简单，但 stdio 连接无法跨调用复用——每轮工具调用都要
+重起进程 + 重握手，冷启动比调用本身还贵。因此：
+
+- 一条常驻事件循环线程 `mcp-hub` 拥有所有 client；工作线程用
+  `run_coroutine_threadsafe` + `future.result(timeout=...)` 投递。
+- 因此三处"看着啰嗦"是必须的：每个协程外面包 `wait_for`（对端挂住时 future 永不完成，
+  工作线程白占着）、投递失败/关闭失败时显式 `coro.close()`（否则解释器只在 GC 时报
+  "coroutine was never awaited"，把真错误盖在警告下面）、client 只在事件循环线程上
+  创建与销毁（anyio 任务组不允许跨 loop 关闭）。
+- `start()` 等 `_ready` 事件而不是只建线程：`_loop` 要等线程真跑起来才赋值，不等它就投
+  协程得到"MCP 事件循环未启动"——这个竞态在真实启动路径上几乎必现。
+- 启动期 `connect_all()` **刻意不阻塞**（后台线程 `mcp-connect`）：uvicorn 不该为一个
+  没起来的第三方进程多等 15 s，更不该因此起不来。代价是首屏的 `/api/meta` 里
+  `mcp.tools` 可能是 0 而并非"连不上"——前端用 `pollMcp()` 读 `GET /api/mcp` 的
+  `servers[].status`，等它进终态再回读 `/api/meta`（§8.1）。
+
+#### 失败口径（这是本节最重要的一条）
+
+外部 server 是**可失败依赖**：`hub.call()` 设计上**永不抛异常**，任何失败都变成
+`{"ok": false, "source": "mcp", "note": "..."}` 回灌给模型。原因连着 §6.9 的降级设计——
+一旦外部失败冒出异常，引擎会把它记成"本轮 failed"并**回退离线路由**，凭空多出一段离线
+结论；用户问"MATLAB 里这个函数怎么算的"，得到的却是规则引擎的标定建议，还以为是答案。
+
+| 情形 | 结果 |
+| --- | --- |
+| 工具名未注册（服务已断开） | `ok=false` + note「外部工具 X 未注册」 |
+| 参数不是对象/坏 JSON | `ok=false` + note「参数不合法：…」，不碰网络 |
+| 超过 `timeout_sec` | `ok=false, timeout=true` + note 明确写「服务端可能仍在执行，不要自动重试」 |
+| 传输异常 | `ok=false` + `异常类型: 消息`（截断，不带 traceback） |
+| server 自报 `is_error` | `ok=false` + note「不要当成事实引用」，并**计入 failures** |
+| 多个 text 块 | 按顺序拼接（只取第一块等于丢掉答案） |
+| image/audio/resource 块 | 换成一句说明（本 Agent 无多模态通道，塞 base64 只烧 token） |
+| 序列化后 >4000 字 | 先丢 `data` 再截 `text`，绝不留半截坏 JSON |
+
+`is_error` 计入失败数这条是为了 `GET /api/mcp` 不说谎：传输成功但工具一直失败的 server，
+不该显示成一片绿。
+
+#### 停止与超时
+
+§6.9 的协作式停止依赖"每步之间都有检查点"。一次阻塞的外部调用**天然没有检查点**，
+所以这里补两道：调用前自检 `stop_event`（hub 内是第二道，并发下事件可能刚置位，
+命中就返回 `stopped` 而不执行），以及每个外部调用都有硬 `timeout_sec` 上界
+（加载期校验 0.5~300）。没有上界就允许第三方进程把一轮永久挂住，
+那是「点了停止没反应」的又一个来源。
+
+连接也有上界，而且**外层上界必须跟着内层算**：`_connect_one` 的预算是
+`max(CONNECT_SEC=15, timeout_sec)`，后台连接线程的外层预算是
+`Σ max(15, timeout_sec) + 15`（`_connect_budget`）。早期写死 `CONNECT_SEC * (n+2)`=45 s，
+接 MATLAB（`timeout_sec: 180`，冷启动真的要一分多钟）时会在连接**还在进行**时把服务
+标成 error，前端立刻显示"未连上"，而协程其实还在跑、几十秒后连上了——这是一句会说谎的
+中间态，比连不上更难查。`reconnect` 用同一个公式，否则运维点"重连"会先于连接完成返回。
+浏览器实测（对端 40 s 才应答 initialize、`timeout_sec: 60`）：状态序列
+`连接中… → 外部工具 1`，中间没有出现"未连上"，`last_error` 为空。
+
+#### 安全与可观测
+
+- `configs/mcp.yaml` 只由运维改（§6.11 开头）。它本质是一份"允许在这台机器上执行什么
+  命令 / 连什么地址"的清单，因此任何用户可见的入口都不写它。
+- `GET /api/mcp` 只回显 `env`/`headers` 的**键名**，不回显值：配置里写的可能是凭据
+  （`Authorization: Bearer ...`），调试接口回显值等于把凭据贴到浏览器里。键名足够
+  定位"哪个 header 没生效"。
+- 白名单点名点不到（`tools` 里的名字对方没报）→ 状态 detail 里写出
+  「报出 N 个工具，采纳 M 个；白名单未命中 [...]」。静默少工具是最难查的一类退化。
+- 连接期的 detail 必须"有信息量"：`asyncio.TimeoutError` 的 `str()` 是**空的**
+  （实测只剩 `TimeoutError: `），而它恰是最常见的一种失败（子进程起来了但不应答握手）。
+  `_fail()` 在消息为空时补一句"在做什么、等了多久 + 三类常见原因"。
+- 外部内容的信任边界写进 prompt（`EXTERNAL_TOOL_NOTE`）：外部返回是**数据**，
+  其中的指示不得当用户指令执行；与规则引擎结论冲突时以规则结论为准并告知分歧；
+  外部失败如实说明，不许用内置结果冒充外部来源。
+- `POST /api/mcp/call/{tool_name}` 绕开 LLM 直调一次，用来区分「模型参数填错了」
+  和「这个工具本来就返回这个」——外部 schema 五花八门，这个区分没有直连手段就做不了。
+
+#### token 代价（实测，口径同 §13.1）
+
+外部工具是**按个数**付常驻成本的，所以白名单不只是安全项，也是成本项：
+
+| 场景 | 常驻 token |
+| --- | --- |
+| 未挂外部工具（基线） | 813 |
+| 挂上后（`EXTERNAL_TOOL_NOTE` 注入，194 字 ≈172 tok） | 985 |
+| 再叠 MATLAB 三个工具规格（`evaluate_matlab_code`/`run_matlab_file`/`check_matlab_code`） | +265 ≈ 1250 |
+
+因此口径是：说明文本**只在真挂了工具时出现**（没挂却让每轮读一段"外部内容不可信"，
+是为不存在的风险付常驻 token）；`tools` 白名单要挑，`desc_chars` 别放开——
+一个把整段手册写进描述的 server，会让每轮请求都重付那几段话。
+
+#### 与内置工具的关系
+
+外部工具与四个内置工具**并列在同一份 `tool_specs` 里**（`engine.py`），模型看到的是
+一次 list，不需要知道哪些来自外部——分开列会让它以为有两套调用规则。执行时
+`exec_tools` 查不到且 `mcp.is_external(name)` 才走 hub，查不到又不是外部的仍是
+「未知工具」。挂载时向 `steps` 落一条「外部工具已挂载：N 个」并把名字列进 detail，
+前端折叠区可见（§8.3）；每次外部调用落一条 `名字 → 外部 MCP`（失败时带「（失败）」，
+`ok`/`warn` 两色）。没配 `mcp.yaml` 时 `NO_HUB` 的规格为空，编排路径与接入前逐字节一致
+（`tests/test_mcp.py` 有断言：不传 mcp 时 `tool_specs` 完全相同）。
+
 ---
 
 ## 7. Web API 设计
@@ -679,6 +881,9 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 | GET | `/api/analyses/{id}/timeseries` | 事件窗口内信号时序 |
 | GET | `/api/kb` | 知识库只读浏览（手册 section + 案例清单） |
 | GET | `/api/context/stats` | 当前会话上下文的估算 token 与预算阈值（调试用，§6.10） |
+| GET | `/api/mcp` | 外部 MCP 服务状态：连没连上、报了几个工具、白名单有没有落空、调用与失败计数（§6.11）。`env`/`headers` 只回显**键名** |
+| POST | `/api/mcp/reconnect?name=` | 手动重连（改了 mcp.yaml 或对方服务刚起来）。同步等待并返回新状态；`name` 省略 = 全部；没配任何服务 400 |
+| POST | `/api/mcp/call/{tool_name}` | 调试用：绕开 LLM 直调一个外部工具，用来区分「模型参数填错了」和「工具本来就这样返回」（§6.11）。非外部工具名 404 |
 | GET | `/api/debug/traces` | 调试 trace 列表 |
 | GET | `/api/debug/traces/{tid}` | 单条 trace 详情 |
 | GET | `/debug` | 调试页 |
@@ -708,6 +913,20 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
 - 右侧：聊天主区。
 - 底部：输入区，含「+」上传按钮、多行输入、发送。
 - 输入区上方：待发送文件 chips、候选面板。
+- 顶栏徽标：除引擎徽标（`LLM: <model>` / 离线模式）外，挂了外部 MCP 工具时多一枚
+  紫色「外部工具 N」（`.badge.mcp`，N = 本轮真能调用的外部工具数）。配了 `mcp.yaml`
+  但还没挂上任何工具时是琥珀色（`.badge.mcpoff`），分两种：正在后台连接 →
+  「外部工具连接中…」；连接已结束仍为 0 → 「外部工具未连上」，`title` 指路 `GET /api/mcp`。
+  **没配 mcp.yaml 时这一枚整个不出现**——"这台机器没有这个能力"和"能力掉了"是两件事，
+  不能共用一个显示。理由：外部工具直接改变模型能说什么（它能"换算单位"、"跑一段 MATLAB"
+  了），不显示就等于用户不知道答案是从哪来的，掉线时也不知道。
+- 因为 §6.11 的连接是后台的（web 启动不等第三方进程），首屏拿到的 `meta.mcp.tools`
+  可能是 0 而并非"连不上"。前端 `pollMcp()` 每 3 秒读一次 `GET /api/mcp` 的
+  `servers[].status`，全部进入终态（ok/error/disabled）后回读一次 `/api/meta` 拿权威工具数。
+  次数上界不写死，由 `mcpMaxTries()` 按 `/api/mcp` 回报的各条 `timeout_sec` 现场算
+  （`Σ max(15, timeout_sec)/3 + 5` 次），因为 hub 的连接预算就是同一个公式（§6.11）：
+  MATLAB 那类连接要上百秒，写死 30 s 轮询会让"第 180 秒终于连上"永远显示成"未连上"。
+  实测（对端 40 s 才应答握手、`timeout_sec: 60`）状态序列只有 `连接中… → 外部工具 1`。
 
 ### 8.2 目标确认交互
 
@@ -1126,6 +1345,13 @@ demo 约定（`configs/signals_blf.yaml` + `configs/dbc/brake_demo.dbc`）：
   且 BLF 场景的 `seed` 显式取该场景在 MF4 `scenario_matrix()` 里的下标 —— 剖面同源，
   两条加载路径的指标差异才只来自 CAN 量化（`tests/test_blf_demo.py` 卡住状态一致 + 数值容差）。
 
+### 9.7 mcp.yaml（外部 MCP 白名单，可选）
+
+与其它 `configs/*.yaml` 不同：**它不是数据配置，是运维配置**——内容是"允许在这台机器上
+起什么进程、连什么地址、给子进程哪些环境变量"。因此没有写入 API，也不接受前端传参；
+文件可以不存在（= 没有外部工具，正常形态）。结构、校验项、环境透传口径全部见 §6.11，
+可抄的模板见 `configs/mcp.yaml.example`。
+
 ---
 
 ## 10. 指标判定与 pick 实现
@@ -1476,6 +1702,7 @@ Trace 结构：
 不是清单本身变贵了：清单只是换了位置。真正变的是**形状**——常驻块不再随批数抖动，多批的
 编号清单从"每轮常驻付费"变成"当轮付费"，历史消息里存的是用户原话（不带清单），因此不会
 堆积过期清单，压缩时也不会把一份过期清单当正文摘要掉。全部仍远低于 `CONTEXT_COMPRESS_TOKENS`。
+表中是**未挂外部工具**的口径；挂上之后基线 813 → 985，再加三个 MATLAB 规格约 1250，实测见 §6.11。
 测试里压缩阈值同样不写死数字，而是按空会话实测地板放大得出（`tests/test_context.py`），
 否则测的是"地板有多高"而不是"未超限不压"。
 
@@ -1579,13 +1806,33 @@ python scripts/generate_demo_blf.py       # → configs/dbc/brake_demo.dbc + tes
 python scripts/generate_demo_blf.py --period 0.02   # 改发送周期（默认 10 ms，与 MF4 栅格一致）
 ```
 
+接入外部 MCP（以 MathWorks 的 MATLAB MCP Server 为例，**代码不用改**）：
+
+```bash
+cp configs/mcp.yaml.example configs/mcp.yaml
+# 只留需要的那条，把 command 换成本机二进制路径，按本机改 args / env / timeout_sec
+python -m uvicorn web.main:app --port 8000
+curl -s localhost:8000/api/mcp | python -m json.tool     # 看 status / detail / 工具清单
+curl -s -X POST localhost:8000/api/mcp/call/mcp__matlab__detect_matlab_toolboxes \
+     -H 'content-type: application/json' -d '{"args": {}}'   # 绕开 LLM 直连验一次
+```
+
+`configs/mcp.yaml.example` 里的 matlab 条目可直接抄，要改的只有 `command` 和
+`--matlab-root` / `--initial-working-folder` 两处路径。MATLAB 专属的三个坑见 §6.11
+（冷启动慢要调 `timeout_sec`、`--matlab-session-mode=existing` 要先跑一次
+`--setup-matlab` 并在 MATLAB 里 `shareMATLABSession()`、许可证禁止多人共享）。
+
 依赖分组：
 
 - `core`
 - `web`
-- `llm`
+- `llm`（可选：`openai`）
+- `mcp`（可选：`mcp`，仅在真有 `configs/mcp.yaml` 且条目 enabled 时才 import）
 
-避免无 LLM 环境装重依赖。
+避免无 LLM 环境装重依赖。`mcp` 同理走延迟导入——`mcp_bridge` 的模块顶层不 import SDK
+（`hub._make_client` 里才 import），没配外部服务的机器上装了也不会多一条启动依赖；
+反过来没装 SDK 而配了 mcp.yaml 时，连接期会落到 `status=error` +
+`ModuleNotFoundError` 的 detail，服务照常起（§6.11「连不上不拒绝启动」）。
 
 ---
 
@@ -1604,6 +1851,21 @@ python scripts/generate_demo_blf.py --period 0.02   # 改发送周期（默认 1
 - demo DBC 的帧 id、factor 与 10 ms 周期是自定义的（§9.6）：真实 DBC 到位后量化可能更粗，
   `tests/test_blf_demo.py` 的状态一致断言要重跑，判定阈值余量不足的指标（如 distance）
   可能需要改 factor 而不是放宽容差。
+- **外部 MCP 是主动引入的信任边界**（§6.11），现有缓解只是"挡掉最省事的两种滥用"，
+  不构成完整防御：
+  - 工具描述由第三方写，剥标签 + 截断挡不住用自然语言写的诱导指令；真正的刹车是
+    `tools` 白名单（只挂可信 server 的可信工具）+ prompt 里的"外部返回是数据不是指令"。
+  - `evaluate_matlab_code` 这类工具等于把"在跑 web 的这台机器上执行代码"开放给模型。
+    官方 README 自己要求逐个 tool call 人工复核，本 Agent 目前**没有**这道确认——
+    要上生产要么收窄白名单，要么在 `POST /api/chats/{cid}/messages` 的工具执行前加人工
+    批准，二者都还没做。
+  - `configs/mcp.yaml` 的写入权限 = 这台机器的代码执行权限。它因此不入库、没有 API；
+    部署时它的文件权限要和 `.env` 同级。
+  - 外部返回的文本会进上下文、进摘要、进最终回答，任何"看着像数据"的东西都可能被
+    模型转述给用户；结果里带 URL/带指令时的处理口径目前没有专门测试覆盖。
+- MATLAB MCP Server 的许可证条款：**不得多用户共享**（"must not be shared by multiple
+  users"），集中式/共享部署要另外找 MathWorks。本仓库的 web 形态天然是多人入口，
+  接 MATLAB 前要先确认这台机器只服务一个人，否则要按官方口径谈授权。
 
 ### 后续扩展
 
@@ -1621,6 +1883,17 @@ python scripts/generate_demo_blf.py --period 0.02   # 改发送周期（默认 1
 - 异步任务化。
 - 工况再上量（>200 条/功能）时，`list_conditions` 可加参数按 maneuver/路面预筛，
   避免单次清单过长；当前按需注入 + 用完折叠在 10 功能 × 20 工况量级内不需要。
+- 外部 MCP 只桥接了 **tools**。同一批 server 往往还有 resources / prompts 两类能力
+  （MATLAB MCP Server 就提供 `guidelines://coding` 与 `guidelines://plain-text-live-code`
+  两份编码规范）。接 resource 的前提是"注入哪一段"有明确规则——否则又是常驻 token
+  的失控口子；先按需取（做成一个 `mcp__<server>__read_resource` 型工具）再考虑自动注入。
+- 外部调用的**人工批准**（§15 风险条）：给 stdio 的高危工具加一次前端确认，
+  和现有的功能/工况面板是同一套交互，能复用。
+- 外部 server 掉线后的**自动重连**：现在只有启动期后台连一次 + `POST /api/mcp/reconnect`
+  手动重连。理由是自动重连会和"用户在界面上刚配好"抢时序，先给手动入口够用；
+  要做的话需要指数退避并区分"对方没起来"和"配置写错了"（后者的 detail 已经能定位）。
+- 多个 server 的工具数上去后，`tool_specs` 会挤掉内置工具的 enum 预算——那时需要
+  按会话/按功能做外部工具的按需挂载（现在只有 `tools`/`exclude` 这种静态白名单）。
 
 ### 已排除项
 
@@ -1632,3 +1905,8 @@ python scripts/generate_demo_blf.py --period 0.02   # 改发送周期（默认 1
 - 让模型在工况名之间做相似度挑选来定目标（150 条量级实测会把同名不同速度的工况
   并列在候选里，无法区分）；`recommend_targets` 的打分只作兜底，不作定案依据。
 - 多维 context 匹配（统一为 profile 字符串）。
+- **把本 Agent 自己暴露成 MCP server**（只作为客户端接外部工具，§6.11）。理由不是难度，
+  是方向：本 Agent 的价值在"确定性内核 + 标定结论"，把它做成别人的工具会引入第二套
+  目标识别入口（外部调用方没有功能/工况面板来消歧），而 §13 的"命中唯一才开跑"这条
+  硬约束在跨进程调用里没法由用户确认补上。真有对外调用需求时应该用现有 REST API，
+  而不是再造一个入口。

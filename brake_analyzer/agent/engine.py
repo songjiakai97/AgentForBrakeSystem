@@ -23,6 +23,7 @@ from ..llm.context import ContextBudget, ContextCompressor
 from ..llm.kb import KnowledgeBase
 from ..llm.prompts import (
     TOOL_PAYLOAD_CLIP_CHARS,
+    EXTERNAL_TOOL_NOTE,
     MISSING_REASON_LEGEND,
     build_chat_messages,
     build_tool_specs,
@@ -33,19 +34,23 @@ from ..llm.prompts import (
     summarize_request,
     suggestion_prompt,
 )
+from ..mcp_bridge import NO_HUB
 from ..pipeline import NoDataError, analyze_signals
 from ..schemas import AnalysisResult
 
 
 class ChatEngine:
     def __init__(self, cfg: AppConfigs, llm: LlmClient, kb: KnowledgeBase, store,
-                 budget: Optional[ContextBudget] = None, blf_cfg=None):
+                 budget: Optional[ContextBudget] = None, blf_cfg=None, mcp=None):
         self.cfg = cfg
         self.llm = llm
         self.kb = kb
         self.store = store
         # BLF 侧配置（signals_blf.yaml 校验结果）；None 时 .blf 文件按"未启用 BLF"报错
         self.blf_cfg = blf_cfg
+        # 外部 MCP 工具池（§6.11）。None → NO_HUB：没配 mcp.yaml 时规格为空，
+        # 编排路径与接入前完全一致，不额外写分支
+        self.mcp = mcp or NO_HUB
         # Loader 按扩展名复用：BLFLoader 构造时要解析 DBC，逐文件新建是纯浪费
         self._loaders: Dict[str, object] = {}
         self.budget = budget or ContextBudget.from_env()
@@ -219,7 +224,9 @@ class ChatEngine:
             for m in chat.messages[:-1]
         ]
         raw = build_chat_messages(self.cfg, history, text, file_names, selected,
-                                  files=files)
+                                  files=files,
+                                  external_note=(EXTERNAL_TOOL_NOTE
+                                                 if self.mcp.tool_specs() else ""))
         messages, step = self._fit_context(chat, raw)
         if step is not None:
             yield self._mevent(step)
@@ -247,6 +254,16 @@ class ChatEngine:
         }
         # 工具规格由配置生成（维度/工况 id 作 enum），已选定功能时进一步收窄取值域
         tool_specs = build_tool_specs(self.cfg, scope_function=chat.selected_function)
+        # 外部 MCP 工具并列进同一份规格表（§6.11）：模型看到的是一次 list，
+        # 不需要知道哪些来自外部——分开列会让它以为有两套调用规则。
+        # 名字带 mcp__ 前缀，与内部四个工具（都不含 __）结构上不可能撞车。
+        ext_specs = self.mcp.tool_specs()
+        if ext_specs:
+            tool_specs = tool_specs + ext_specs
+            yield self._mevent(self._step_on(chat, [(
+                f"外部工具已挂载：{len(ext_specs)} 个",
+                "、".join(s["function"]["name"] for s in ext_specs)[:600],
+                "info")]))
         previewed = False   # 是否已向用户流出了正文预览
         preview_buf: List[str] = []   # 已流出的正文，停止时按方案 (a) 落库
         try:
@@ -328,7 +345,16 @@ class ChatEngine:
                     arg_s = json.dumps(args, ensure_ascii=False)[:160]
                     yield self._mevent(self._step_on(chat, [(f"调用工具 {name}", f"参数: {arg_s}", "run")]))
                     fn = exec_tools.get(name)
-                    if fn is None:
+                    if fn is None and self.mcp.is_external(name):
+                        # 外部 MCP 工具（§6.11）。hub.call 设计上永不抛异常：外部挂了
+                        # 要给模型一条读得懂的错误说明，而不是让整轮 failed → 回退离线
+                        payload = self.mcp.call(name, args, stop_event=stop_event)
+                        ok = bool(payload.get("ok"))
+                        yield self._mevent(self._step_on(chat, [(
+                            f"{name} → 外部 MCP" + ("" if ok else "（失败）"),
+                            (str(payload.get("text") or payload.get("note") or ""))[:200],
+                            "ok" if ok else "warn")]))
+                    elif fn is None:
                         payload = {"error": f"未知工具 {name}"}
                         yield self._mevent(self._step_on(chat, [(f"{name} 失败", "未知工具", "error")]))
                     else:

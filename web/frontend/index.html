@@ -27,6 +27,8 @@ body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-ser
 .badge{padding:2px 8px;border-radius:10px;font-size:11px}
 .badge.offline{background:#33415a;color:#cbd5e1}
 .badge.llm{background:#064e3b;color:#6ee7b7}
+.badge.mcp{background:#2e1065;color:#c4b5fd}
+.badge.mcpoff{background:#3f2d10;color:#fbbf24}
 .msgsWrap{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
 .msgs{flex:1;min-height:0;overflow:auto;padding:18px 8%}
 .msg{margin-bottom:14px;display:flex;flex-direction:column}
@@ -161,6 +163,17 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
   <div class="main">
     <div class="topbar">
       <span class="badge" :class="meta.engine">{{meta.engine==='llm' ? ('LLM: '+(meta.model||'')) : '离线模式（规则链路）'}}</span>
+      <!-- 外部工具是"这轮能用什么"的一部分：不显示就等于用户不知道 Agent 为什么会换算。
+           配了却没连上也必须露出来（灰底"未连上"），否则就是静默少能力 -->
+      <span v-if="meta.mcp && meta.mcp.tools" class="badge mcp"
+            :title="'外部 MCP 工具：GET /api/mcp 看每个服务的连接状态与失败原因'">
+        外部工具 {{ meta.mcp.tools }}
+      </span>
+      <span v-else-if="meta.mcp && meta.mcp.configured" class="badge mcpoff"
+            :title="mcpProbing ? '外部 MCP 正在后台连接（服务启动不等第三方进程），再多等几秒'
+                                : '配置了 MCP 服务但一个都没连上：本轮只有内置工具。原因看 GET /api/mcp'">
+        {{ mcpProbing ? '外部工具连接中…' : '外部工具未连上' }}
+      </span>
       <span v-if="chat" style="margin-left:auto;font-size:11px">
         工况: {{ chat.selected_condition || '—' }} <span v-if="chat.selected_profile">· 档位 {{chat.selected_profile}}</span>
       </span>
@@ -378,6 +391,9 @@ createApp({
     otherText:{}, pfSel:{}, opened:{}, openState:{},
     live: blankLive(), lastSeq: 0, currentRunId: '', runCid: '', stopping: false,
     notice: '',
+    // 外部 MCP 在后台连接（§6.11：web 启动不等第三方进程），所以首屏的 meta 里
+    // tools 可能还是 0。不轮询的话"还在连"会一直显示成"未连上"——那是个谎。
+    mcpProbing:false, mcpTries:0,
     chartData:null, chartTitle:'', chartGroups:[], chartHidden:[], chartFull:null, _chart:null,
     // 与后端 _MISSING_REASON_CN / prompts.MISSING_REASON_LEGEND 同一口径：
     // missing 的成因决定建议是「补测通道」还是「重做试验」，界面上不能都写成缺失。
@@ -417,6 +433,7 @@ createApp({
   },
   async mounted(){
     try{ this.meta = await (await fetch('/api/meta')).json(); }catch(e){}
+    this.pollMcp();
     try{ this.samples = await (await fetch('/api/samples')).json(); }catch(e){}
     await this.loadChats();
     const h = location.hash.match(/^#\/chat\/(\w+)/);
@@ -424,7 +441,38 @@ createApp({
     else if(this.chats.length) this.openChat(this.chats[0].chat_id);
     else await this.newChat();
   },
+  beforeUnmount(){ if(this._mcpTimer) clearTimeout(this._mcpTimer); },
   methods:{
+    // 外部 MCP 是后台连的（§6.11：web 启动不等第三方进程），首屏 meta 里 tools=0
+    // 不代表"连不上"。不刷的话"还在连"会永远显示成"未连上"，那是个谎。
+    // 每 3 秒读一次 GET /api/mcp 的 servers[].status，全部进入终态（ok/error/disabled）
+    // 后回读一次 /api/meta 拿权威工具数。
+    // 轮询上界不写死：hub 的连接预算是 Σ max(15, timeout_sec) + 15，接 MATLAB
+    // （timeout_sec 180~300，冷启动真的要一分多钟）时比固定值长得多。写死 30s 会让
+    // "第 180 秒终于连上"永远显示成"未连上"——那恰好是唯一那个用户真会遇到的场景。
+    // 所以按 /api/mcp 回报的 timeout_sec 现场算，再加 5 次余量兜住 fetch 本身失败。
+    mcpMaxTries(servers){
+      const budget = (servers || []).reduce((a, s) =>
+        (s.status === 'disabled' ? a : a + Math.max(15, s.timeout_sec || 15)), 15);
+      return Math.ceil(budget / 3) + 5;
+    },
+    pollMcp(){
+      const st = this.meta && this.meta.mcp;
+      if(!st || !st.configured || st.tools){ this.mcpProbing = false; return; }
+      this.mcpProbing = true;
+      this._mcpTimer = setTimeout(async () => {
+        let pending = true, servers = [];
+        try{
+          const s = await (await fetch('/api/mcp')).json();
+          servers = s.servers || [];
+          pending = servers.some((x) => x.status === 'pending');
+        }catch(e){}
+        if(++this.mcpTries > this.mcpMaxTries(servers)){ this.mcpProbing = false; return; }
+        if(pending){ this.pollMcp(); return; }
+        this.mcpProbing = false;
+        try{ this.meta = await (await fetch('/api/meta')).json(); }catch(e){}
+      }, 3000);
+    },
     md(t){
       if(!t) return '';
       // marked 只做解析，DOMPurify 兜底：库缺失则退回转义纯文本，

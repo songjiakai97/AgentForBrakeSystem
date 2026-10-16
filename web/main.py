@@ -26,6 +26,7 @@ from brake_analyzer.llm.client import LlmClient, TraceStore  # noqa: E402
 from brake_analyzer.llm.context import ContextBudget  # noqa: E402
 from brake_analyzer.llm.kb import KnowledgeBase  # noqa: E402
 from brake_analyzer.llm.prompts import build_chat_messages  # noqa: E402
+from brake_analyzer.mcp_bridge import McpHub, load_mcp_config  # noqa: E402
 from brake_analyzer.schemas import json_safe  # noqa: E402
 from web.runs import RunManager  # noqa: E402
 from web.store import Store  # noqa: E402
@@ -81,7 +82,19 @@ try:
     BUDGET = ContextBudget.from_env()
 except ValueError as e:
     raise RuntimeError(f"上下文预算配置无效，服务拒绝启动：{e}")
-ENGINE = ChatEngine(CFG, LLM, KB, STORE, budget=BUDGET, blf_cfg=BLF_CFG)
+
+# 外部 MCP 服务（§6.11）：configs/mcp.yaml 是运维白名单，缺失 = 没有外部工具。
+# 与 BLF 配置同一口径：**结构非法拒绝启动**（配置写错却静默少一批工具，
+# 用户只会觉得"Agent 突然不会用了"）；但**连不上不拒绝启动**——第三方进程
+# 起不来是常态，那属于运行期状态，由 /api/mcp 显示。
+MCP_CONFIG_PATH = os.path.join(CONFIG_DIR, "mcp.yaml")
+try:
+    MCP_SPECS = load_mcp_config(MCP_CONFIG_PATH)
+except ConfigError as e:
+    raise RuntimeError(f"MCP 配置加载失败，服务拒绝启动：{e}")
+MCP_HUB = McpHub(MCP_SPECS)
+
+ENGINE = ChatEngine(CFG, LLM, KB, STORE, budget=BUDGET, blf_cfg=BLF_CFG, mcp=MCP_HUB)
 # 一轮 = 一个后台任务：与 HTTP 连接解耦，刷新/断网不再丢本轮回复
 RUNS = RunManager()
 
@@ -108,6 +121,22 @@ def _ensure_demo_data():
             importlib.import_module(module).generate_all(data_dir)
         except Exception as e:  # 数据缺失不阻止服务启动
             print(f"[warn] demo 样例生成失败({ext}): {e}")
+
+
+@app.on_event("startup")
+def _connect_mcp():
+    """后台连外部 MCP（§6.11）。
+
+    刻意不 await：一个第三方进程起不来（没装、路径错、缺 node）不该让 web 启动
+    多等 15 秒，更不该让它起不来。状态由 GET /api/mcp 显示，前端轮询看到变 ok。
+    """
+    if MCP_HUB.configured:
+        MCP_HUB.connect_all()
+
+
+@app.on_event("shutdown")
+def _shutdown_mcp():
+    MCP_HUB.shutdown()
 
 
 def _chat_or_404(cid: str):
@@ -169,7 +198,47 @@ def api_meta():
             **BUDGET.to_dict(),
             "summarizer": "llm" if LLM.available else "extractive",
         },
+        # 外部工具是"锦上添花"，界面只需要知道挂了几个（详情走 /api/mcp）
+        "mcp": {"configured": MCP_HUB.configured, "tools": len(MCP_HUB.tool_specs())},
     }
+
+
+# ---------------------------------------------------------------- 外部 MCP（§6.11）
+class McpCallBody(BaseModel):
+    args: Optional[dict] = None
+    timeout_sec: Optional[float] = None
+
+
+@app.get("/api/mcp")
+def api_mcp():
+    """外部 MCP 服务状态：连没连上、报了几个工具、白名单有没有落空。
+
+    只回显 env/headers 的**键名**（值可能是凭据）。
+    """
+    return MCP_HUB.summary()
+
+
+@app.post("/api/mcp/reconnect")
+def api_mcp_reconnect(name: str = Query("")):
+    """手动重连（改了 mcp.yaml 或对方服务刚起来）。同步等待，返回新状态。"""
+    if not MCP_HUB.configured:
+        raise HTTPException(400, "没有配置任何 MCP 服务（configs/mcp.yaml 缺失或为空）")
+    statuses = MCP_HUB.reconnect(name or None)
+    return {"statuses": statuses, **MCP_HUB.summary()}
+
+
+@app.post("/api/mcp/call/{tool_name}")
+def api_mcp_call(tool_name: str, body: Optional[McpCallBody] = None):
+    """调试用：绕开 LLM 直接调一个外部工具。
+
+    存在的理由：外部 server 的 schema 五花八门，出问题时最需要区分
+    「模型参数填错了」和「这个工具本来就返回这个」——直连一次就知道是哪边。
+    """
+    if not MCP_HUB.is_external(tool_name):
+        raise HTTPException(404, f"外部工具不存在：{tool_name}（看 GET /api/mcp 的清单）")
+    payload = MCP_HUB.call(tool_name, (body.args if body else None),
+                           timeout=(body.timeout_sec if body else None))
+    return {"tool": tool_name, "payload": payload}
 
 
 @app.get("/api/context/stats")
