@@ -1,0 +1,76 @@
+# 外部 MCP 服务（design.md §6.11）。
+#
+# 这个文件是**运维白名单**，不是用户输入：里面写的是"允许往这台机器上挂什么"。
+# 因此它只能改文件、重启生效，没有 API 能改它，前端也传不进参数。
+# 没有这个文件 = 没有外部工具，内核照常跑（不是错误）。
+#
+# 用法：cp configs/mcp.yaml.example configs/mcp.yaml 然后按本机情况改。
+# mcp.yaml 不入库（.gitignore）——里面的 env / headers 值可能是凭据。
+# 下面三个条目的 command / url / 路径都是**占位值**：照抄不改就启动不会崩，
+# 只是 GET /api/mcp 里 status=error（连不上不拒绝启动）。
+# tests/test_mcp.py 会校验本文件本身能过加载期校验，防止模板写坏。
+#
+# 校验时机：加载期就拒（结构非法 → 服务拒绝启动），但**连不上不拒绝启动**
+# （第三方进程起不来是常态，那属于运行期状态，看 GET /api/mcp）。
+
+mcp_servers:
+  # ---- MATLAB MCP Server（MathWorks 官方，stdio + Go 二进制）----
+  # 唯一"必须自己填路径"的东西是 command：官方按平台发二进制
+  #   Linux x64:   matlab-mcp-server-linux-x64
+  #   Windows x64: matlab-mcp-server-windows-x64.exe
+  #   macOS:       matlab-mcp-server-macos-arm64 / -macos-x64（下载后 chmod +x）
+  # 其余都是它的 CLI 参数（--flag=value 形式），照抄官方 README 的名字即可。
+  #
+  # 三个容易踩的点：
+  # 1) MATLAB 版本要 R2021a+ 且在 PATH 里。PATH 由 SDK 的默认白名单给（见下面 env 说明），
+  #    但如果 web 进程本身跑在一个干净的 PATH 下（systemd / 容器），就显式给 --matlab-root。
+  # 2) timeout_sec 要调大。MATLAB 冷启动是分钟级的，默认 20s 只够调用、不够首次起进程；
+  #    配 --initialize-matlab-on-startup=true 时第一次连接也会很慢。
+  # 3) evaluate_matlab_code 等于"让模型在机器上任意执行 MATLAB"。
+  #    官方 README 明确要求逐个 tool call 人工复核；白名单就是这里的刹车。
+  - name: matlab
+    transport: stdio
+    command: /opt/matlab-mcp-server/matlab-mcp-server-linux-x64
+    args:
+      - "--matlab-root=/usr/local/MATLAB/R2026a"     # 可省：省了就找 PATH 里第一个 MATLAB
+      - "--matlab-display-mode=nodesktop"            # 不要 MATLAB 桌面（服务端更合适）
+      - "--initialize-matlab-on-startup=true"        # 起服务就拉起 MATLAB，别把冷启动算进第一次调用
+      - "--initial-working-folder=/srv/brake-workspace"
+      - "--log-level=warn"
+      - "--disable-telemetry=true"
+    # env 写的是**额外**要给的键。stdio 子进程实际环境 =
+    # SDK 安全白名单（POSIX: HOME/LOGNAME/PATH/SHELL/TERM/USER；Windows 另有 APPDATA/
+    # LOCALAPPDATA/PATHEXT/SYSTEMROOT/TEMP 等）+ 这里列的键。
+    # 也就是说 PATH 不用写，但本进程的 OPENAI_API_KEY 也不会漏给第三方 server。
+    # 需要 MATLAB 许可证服务器之类的变量时必须在这里点名，否则子进程看不到。
+    env:
+      LM_LICENSE_FILE: "27000@licsrv.example.com"
+    timeout_sec: 180                 # 单次调用上界，0.5~300；阻塞期间没有停止检查点
+    tools: [evaluate_matlab_code, check_matlab_code, detect_matlab_toolboxes]
+    # 上面是"能问、能检查、能跑一段代码"的最小组合。
+    # 想让它跑仓库里的脚本再加 run_matlab_file / run_matlab_test_file——
+    # 那等于允许模型执行任意 .m 文件，白名单收窄是唯一的开关。
+    exclude: []
+    desc_chars: 300                  # MATLAB 的工具描述很短，300 足够，省常驻 token
+
+  # ---- stdio：自定义/第三方 Python server（示例，改成自己的再打开）----
+  - name: units
+    transport: stdio                 # 默认值，可省略
+    enabled: false                   # 占位示例：留着配置但不连
+    command: python
+    args: ["/srv/mcp-units/server.py"]
+    env:
+      UNITS_API_TOKEN: "..."
+    cwd: /srv/mcp-units              # 可选
+    timeout_sec: 20                  # 单次调用上界，0.5~300
+    tools: [convert, parse_units]    # 白名单：空 = 报什么接什么；点名点不到会写进状态
+    exclude: []                      # 黑名单（与白名单同时生效，先白后黑）
+    desc_chars: 400                  # 该 server 工具描述进 prompt 的字数上限
+
+  # ---- http：连一个已部署的 streamable-http 端点 ----
+  - name: teamkb
+    transport: http
+    url: http://10.0.0.7:8123/mcp
+    headers:
+      Authorization: "Bearer ..."    # 值不会出现在 GET /api/mcp 里（只回显键名）
+    enabled: false                   # false = 留着配置但不连

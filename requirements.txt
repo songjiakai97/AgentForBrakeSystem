@@ -1,0 +1,23 @@
+# core
+numpy
+scipy
+pyyaml
+asammdf
+cantools
+python-can
+
+# web
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+httpx
+
+# llm（可选，无 Key 环境不装也能跑通）
+# openai
+
+# RAG 向量检索（语义通道；缺失时自动退回关键词打分）
+sqlite-vec
+
+# 外部 MCP 工具（可选，design.md §6.11；没有 configs/mcp.yaml 时不装也能跑通）
+# mcp

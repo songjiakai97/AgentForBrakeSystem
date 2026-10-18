@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---- 项目专属（AgentForBrakeSystem）----
+.env
+knowledge/vectors.db
+knowledge/archive/
+.idea/
+.pytest_cache/
+*.pyc
+__pycache__/

@@ -1,0 +1,1204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>制动测试分析 Agent · Demo</title>
+<script src="./vendor/vue.global.prod.js"></script>
+<script src="./vendor/echarts.min.js"></script>
+<script src="./vendor/marked.min.js"></script>
+<script src="./vendor/purify.min.js"></script>
+<style>
+:root{--bg:#0f172a;--panel:#1e293b;--panel2:#26344a;--text:#e2e8f0;--muted:#94a3b8;--accent:#38bdf8;--ok:#22c55e;--abn:#ef4444;--miss:#64748b;--info:#3b82f6;}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden}
+#app{display:flex;height:100vh}
+.sidebar{width:230px;border-right:1px solid #334155;display:flex;flex-direction:column;background:#0b1220}
+.sidebar h1{font-size:14px;padding:14px 16px;margin:0;color:var(--accent);border-bottom:1px solid #1e293b}
+.chatlist{flex:1;overflow:auto;padding:8px}
+.chatitem{padding:9px 10px;border-radius:8px;font-size:13px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;color:var(--muted)}
+.chatitem:hover{background:var(--panel)}
+.chatitem.active{background:var(--panel);color:var(--text)}
+.chatitem .del{opacity:0;font-size:12px;color:var(--abn);padding:2px 6px}
+.chatitem:hover .del{opacity:1}
+.newchat{margin:10px;padding:9px;border-radius:8px;border:1px dashed #334155;background:transparent;color:var(--accent);cursor:pointer;font-size:13px}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.topbar{padding:10px 16px;border-bottom:1px solid #1e293b;font-size:12px;color:var(--muted);display:flex;gap:10px;align-items:center}
+.badge{padding:2px 8px;border-radius:10px;font-size:11px}
+.badge.offline{background:#33415a;color:#cbd5e1}
+.badge.llm{background:#064e3b;color:#6ee7b7}
+.badge.mcp{background:#2e1065;color:#c4b5fd}
+.badge.mcpoff{background:#3f2d10;color:#fbbf24}
+.msgsWrap{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
+.msgs{flex:1;min-height:0;overflow:auto;padding:18px 8%}
+.msg{margin-bottom:14px;display:flex;flex-direction:column}
+.msg.user{align-items:flex-end}
+.msg .bubble{max-width:86%;padding:10px 14px;border-radius:12px;font-size:14px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+.msg.user .bubble{background:#0369a1;color:#f0f9ff}
+.msg.assistant .bubble{background:var(--panel)}
+.msg.error .bubble{background:#3f1d1d;color:#fecaca;border:1px solid #7f1d1d}
+/* markdown 渲染（仅 Agent 文本）：bubble 的 pre-wrap 会放大 md 内的换行，这里交回 CSS */
+.bubble.md,.md{white-space:normal}
+.md > :first-child{margin-top:0}
+.md > :last-child{margin-bottom:0}
+.md p{margin:0 0 8px}
+.md ul,.md ol{margin:0 0 8px;padding-left:20px}
+.md li{margin:2px 0}
+.md h1,.md h2,.md h3,.md h4{margin:10px 0 6px;font-size:14px;line-height:1.4}
+.md code{background:#0b1220;border:1px solid #334155;border-radius:4px;padding:1px 5px;font-size:12.5px}
+.md pre{background:#0b1220;border:1px solid #334155;border-radius:8px;padding:9px 11px;overflow:auto;margin:0 0 8px}
+.md pre code{background:none;border:none;padding:0}
+.md table{border-collapse:collapse;margin:0 0 8px;font-size:13px}
+.md th,.md td{border:1px solid #334155;padding:4px 8px;text-align:left}
+.md blockquote{margin:0 0 8px;padding-left:10px;border-left:3px solid #334155;color:var(--muted)}
+.md a{color:var(--accent)}
+.role{font-size:11px;color:var(--muted);margin-bottom:3px}
+/* panels */
+.panel{background:var(--panel);border:1px solid #334155;border-radius:12px;padding:10px;max-width:86%}
+.optrow{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;cursor:pointer;font-size:13px}
+.panel.used{background:var(--panel);border-style:dashed;opacity:.85}
+.optrow:hover{background:var(--panel2)}
+.optrow:active{background:#2f4363}
+.optrow .idx,.rcRow .idx{width:20px;height:20px;border-radius:6px;background:#334155;display:flex;align-items:center;justify-content:center;font-size:11px;flex:none}
+.optrow .score,.rcRow .score{margin-left:auto;color:var(--muted);font-size:11px}
+.panel .hint{font-size:12px;color:var(--muted);padding:4px 10px}
+.profileSel{display:flex;gap:8px;padding:8px 10px;align-items:center;flex-wrap:wrap}
+.profileSel select{background:#0b1220;color:var(--text);border:1px solid #334155;border-radius:6px;padding:5px 8px;font-size:13px}
+.pfBtn{background:var(--accent);color:#0b1220;border:none;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer;font-weight:600}
+.otherOpt{display:flex;gap:6px;padding:8px 10px;border-top:1px solid #1e293b;margin-top:6px}
+.otherOpt input{flex:1;background:#0b1220;border:1px solid #334155;color:var(--text);border-radius:6px;padding:6px 9px;font-size:12px}
+.otherOpt button{background:#334155;border:none;color:var(--text);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer}
+/* 已折叠的面板回执：可以展开回看当初给了哪些候选 */
+.rcToggle{cursor:pointer;color:var(--accent);margin-left:6px;font-size:11px}
+.rcList{margin-top:6px;border-top:1px dashed #334155;padding-top:6px}
+.rcRow{display:flex;align-items:center;gap:8px;padding:3px 6px;font-size:12px;color:var(--muted)}
+.rcRow.chosen{color:var(--text);background:#16233c;border-radius:6px}
+/* 待定面板的遮罩：只盖消息区，底部输入框保持可用（发新消息即作废旧面板，这是唯一出口） */
+.mask{position:absolute;inset:0;z-index:40;background:rgba(8,13,24,.74);display:flex;padding:18px;overflow:auto}
+.mcard{width:min(560px,100%);max-height:calc(100vh - 36px);overflow:auto;margin:auto;background:var(--panel);border:1px solid #3b4a63;border-radius:14px;padding:12px 12px 6px;box-shadow:0 18px 50px rgba(0,0,0,.55)}
+.mcard .mtag{font-size:11px;color:var(--accent);letter-spacing:.5px;margin-bottom:4px;padding:0 10px}
+.mcard .mhint{font-size:13px;color:var(--text);padding:0 10px 8px;line-height:1.5}
+.mcard .mrules{font-size:11px;color:var(--muted);border-top:1px solid #1e293b;margin-top:8px;padding:8px 10px;line-height:1.7}
+/* analysis card */
+.acard{background:var(--panel);border:1px solid #334155;border-radius:12px;padding:12px;max-width:92%;font-size:13px}
+.acard .head{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+.acard .head b{font-size:13px}
+.runrow{border-top:1px solid #1e293b;padding:8px 2px}
+.runrow .meta{color:var(--muted);font-size:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.chip{padding:2px 9px;border-radius:10px;font-size:11px;cursor:pointer}
+.chip.ok{background:#052e16;color:#86efac}.chip.abnormal{background:#450a0a;color:#fca5a5}
+.chip.missing{background:#1e293b;color:#94a3b8}.chip.info{background:#172554;color:#93c5fd}
+.detail{background:#0b1220;border-radius:8px;padding:10px;margin-top:8px;font-size:12px}
+.mline{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed #1e293b;gap:8px;flex-wrap:wrap}
+.verdict{margin-top:8px}
+.verdict .v{background:#1e293b;border-left:3px solid var(--abn);padding:6px 10px;border-radius:0 6px 6px 0;margin-top:5px;font-size:12px}
+.verdict .v.missing{border-color:var(--miss)}
+.verdict .v .sev{font-size:10px;color:var(--muted)}
+.suggest{margin-top:10px;background:#0b1220;border:1px solid #14532d;border-radius:8px;padding:10px;font-size:12px}
+.suggest h4{margin:0 0 6px;font-size:12px;color:#4ade80}
+.suggest .act{padding:4px 0;border-bottom:1px dashed #1e293b}
+.btnMini{background:#334155;border:none;color:#cbd5e1;border-radius:6px;padding:3px 10px;font-size:11px;cursor:pointer}
+/* composer */
+.composer{border-top:1px solid #1e293b;padding:10px 8% 14px;background:#0b1220}
+.pending{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.fchip{background:var(--panel);border:1px solid #334155;border-radius:14px;padding:3px 10px;font-size:12px;display:flex;gap:6px;align-items:center}
+.fchip button{background:none;border:none;color:var(--abn);cursor:pointer;font-size:12px;padding:0}
+.uploaded{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+/* 不在本轮默认分析范围内的历史文件：压暗但保留可删，配合 uptag 说明「没重跑」 */
+.fchip.out{opacity:.5;border-style:dashed}
+.uptag{align-self:center;font-size:11px;color:var(--warn,#fbbf24)}
+.inputrow{display:flex;gap:8px;align-items:flex-end}
+.addbtn{width:38px;height:38px;border-radius:50%;border:1px solid #334155;background:var(--panel);color:var(--accent);font-size:20px;cursor:pointer;flex:none}
+textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:10px;color:var(--text);padding:9px 12px;font-size:14px;resize:none;height:38px;max-height:110px;font-family:inherit}
+.sendbtn{background:var(--accent);border:none;color:#0b1220;border-radius:10px;padding:9px 18px;font-size:14px;font-weight:600;cursor:pointer}
+.sendbtn:disabled{opacity:.4}
+/* 一轮进行中：发送键变停止键（红色 + 方块），刷新不会停本轮，只有点这里才停 */
+.sendbtn.stop{background:var(--abn);color:#fff;min-width:74px}
+/* 忙但没有轮号（面板点选/服务端同步执行）：按不动，说清为什么按不动 */
+.sendbtn.busywait{background:#1e293b;color:var(--muted);cursor:not-allowed;min-width:74px}
+.notice{font-size:12px;color:var(--warn,#fbbf24);border:1px dashed #78350f;background:#1a1206;
+  border-radius:8px;padding:6px 10px;margin-bottom:8px;line-height:1.6}
+.notice .nx{color:var(--accent);cursor:pointer;margin-left:8px;text-decoration:underline}
+.chartbox{position:fixed;inset:4vh 6vw;background:var(--bg);border:1px solid #334155;border-radius:14px;z-index:50;display:flex;flex-direction:column}
+.chartbox .cb-head{display:flex;justify-content:space-between;padding:10px 16px;border-bottom:1px solid #1e293b;font-size:13px}
+.chartbox .cb-body{flex:1;min-height:0}
+.chartbox select{background:var(--panel);color:var(--text);border:1px solid #334155;border-radius:6px;padding:3px 8px;font-size:12px}
+.empty{color:var(--muted);font-size:13px;text-align:center;margin-top:18vh;line-height:2}
+/* steps：工具调用/编排过程（可折叠） */
+.steps{background:#0b1220;border:1px solid #233248;border-radius:10px;max-width:86%;font-size:12px;overflow:hidden}
+.steps-head{padding:7px 12px;cursor:pointer;color:var(--muted);display:flex;gap:8px;align-items:center}
+.steps-head:hover{color:var(--text)}
+.steps-head .tag{font-size:10px;border:1px solid #334155;border-radius:8px;padding:1px 7px;color:#7dd3fc}
+.steps-body{border-top:1px dashed #1e293b;padding:6px 12px 9px}
+.step-row{display:flex;gap:8px;align-items:baseline;padding:3px 0;flex-wrap:wrap}
+.step-row .dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none;position:relative;top:-1px}
+.step-row.run .dot{background:var(--info)} .step-row.ok .dot{background:var(--ok)}
+.step-row.warn .dot{background:#f59e0b} .step-row.error .dot{background:var(--abn)}
+.step-row b{font-weight:600;color:#cbd5e1}
+.step-row .det{color:var(--muted);font-size:11px}
+/* 流式思考/正文 */
+.think{background:#0b1220;border:1px dashed #334155;border-radius:10px;max-width:86%;padding:7px 12px;font-size:12px}
+.think-head{cursor:pointer;color:#7dd3fc;display:flex;gap:6px;align-items:center}
+.think-body{margin-top:6px;color:var(--muted);white-space:normal;max-height:220px;overflow:auto;font-size:12.5px}
+.bubble.streaming{border:1px solid #38bdf8}
+.gchk{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px}
+.gchk label{display:flex;gap:4px;align-items:center;cursor:pointer;color:var(--muted)}
+.gchk label.on{color:var(--text)}
+/* 侧栏导航 + 独立视图页（对话/知识库/外部工具），替代原先的四合一抽屉 */
+.nav{display:flex;flex-direction:column;gap:2px;margin:10px 0;padding:0 8px}
+.navbtn{padding:7px 10px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted)}
+.navbtn:hover{color:var(--text);background:#1e293b}
+.navbtn.on{color:var(--text);background:#1e293b}
+.page{flex:1;min-height:0;overflow:auto;padding:16px 22px}
+.badge.ctx{cursor:default;color:#7dd3fc;border-color:#164e63}
+.badge.ctx.ctxhot{color:#f59e0b;border-color:#78350f}
+.badge.ctx.ctxover{color:var(--abn);border-color:#7f1d1d}
+.pathbtn{width:auto;padding:0 10px;font-size:12px;color:var(--muted)}
+.fbRow{display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap;font-size:12px}
+.fbFollow{border-top:1px dashed #1e293b;margin-top:8px;padding-top:6px}
+.ctxwrap{position:relative;display:inline-flex;margin-left:auto}
+.ctxcard{position:absolute;top:calc(100% + 6px);right:0;z-index:55;width:270px;background:#0b1220;
+         border:1px solid #334155;border-radius:10px;padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+/* 独立视图页共用组件：文档/工具行、状态点、上下文明细 */
+.dbgEmpty{color:var(--muted);text-align:center;margin-top:40px;line-height:2}
+.dbgH{color:#7dd3fc;font-size:12px;margin:6px 0}
+.srvRow{display:flex;gap:8px;align-items:baseline;padding:7px 0;border-bottom:1px dashed #1e293b;flex-wrap:wrap}
+.srvRow .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none;position:relative;top:-1px}
+.srvRow .dot.ok{background:var(--ok)} .srvRow .dot.error{background:var(--abn)} .srvRow .dot.pending{background:#f59e0b}
+.srvRow .det{color:var(--muted);font-size:11.5px;flex:1;min-width:200px}
+.chipst{font-size:10px;border:1px solid #334155;border-radius:8px;padding:1px 7px}
+.chipst.ok{color:var(--ok)} .chipst.error{color:var(--abn)} .chipst.pending{color:#f59e0b}
+.toolRow{border:1px solid #233248;border-radius:8px;margin:6px 0;overflow:hidden}
+.toolHead{display:flex;gap:8px;align-items:baseline;padding:6px 10px;cursor:pointer}
+.toolHead:hover{background:#0b1220}
+.toolHead .det{color:var(--muted);font-size:11.5px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toolCall{border-top:1px dashed #1e293b;padding:8px 10px}
+.toolCall textarea{width:100%;background:#0b1220;color:var(--text);border:1px solid #334155;border-radius:6px;font-family:inherit;font-size:12px;padding:6px}
+.dbgJson{background:#0b1220;border:1px solid #1e293b;border-radius:6px;padding:8px;font-size:11px;overflow:auto;max-height:320px;white-space:pre-wrap;word-break:break-all;color:#cbd5e1}
+.ctxBar{position:relative;height:14px;background:#0b1220;border:1px solid #334155;border-radius:7px;margin:14px 0 6px;overflow:hidden}
+.ctxFill{height:100%;background:var(--info,#38bdf8);opacity:.75;transition:width .3s}
+.ctxFill.hot{background:#f59e0b} .ctxFill.over{background:var(--abn,#f87171)}
+.ctxMark{position:absolute;top:-2px;bottom:-2px;width:2px;background:#fbbf24}
+.ctxLegend{color:var(--muted);font-size:12px}
+.ctxLine{color:var(--text);font-size:12.5px}
+.trHead .det{color:var(--muted);font-size:11px}
+</style>
+</head>
+<body>
+<div id="app" v-cloak>
+  <div class="sidebar">
+    <h1>制动测试分析 Agent</h1>
+    <div class="nav">
+      <div class="navbtn" :class="{on:view==='chat'}" @click="switchView('chat')">💬 对话</div>
+      <div class="navbtn" :class="{on:view==='kb'}" @click="switchView('kb')">📚 知识库</div>
+      <div class="navbtn" :class="{on:view==='mcp'}" @click="switchView('mcp')">🔌 外部工具</div>
+    </div>
+    <div class="chatlist" v-if="view==='chat'">
+      <div v-for="c in chats" :key="c.chat_id" class="chatitem" :class="{active: c.chat_id===chatId}" @click="openChat(c.chat_id)">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{c.title}}</span>
+        <span class="del" @click.stop="delChat(c.chat_id)">删除</span>
+      </div>
+    </div>
+    <button class="newchat" v-if="view==='chat'" @click="newChat">+ 新建对话</button>
+  </div>
+
+  <div class="main" v-if="view==='chat'">
+    <div class="topbar">
+      <span class="badge" :class="meta.engine">{{meta.engine==='llm' ? ('LLM: '+(meta.model||'')) : '离线模式（规则链路）'}}</span>
+      <!-- 外部工具是"这轮能用什么"的一部分：不显示就等于用户不知道 Agent 为什么会换算。
+           配了却没连上也必须露出来（灰底"未连上"），否则就是静默少能力 -->
+      <span v-if="meta.mcp && meta.mcp.tools" class="badge mcp"
+            :title="'外部 MCP 工具：GET /api/mcp 看每个服务的连接状态与失败原因'">
+        外部工具 {{ meta.mcp.tools }}
+      </span>
+      <span v-else-if="meta.mcp && meta.mcp.configured" class="badge mcpoff"
+            :title="mcpProbing ? '外部 MCP 正在后台连接（服务启动不等第三方进程），再多等几秒'
+                                : '配置了 MCP 服务但一个都没连上：本轮只有内置工具。原因看 GET /api/mcp'">
+        {{ mcpProbing ? '外部工具连接中…' : '外部工具未连上' }}
+      </span>
+      <!-- 工况是分析级属性，只存在于上下文与分析卡片里，不在顶栏展示 -->
+      <span class="ctxwrap" v-if="dbgCtx"
+            @mouseenter="ctxHover=true" @mouseleave="ctxHover=false">
+        <span class="badge ctx" :class="dbgCtx.over_max ? 'ctxover' : (dbgCtx.over_compress ? 'ctxhot' : '')"
+              @click="loadDbgCtx">ctx {{ Math.round(dbgCtx.estimated_tokens / dbgCtx.max_tokens * 100) }}%</span>
+        <div class="ctxcard" v-if="ctxHover">
+          <div class="ctxLine">总估算 <b>{{dbgCtx.estimated_tokens}}</b> tok · 上下文窗口 {{dbgCtx.max_tokens}}</div>
+          <div class="ctxBar">
+            <div class="ctxFill" :class="dbgCtx.over_max ? 'over' : (dbgCtx.over_compress ? 'hot' : '')"
+                 :style="{width: Math.min(100, dbgCtx.estimated_tokens / dbgCtx.max_tokens * 100) + '%'}"></div>
+            <div class="ctxMark" :style="{left: (dbgCtx.compress_tokens / dbgCtx.max_tokens * 100) + '%'}"></div>
+          </div>
+          <div class="ctxLegend" v-if="dbgCtx.over_max" style="color:var(--abn)">已超上下文窗口，请求会被截断</div>
+          <div class="ctxLegend" v-else-if="dbgCtx.over_compress" style="color:#f59e0b">已触发自动压缩</div>
+          <div class="ctxLegend" v-else>空间充足</div>
+        </div>
+      </span>
+      <a href="/debug" target="_blank" style="color:var(--muted);font-size:11px" title="开发者页面：LLM 请求 trace 明细">debug</a>
+    </div>
+
+    <div class="msgsWrap">
+    <div class="msgs" ref="msgs">
+      <div v-if="!chat" class="empty">加载中…</div>
+      <template v-else>
+      <div v-if="!chat.messages.length" class="empty">
+        上传 .mf4 / .blf 数据文件，然后描述要分析的目标，例如：<br>
+        「干沥青 100kph 全力制动的制动距离怎么样」<br>「玄武岩 0-60 全油门加速打滑超限了吗」
+      </div>
+      <div v-for="m in chat.messages" :key="m.message_id" class="msg" :class="[m.role, m.kind==='error'?'error':'']">
+        <div class="role">{{m.role==='user'?'我':'Agent'}} · {{m.kind}}</div>
+
+        <!-- steps：工具调用/编排过程，默认折叠 -->
+        <div v-if="m.kind==='steps'" class="steps">
+          <div class="steps-head" @click="toggleOpen('st:'+m.message_id)">
+            <span>{{openState['st:'+m.message_id] ? '▾' : '▸'}}</span>
+            <span class="tag">过程</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{(m.data&&m.data.items||[]).length}} 步</span>
+          </div>
+          <div class="steps-body" v-if="openState['st:'+m.message_id]">
+            <div v-for="(r,ri) in (m.data&&m.data.items)||[]" :key="ri" class="step-row" :class="r.status">
+              <span class="dot"></span><b>{{r.label}}</b><span class="det">{{r.detail}}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- text / error：Agent 文本按 Markdown 渲染，用户消息与错误保持纯文本 -->
+        <div v-else-if="m.kind==='text'||m.kind==='error'" class="bubble"
+             :class="{md: m.role==='assistant' && m.kind==='text', streaming: m.kind==='text' && m.meta && m.meta.streaming}">
+          <span v-if="m.role==='assistant' && m.kind==='text'" v-html="md(m.content)"></span>
+          <template v-else>{{m.content}}</template>
+        </div>
+
+        <!-- attachment note -->
+        <div v-else-if="m.kind==='attachment'" class="bubble">📎 {{m.content}}</div>
+
+        <!-- target_options：待选的活面板一律搬到遮罩弹窗里；消息流只留历史占位或可展开的回执 -->
+        <div v-else-if="m.kind==='target_options'" class="panel" :class="{used: !inModal(m)}">
+          <template v-if="!inModal(m)">
+            <div class="hint">
+              <template v-if="m.meta && m.meta.chosen">已选择：{{m.meta.chosen}}</template>
+              <template v-else>{{consumed(m) ? '该面板已被后续消息取代' : '该面板已被更新的面板取代'}}</template>
+              <span style="color:var(--muted)">（选项已失效）</span>
+              <span class="rcToggle" @click="toggleOpen('rc:'+m.message_id)">
+                {{openState['rc:'+m.message_id] ? '▾ 收起候选' : '▸ 展开候选'}}</span>
+            </div>
+            <div v-if="openState['rc:'+m.message_id]" class="rcList">
+              <div v-for="(c,i) in (m.data&&m.data.candidates)||[]" :key="c.key"
+                   class="rcRow" :class="{chosen: isChosen(m,c)}">
+                <span class="idx">{{i+1}}</span><span>{{c.name}}</span>
+                <span v-if="isChosen(m,c)" style="color:var(--accent);font-size:11px">✓ 所选</span>
+                <span class="score" v-if="c.score">{{c.score.toFixed(1)}}</span>
+              </div>
+              <div v-for="(dim,di) in dimsOf(m)" :key="'d'+di" class="rcRow">
+                <span class="idx">{{String.fromCharCode(65+di)}}</span><span>{{dim.join(' / ')}}</span>
+              </div>
+            </div>
+          </template>
+          <template v-else>
+            <div class="hint" v-if="busy">⏳ 本轮进行中，选项暂不可点；跑完若仍未选择会重新弹出</div>
+            <div class="hint" v-else>⏳ 弹窗中等你选择：{{m.content}}</div>
+          </template>
+        </div>
+
+        <!-- analysis result -->
+        <div v-else-if="m.kind==='analysis_result'" class="acard">
+          <div class="head"><b>{{m.data.condition_name}}</b>
+            <span v-if="m.data.profile" class="chip missing">档位 {{m.data.profile}}</span>
+            <span v-if="m.data.degraded" class="chip missing">仅规则结论</span>
+            <span style="margin-left:auto;font-size:11px;color:var(--muted)">{{m.data.sample_count}} 个事件样本</span>
+          </div>
+          <div v-for="s in m.data.samples" :key="s.sample_id" class="runrow">
+            <div class="meta">
+              <span>📄 {{s.file_name}} · run {{s.run_index}}</span>
+              <span v-if="s.window && !isNaN(s.window.t_start)">窗口 [{{fmt(s.window.t_start)}}, {{fmt(s.window.t_end)}}] s（{{dur(s.window)}}s）</span>
+              <span v-else style="color:var(--miss)">无有效事件窗口</span>
+              <button class="btnMini" @click="showChart(s, m)">查看图表</button>
+            </div>
+            <div class="chips">
+              <span v-for="x in s.metrics" :key="x.key" class="chip" :class="x.status" @click="toggle(s.sample_id+':'+m.message_id)">
+                {{x.name}}: {{val(x)}}
+              </span>
+            </div>
+            <div v-if="opened[s.sample_id+':'+m.message_id]" class="detail">
+              <div v-for="x in s.metrics" :key="x.key" class="mline">
+                <span>{{x.name}} <span class="chip" :class="x.status" style="cursor:default">{{x.status}}{{x.missing_reason?('·'+MISSING_CN[x.missing_reason]):''}}</span></span>
+                <span>{{val(x)}} {{x.unit}} <span style="color:var(--muted)">限值 {{range(x)}}{{x.profile?(' · '+x.profile):''}}</span></span>
+              </div>
+              <div class="verdict" v-if="s.verdicts.length">
+                <div v-for="v in s.verdicts" :key="v.rule_id" class="v" :class="{missing:v.status==='missing'}">
+                  [{{v.severity}}/{{v.fault_domain}}] {{v.message}}
+                  <div class="sev">{{v.metric_name}}：{{v.direction}} · 规则 {{v.rule_id}}</div>
+                </div>
+              </div>
+              <div v-else class="verdict"><div class="v" style="border-color:var(--ok)">全部指标达标，无规则命中</div></div>
+            </div>
+            <div v-if="m.data.llm_suggestion" class="suggest">
+              <h4>LLM 标定建议（区分于规则结论）</h4>
+              <div class="md" v-html="md(m.data.llm_suggestion.summary)"></div>
+              <div v-for="(a,i) in (m.data.llm_suggestion.calibration_actions||[])" :key="i" class="act">
+                {{a.param}} → <b>{{a.direction}}</b>（{{a.metric}}）：{{a.expected_effect}} <span style="color:var(--muted)">风险: {{a.risk}}</span>
+              </div>
+              <!-- 标定建议闭环：反馈（采纳/验证结果）回灌给 LLM，生成下一步动作 -->
+              <div v-if="!m.data.llm_suggestion.feedback" class="fbRow">
+                <span style="color:var(--muted)">试过之后：</span>
+                <button class="btnMini" @click="sendFeedback(m,'accepted')">已采纳</button>
+                <button class="btnMini" @click="sendFeedback(m,'verified')">验证有效</button>
+                <button class="btnMini" @click="sendFeedback(m,'ineffective')">验证无效</button>
+              </div>
+              <div v-else class="ctxLegend" style="margin-top:6px">
+                反馈：<b style="color:var(--text)">{{FB_CN[m.data.llm_suggestion.feedback.status]}}</b>
+                <span v-if="m.data.llm_suggestion.feedback.note"> · {{m.data.llm_suggestion.feedback.note}}</span>
+              </div>
+              <div v-if="m.data.llm_suggestion.followup" class="fbFollow">
+                <h4 style="margin-top:8px">基于反馈的下一步建议</h4>
+                <div class="md" v-html="md(m.data.llm_suggestion.followup.summary)"></div>
+                <div v-for="(a,i) in (m.data.llm_suggestion.followup.calibration_actions||[])" :key="'f'+i" class="act">
+                  {{a.param}} → <b>{{a.direction}}</b>（{{a.metric}}）：{{a.expected_effect}} <span style="color:var(--muted)">风险: {{a.risk}}</span>
+                </div>
+                <div v-if="!(m.data.llm_suggestion.followup.calibration_actions||[]).length" style="color:var(--muted);font-size:12px">暂无追加动作</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="bubble">{{m.content}}</div>
+      </div>
+
+      <!-- 流式过程：思考（可折叠）+ 正文逐字 -->
+      <div v-if="live.engine" class="msg assistant">
+        <div class="role">Agent · {{live.engine}}{{live.done?'':' · 进行中'}}</div>
+        <div v-if="live.reasoning" class="think">
+          <div class="think-head" @click="live.showThink=!live.showThink">
+            <span>{{live.showThink ? '▾' : '▸'}}</span><span>💭 思考过程（{{live.reasoning.length}} 字）</span>
+          </div>
+          <div class="think-body md" v-if="live.showThink" v-html="md(live.reasoning)"></div>
+        </div>
+        <div v-if="live.content" class="bubble md streaming" v-html="md(live.content)"></div>
+      </div>
+      <div v-if="busy && !live.content && !live.reasoning && live.engine" class="msg assistant"><div class="role">Agent</div><div class="bubble">处理中…</div></div>
+      <div v-else-if="busy && !live.engine" class="msg assistant"><div class="role">Agent</div><div class="bubble">分析中…</div></div>
+      </template>
+    </div>
+
+    <!-- 待定面板 = 遮罩弹窗（派生自最新一条未消费的 target_options，不是新的状态源）。
+         不给 ×、不给 ESC、点遮罩不关：要么在这里选/写，要么用底部输入框换个说法发出去
+         ——新消息会让本面板按 mark_panels_consumed 自然作废，这就是唯一出口。
+         一旦新一轮开跑就先让开（/select 在跑动中会 409，这里点了也无效），让流式正文可见。 -->
+    <div class="mask" v-if="pendingPanel && !busy">
+      <div class="mcard">
+        <div class="mtag">Agent 在等你选择</div>
+        <div class="mhint">{{pendingPanel.content}}</div>
+        <template v-if="pendingPanel.data && (pendingPanel.data.hop==='function'||pendingPanel.data.hop==='condition')">
+          <div v-for="(c,i) in pendingPanel.data.candidates" :key="c.key" class="optrow" @click="choose(pendingPanel,c)">
+            <span class="idx">{{i+1}}</span><span>{{c.name}}</span>
+            <span class="score" v-if="c.score">{{c.score.toFixed(1)}}</span>
+          </div>
+        </template>
+        <template v-else-if="pendingPanel.data && pendingPanel.data.hop==='profile'">
+          <div class="profileSel">
+            <template v-for="(dim,di) in dimsOf(pendingPanel)" :key="di">
+              <select v-model="pfSel[pendingPanel.message_id][di]">
+                <option v-for="p in dim" :key="p" :value="p">{{p}}</option>
+              </select>
+            </template>
+            <button class="pfBtn" @click="chooseProfile(pendingPanel)">确认分析</button>
+          </div>
+        </template>
+        <div class="otherOpt">
+          <input v-model="otherText[pendingPanel.message_id]" placeholder="其他选项：手动描述目标，回车重新推荐" @keyup.enter="otherGo(pendingPanel)">
+          <button @click="otherGo(pendingPanel)">发送</button>
+        </div>
+        <div class="mrules">不选这里就走不出去。想换个说法直接问，请在下方输入框发送——那会让这批候选作废。</div>
+      </div>
+    </div>
+    </div><!-- /msgsWrap -->
+
+    <div class="composer">
+      <div class="uploaded" v-if="chat && chat.files.length">
+        <span class="uptag" v-if="chat.files.length > latestBatchIds.size">本轮默认分析：只有最后一批，其余未重跑</span>
+        <span v-for="f in chat.files" :key="f.file_id" class="fchip" :class="{out:!latestBatchIds.has(f.file_id)}"
+              :title="latestBatchIds.has(f.file_id)?'在本轮分析范围内':'不在本轮范围；想让 Agent 对比它，直接说「把 xxx 一起对比」'">
+          {{latestBatchIds.has(f.file_id)?'✅':'🗂'}} {{f.name}}
+          <button @click="delFile(f.file_id)">✕</button></span>
+      </div>
+      <div class="pending" v-if="pending.length">
+        <span v-for="(p,i) in pending" :key="i" class="fchip">📎 {{p.name}}<button @click="pending.splice(i,1)">✕</button></span>
+      </div>
+      <div class="notice" v-if="notice">{{notice}}
+        <span class="nx" @click="notice=''">知道了</span></div>
+      <div class="inputrow">
+        <button class="addbtn" @click="$refs.file.click()" title="支持 .mf4 / .blf">+</button>
+        <button class="addbtn pathbtn" @click="addLocalPath" title="引用本机文件路径（服务和数据同机时零拷贝，不走上传）">路径</button>
+        <input ref="file" type="file" :accept="acceptAttr" multiple style="display:none" @change="pickFiles">
+        <textarea v-model="draft" placeholder="描述要分析的功能/工况，如：干沥青 100kph 全力制动" @keydown.enter.exact.prevent="send"></textarea>
+        <button class="sendbtn" :class="{stop:busy && (currentRunId || stopping), busywait:busy && !currentRunId && !stopping}"
+                :disabled="stopping"
+                :title="busy ? (currentRunId ? (stopping ? '已请求停止：引擎在下一个检查点收尾（每个流式块 / 每个工具 / 每个文件）' : '停止本轮：已流出的正文会落库，未分析的文件不再分析（刷新页面不会停止）') : '没有可停止的运行 id：点这里会先找回正在跑的那一轮再停；若它其实是一步同步操作（面板点选），会给出说明') : '发送'"
+                @click="busy ? stopRun() : send()">{{busy ? (stopping ? '正在停止…' : (currentRunId ? '■ 停止' : '■ 停止（找回本轮）')) : '发送'}}</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 知识库 / 外部工具：独立视图（侧栏切换），不是塞进一个抽屉——
+       参考主流 agent 的信息架构：每类东西一个页面，聊天始终是一等公民 -->
+  <div class="main" v-else-if="view==='kb'">
+    <div class="topbar">
+      <span class="badge">知识库</span>
+      <span style="margin-left:auto;font-size:11px;color:var(--muted)">手册按节检索（RAG），标定建议会引用；案例供相似案例召回</span>
+    </div>
+    <div class="page">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+        <button class="btnMini" style="font-size:13px;padding:6px 14px" @click="$refs.kbFile.click()" :disabled="dbgKbUploading">
+          {{dbgKbUploading ? '上传中…' : '⬆ 上传手册（.docx / .md）'}}</button>
+        <input ref="kbFile" type="file" multiple accept=".md,.docx" style="display:none" @change="kbPickFiles">
+        <span style="color:var(--muted);font-size:12px">docx 自动转 Markdown 并生成节 id（原件存 knowledge/archive/）；上传后检索与标定建议立即可用</span>
+      </div>
+      <div v-if="kbUploadMsg" class="ctxLegend" style="margin-bottom:10px;white-space:pre-wrap">{{kbUploadMsg}}</div>
+      <template v-if="dbgKb">
+        <div v-if="!dbgKb.manual.length" class="dbgEmpty" style="margin-top:8vh">
+          知识库还没有手册：上传 docx / md 后这里按文档列出章节，LLM 标定建议会引用这些内容。
+        </div>
+        <template v-for="g in dbgKb.manual" :key="g.function">
+          <div class="dbgH" style="display:flex;align-items:center;gap:8px;margin-top:14px">
+            <span style="flex:1;font-size:14px">{{g.function}}（{{g.sections.length}} 节）</span>
+            <button class="btnMini" @click="kbDel(g.function)">删除文档</button>
+          </div>
+          <div v-for="s in g.sections" :key="s.section_id" class="toolRow">
+            <div class="toolHead" @click="toggleOpen('kb:'+s.section_id)">
+              <span>{{openState['kb:'+s.section_id] ? '▾' : '▸'}}</span>
+              <b>{{s.title}}</b>
+              <span class="det">{{s.section_id}}</span>
+            </div>
+            <div v-if="openState['kb:'+s.section_id]" class="toolCall md" v-html="md(s.text)"></div>
+          </div>
+        </template>
+        <template v-if="dbgKb.cases.length">
+          <div class="dbgH" style="margin-top:16px">案例（{{dbgKb.cases.length}}）</div>
+          <div v-for="c in dbgKb.cases" :key="c.case_id" class="toolRow">
+            <div class="toolHead">
+              <b>{{c.case_id}}</b>
+              <span class="det">{{(c.keywords||[]).join('、')}}</span>
+            </div>
+          </div>
+        </template>
+      </template>
+      <div v-else class="dbgEmpty">加载中…</div>
+    </div>
+  </div>
+
+  <div class="main" v-else-if="view==='mcp'">
+    <div class="topbar">
+      <span class="badge">外部工具（MCP）</span>
+      <span style="margin-left:auto;font-size:11px;color:var(--muted)">服务白名单在 configs/mcp.yaml；状态由 /api/mcp 实时回报</span>
+    </div>
+    <div class="page">
+      <template v-if="dbgMcp">
+        <div v-if="!dbgMcp.configured" class="dbgEmpty" style="margin-top:8vh">
+          未配置外部 MCP（configs/mcp.yaml 缺失或为空）。<br>内置四个工具（推荐/解析/清单/分析）不受影响。
+        </div>
+        <template v-else>
+          <div v-for="s in dbgMcp.servers" :key="s.name" class="srvRow">
+            <span class="dot" :class="s.status"></span>
+            <b>{{s.name}}</b>
+            <span class="chipst" :class="s.status">{{s.status}}</span>
+            <span class="det">{{s.detail || s.last_error || '—'}}</span>
+            <span style="color:var(--muted);font-size:11px">调用 {{s.calls}} · 失败 {{s.failures}}</span>
+            <button class="btnMini" @click="reconnectMcp(s.name)">重连</button>
+          </div>
+          <template v-for="s in dbgMcp.servers" :key="'tl'+s.name">
+            <div v-if="s.tools.length" class="dbgH" style="margin-top:14px">{{s.name}} 报出的工具（模型看到的名字）</div>
+            <div v-for="t in s.tools" :key="t.name" class="toolRow">
+              <div class="toolHead" @click="toggleOpen('tool:'+t.name)">
+                <span>{{openState['tool:'+t.name] ? '▾' : '▸'}}</span><b>{{t.name}}</b>
+                <span class="det">{{t.description}}</span>
+                <button class="btnMini" @click.stop="dbgCall(t)" title="绕开 LLM 直接调用一次，区分「模型参数填错」和「工具本来就返回这个」">直连调用</button>
+              </div>
+              <div v-if="openState['tool:'+t.name]" class="toolCall">
+                <textarea v-model="dbgArgs[t.name]" rows="3" placeholder='{"参数名": "值"}'></textarea>
+                <pre v-if="dbgCallResult[t.name]!==undefined" class="dbgJson">{{dbgCallResult[t.name]}}</pre>
+              </div>
+            </div>
+          </template>
+        </template>
+      </template>
+      <div v-else class="dbgEmpty">加载中…</div>
+    </div>
+  </div>
+
+  <div class="chartbox" v-if="chartData">
+    <div class="cb-head">
+      <span>{{chartTitle}} — 多行子图 · 共享时间轴（滚轮缩放 / 拖拽平移）</span>
+      <span class="gchk">
+        <label v-for="g in chartGroups" :key="g.index" :class="{on: !chartHidden.includes(g.index)}">
+          <input type="checkbox" :checked="!chartHidden.includes(g.index)" @change="toggleGroup(g.index)">
+          {{g.label}}<span style="color:var(--muted)">（{{g.signals.length}}）</span>
+        </label>
+      </span>
+      <button class="btnMini" @click="closeChart">关闭 ✕</button>
+    </div>
+    <div class="cb-body" ref="chartEl"></div>
+  </div>
+</div>
+
+<script>
+const { createApp } = Vue;
+const blankLive = () => ({engine:'', reasoning:'', content:'', showThink:true, done:false});
+createApp({
+  data(){ return {
+    meta:{engine:'offline'}, chats:[], chat:null, chatId:'',
+    draft:'', pending:[], busy:false,
+    otherText:{}, pfSel:{}, opened:{}, openState:{},
+    live: blankLive(), lastSeq: 0, currentRunId: '', runCid: '', stopping: false,
+    notice: '',
+    // 外部 MCP 在后台连接（§6.11：web 启动不等第三方进程），所以首屏的 meta 里
+    // tools 可能还是 0。不轮询的话"还在连"会一直显示成"未连上"——那是个谎。
+    mcpProbing:false, mcpTries:0,
+    // 视图：chat = 主对话；kb / mcp = 独立管理页（侧栏切换，不与聊天混排）
+    view:'chat', dbgMcp:null, dbgCtx:null, ctxHover:false,
+    dbgKb:null, dbgKbUploading:false, kbUploadMsg:'',
+    dbgArgs:{}, dbgCallResult:{},
+    chartData:null, chartTitle:'', chartGroups:[], chartHidden:[], chartFull:null, _chart:null,
+    // 与后端 _MISSING_REASON_CN / prompts.MISSING_REASON_LEGEND 同一口径：
+    // missing 的成因决定建议是「补测通道」还是「重做试验」，界面上不能都写成缺失。
+    MISSING_CN:{no_valid_event:'未切出有效事件',signal_absent:'通道无数据',
+                not_computable:'算不出值',no_matching_entry:'该档位无条目'},
+    FB_CN:{accepted:'已采纳',verified:'验证有效',ineffective:'验证无效'},
+  }},
+  computed:{
+    acceptAttr(){
+      const e = (this.meta.allowed_upload_ext||['.mf4','.blf']);
+      return e.join(',');
+    },
+    // 待定面板：最新一条未消费的 target_options（派生状态，不另立状态源）。
+    // 历史遗留的多条未消费面板只弹最新的一条，其余按回执显示。
+    pendingPanel(){
+      const ms = (this.chat && this.chat.messages) || [];
+      for(let i=ms.length-1; i>=0; i--){
+        const m = ms[i];
+        if(m.kind==='target_options' && !this.consumed(m) && m.data) return m;
+      }
+      return null;
+    },
+    // 本轮默认分析范围 = 最后一次上传的那批（与后端 Chat.latest_batch 同口径）。
+    // 界面必须把它显示出来：默认范围收窄是看不见的行为，若还像原来那样给所有
+    // 文件打同一个 ✅，用户会以为历史文件也一起算了。
+    latestBatchIds(){
+      const fs = (this.chat && this.chat.files) || [];
+      if(!fs.length) return new Set();
+      const bid = fs[fs.length-1].batch_id || '';
+      return new Set(fs.filter(f => (f.batch_id || '') === bid).map(f => f.file_id));
+    },
+  },
+  async mounted(){
+    try{ this.meta = await (await fetch('/api/meta')).json(); }catch(e){}
+    this.pollMcp();
+    await this.loadChats();
+    const h = location.hash.match(/^#\/chat\/(\w+)/);
+    if(h && this.chats.some(c=>c.chat_id===h[1])) this.openChat(h[1]);
+    else if(this.chats.length) this.openChat(this.chats[0].chat_id);
+    else await this.newChat();
+  },
+  beforeUnmount(){ if(this._mcpTimer) clearTimeout(this._mcpTimer); },
+  methods:{
+    // 外部 MCP 是后台连的（§6.11：web 启动不等第三方进程），首屏 meta 里 tools=0
+    // 不代表"连不上"。不刷的话"还在连"会永远显示成"未连上"，那是个谎。
+    // 每 3 秒读一次 GET /api/mcp 的 servers[].status，全部进入终态（ok/error/disabled）
+    // 后回读一次 /api/meta 拿权威工具数。
+    // 轮询上界不写死：hub 的连接预算是 Σ max(15, timeout_sec) + 15，接 MATLAB
+    // （timeout_sec 180~300，冷启动真的要一分多钟）时比固定值长得多。写死 30s 会让
+    // "第 180 秒终于连上"永远显示成"未连上"——那恰好是唯一那个用户真会遇到的场景。
+    // 所以按 /api/mcp 回报的 timeout_sec 现场算，再加 5 次余量兜住 fetch 本身失败。
+    mcpMaxTries(servers){
+      const budget = (servers || []).reduce((a, s) =>
+        (s.status === 'disabled' ? a : a + Math.max(15, s.timeout_sec || 15)), 15);
+      return Math.ceil(budget / 3) + 5;
+    },
+    pollMcp(){
+      const st = this.meta && this.meta.mcp;
+      if(!st || !st.configured || st.tools){ this.mcpProbing = false; return; }
+      this.mcpProbing = true;
+      this._mcpTimer = setTimeout(async () => {
+        let pending = true, servers = [];
+        try{
+          const s = await (await fetch('/api/mcp')).json();
+          servers = s.servers || [];
+          pending = servers.some((x) => x.status === 'pending');
+        }catch(e){}
+        if(++this.mcpTries > this.mcpMaxTries(servers)){ this.mcpProbing = false; return; }
+        if(pending){ this.pollMcp(); return; }
+        this.mcpProbing = false;
+        try{ this.meta = await (await fetch('/api/meta')).json(); }catch(e){}
+      }, 3000);
+    },
+    md(t){
+      if(!t) return '';
+      // marked 只做解析，DOMPurify 兜底：库缺失则退回转义纯文本，
+      // 绝不用 v-html 渲染未经净化的内容
+      if(typeof marked==='undefined' || typeof DOMPurify==='undefined') return this.plain(t);
+      try{
+        return DOMPurify.sanitize(marked.parse(String(t), {breaks:true, gfm:true}));
+      }catch(e){ return this.plain(t); }
+    },
+    // ---- 视图切换与各页数据加载
+    switchView(v){
+      if(this.view===v) return;
+      this.view = v;
+      if(this.chartData) this.closeChart();   // 图表是对话视图的覆盖层，切走就收
+      if(v==='kb') this.loadDbgKb();
+      else if(v==='mcp') this.loadDbgMcp();
+    },
+    async loadDbgKb(){
+      try{ this.dbgKb = await (await fetch('/api/kb')).json(); }catch(e){}
+    },
+    async kbPickFiles(ev){
+      const fs = [...(ev.target.files||[])];
+      ev.target.value='';
+      if(!fs.length) return;
+      this.dbgKbUploading = true; this.kbUploadMsg = '';
+      try{
+        const fd = new FormData();
+        fs.forEach(f => fd.append('files', f));
+        const r = await fetch('/api/kb/manual', {method:'POST', body:fd});
+        const d = await r.json();
+        if(!r.ok){
+          this.kbUploadMsg = '上传失败：' + (typeof d.detail==='string' ? d.detail : JSON.stringify(d.detail || d));
+          return;
+        }
+        this.kbUploadMsg = d.files.map(f =>
+          `✅ ${f.file}（${f.source}）` + (f.sections && f.sections.length
+            ? '\n   节 id：' + f.sections.map(s => `${s.id}=${s.title}`).join('；')
+            : '')).join('\n');
+        await this.loadDbgKb();
+      }catch(e){
+        this.kbUploadMsg = '上传失败：' + e;
+      }finally{
+        this.dbgKbUploading = false;
+      }
+    },
+    async kbDel(slug){
+      if(!confirm(`删除手册文档「${slug}」？检索与标定建议将不再引用它（archive 里的原件不受影响）。`)) return;
+      try{
+        const r = await fetch('/api/kb/manual/'+encodeURIComponent(slug), {method:'DELETE'});
+        if(!r.ok){
+          const d = await r.json().catch(()=>({}));
+          this.kbUploadMsg = '删除失败：' + (d.detail || r.status);
+          return;
+        }
+        this.kbUploadMsg = '';
+        await this.loadDbgKb();
+      }catch(e){ this.kbUploadMsg = '删除失败：' + e; }
+    },
+    async loadDbgMcp(){
+      try{ this.dbgMcp = await (await fetch('/api/mcp')).json(); }catch(e){}
+    },
+    async reconnectMcp(name){
+      // 同步等待新状态返回：接 MATLAB 这类冷启动要 1-2 分钟，期间按钮无反馈是预期
+      try{
+        await fetch('/api/mcp/reconnect?name='+encodeURIComponent(name), {method:'POST'});
+      }catch(e){}
+      await this.loadDbgMcp();
+      try{ this.meta = await (await fetch('/api/meta')).json(); }catch(e){}
+    },
+    async dbgCall(t){
+      let args = {};
+      try{ args = JSON.parse(this.dbgArgs[t.name] || '{}'); }
+      catch(e){ this.dbgCallResult[t.name] = '参数不是合法 JSON：' + e.message; return; }
+      this.dbgCallResult[t.name] = '调用中…';
+      try{
+        const r = await fetch('/api/mcp/call/'+encodeURIComponent(t.name),
+          {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({args})});
+        const d = await r.json();
+        this.dbgCallResult[t.name] = JSON.stringify(d, null, 2);
+      }catch(e){
+        this.dbgCallResult[t.name] = String(e);
+      }
+    },
+    async loadDbgCtx(){
+      if(!this.chatId){ this.dbgCtx = null; return; }
+      try{ this.dbgCtx = await (await fetch('/api/context/stats?cid='+this.chatId)).json(); }
+      catch(e){ this.dbgCtx = null; }
+    },
+    plain(t){ return String(t).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])).replace(/\n/g,'<br>'); },
+    consumed(m){ return !!(m.meta && m.meta.consumed); },
+    // 消息流里的面板：只有"不在弹窗里的那条"才画成历史占位/回执，
+    // 待定那条由遮罩弹窗呈现，正文不在流里重复一遍
+    inModal(m){ return !!(this.pendingPanel && m.message_id === this.pendingPanel.message_id); },
+    isChosen(m,c){
+      const ch = m.meta && m.meta.chosen;
+      return !!ch && (ch === c.key || ch === c.name || String(ch).startsWith(c.name));
+    },
+    toggleOpen(k){ this.openState[k] = !this.openState[k]; },
+    fmt(t){ return t==null?'—':Number(t).toFixed(2); },
+    dur(w){ if(!w||w.t_start==null||w.t_end==null) return '0'; const d=w.t_end-w.t_start;
+      return isFinite(d)? d.toFixed(2):'0'; },
+    val(x){ if(x.value==null) return '—'; return Number(x.value).toFixed(2); },
+    range(x){ if(!x.ok_range) return '无限值'; const[lo,hi]=x.ok_range;
+      if(lo!=null&&hi!=null)return `${lo}~${hi}`; if(lo!=null)return `≥${lo}`; return `≤${hi}`; },
+    chunkDims(ps){ const half=Math.ceil(ps.length/2); return [ps.slice(0,half),ps.slice(half)].filter(a=>a.length); },
+    nav(cid){ location.hash = '#/chat/'+cid; },
+    async loadChats(){ this.chats = await (await fetch('/api/chats')).json(); },
+    async newChat(){
+      const c = await (await fetch('/api/chats',{method:'POST'})).json();
+      await this.loadChats(); this.openChat(c.chat_id);
+    },
+    initPanelState(msgs){
+      (msgs||[]).forEach(m=>{
+        if(m.kind==='target_options'){
+          if(!(m.message_id in this.otherText)) this.otherText[m.message_id]='';
+          if(m.data && m.data.hop==='profile' && !(m.message_id in this.pfSel)){
+            const dims=m.data.profile_dims||this.chunkDims(m.data.profiles||(m.data.target&&m.data.target.profiles)||[]);
+            // 缺维守卫的预选：后端把已给的档位词放进 data.preset，命中的维度不再默认第一项
+            const preset=m.data.preset||[];
+            this.pfSel[m.message_id]=dims.map(d=>preset.find(p=>d.includes(p))||d[0]);
+          }
+        }});
+    },
+    async openChat(cid){
+      this.chatId=cid; this.nav(cid);
+      // 切到别的会话：上一会话的流式预览不再属于这里（那轮仍在后台跑，切回去可续看）
+      if(this.runCid && this.runCid!==cid){ this.live=blankLive(); }
+      this.chat = await (await fetch('/api/chats/'+cid)).json();
+      this.initPanelState(this.chat.messages);
+      this.loadDbgCtx();                // 顶栏 ctx 徽标随会话切换刷新
+      this.$nextTick(this.scroll);
+      // 刷新/重进会话时：若后台还有一轮在跑（引擎与连接已解耦），重新订阅回放整轮过程
+      if(!this.busy) this.attachActiveRun();
+    },
+    async attachActiveRun(){
+      if(this._attaching) return;
+      this._attaching = true;
+      try{
+        const d = await (await fetch(`/api/chats/${this.chatId}/run`)).json();
+        if(!d.run || d.run.status!=='running') return;
+        const cid = this.chatId;
+        this.busy = true;
+        this.live = blankLive();
+        this.lastSeq = 0;                 // 从头回放整轮：思考流与已产生的消息都能补回来
+        this.currentRunId = d.run.run_id; this.runCid = cid;
+        try{ await this.followRun(d.run.run_id); }finally{ this.busy = false; this.stopping = false; }
+        // 回放事件都已转成落库消息，live 只用于展示进行中的部分，收尾即清
+        if(this.chatId===cid) this.live = blankLive();   // 切走了就别动当前会话的显示
+        this.currentRunId = ''; this.runCid = '';
+        if(this.chatId===cid) await this.openChatKeepScroll();
+      }catch(e){ this.busy=false; }
+      finally{ this._attaching = false; }
+    },
+    async delChat(cid){
+      if(!confirm('删除该对话及其全部文件、消息与分析缓存？')) return;
+      const r = await (await fetch('/api/chats/'+cid,{method:'DELETE'})).json();
+      await this.loadChats();
+      if(cid===this.chatId){
+        if(r.next_chat) this.openChat(r.next_chat);
+        else if(this.chats.length) this.openChat(this.chats[0].chat_id);
+        else await this.newChat();
+      }
+    },
+    async delFile(fid){
+      await fetch(`/api/chats/${this.chatId}/files/${fid}`,{method:'DELETE'});
+      await this.openChat(this.chatId);
+    },
+    // 标定建议闭环：反馈落库 + LLM 基于反馈生成下一步动作（后端一并返回）
+    async sendFeedback(m, status){
+      let note = '';
+      if(status !== 'accepted')
+        note = prompt('补充说明（可选，比如实车验证的现象）：') || '';
+      try{
+        const r = await fetch(`/api/analyses/${m.data.analysis_id}/feedback`,
+          {method:'POST',headers:{'Content-Type':'application/json'},
+           body:JSON.stringify({status,note})});
+        const d = await r.json();
+        if(!r.ok){ this.notice = '反馈失败：' + (typeof d.detail==='string'?d.detail:JSON.stringify(d.detail||'')); return; }
+        m.data.llm_suggestion = d.llm_suggestion;   // 卡片就地更新（含 followup）
+      }catch(e){ this.notice = '反馈失败：' + e; }
+    },
+    // 本地路径引用：服务和数据同机时零拷贝，不走 HTTP 上传
+    async addLocalPath(){
+      const p = prompt('输入本机数据文件的完整路径（.mf4 / .blf）：\n'
+        + '服务和数据在同一台机器时零拷贝引用，删除对话不会删除原文件。');
+      if(!p) return;
+      try{
+        const r = await fetch(`/api/chats/${this.chatId}/files/by-path`,
+          {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})});
+        const d = await r.json();
+        if(!r.ok){ this.notice = '引用失败：' + (typeof d.detail==='string'?d.detail:JSON.stringify(d.detail||'')); return; }
+        await this.openChat(this.chatId);
+      }catch(e){ this.notice = '引用失败：' + e; }
+    },
+    pickFiles(ev){
+      const fs=[...ev.target.files];
+      const exts=(this.meta.allowed_upload_ext||['.mf4','.blf']);
+      for(const f of fs){
+        const low=f.name.toLowerCase();
+        if(!exts.some(e=>low.endsWith(e))){ alert(`仅接受 ${exts.join('/')} 文件：${f.name} 已忽略`); continue; }
+        this.pending.push(f);
+      }
+      ev.target.value='';
+    },
+    async uploadPending(){
+      if(!this.pending.length) return true;
+      const fd=new FormData();
+      this.pending.forEach(f=>fd.append('files',f));
+      const r=await fetch(`/api/chats/${this.chatId}/files`,{method:'POST',body:fd});
+      if(!r.ok){ const e=await r.json(); alert(e.detail||'上传失败'); return false; }
+      this.pending=[];
+      await this.openChat(this.chatId);
+      return true;
+    },
+    // ------------------------------------------------ SSE 事件流
+    pushMsg(m){
+      // 服务端权威消息：替换同 id（steps 会原地追加），否则追加
+      const arr=this.chat.messages;
+      const i=m.message_id?arr.findIndex(x=>x.message_id===m.message_id):-1;
+      if(i>=0) arr.splice(i,1,m); else arr.push(m);
+      if(m.kind==='target_options'){
+        this.otherText[m.message_id]='';
+        if(m.data&&m.data.hop==='profile'){
+          const dims=m.data.profile_dims||this.chunkDims(m.data.profiles||(m.data.target&&m.data.target.profiles)||[]);
+          this.pfSel[m.message_id]=dims.map(d=>d[0]);
+        }
+      }
+    },
+    onEvent(name, data){
+      // 事件属于发起它的那一轮：用户中途切了会话就丢弃（服务端照常落库，切回去看得到）
+      if(this.runCid && this.runCid!==this.chatId) return;
+      if(name==='run'){
+        this.currentRunId = data.run_id || this.currentRunId;
+        if(data.status && data.status!=='running') this.live.done = true;
+        return;
+      }
+      if(name==='run_error'){
+        this.chat.messages.push({message_id:'tmp_x'+Date.now(),role:'assistant',kind:'error',
+                                 content:'本轮执行失败：'+(data.error||''),meta:{}});
+        this.live.done = true;
+        return;
+      }
+      if(name==='delta'){
+        const ch=data.channel;
+        if(ch==='meta') this.live.engine=data.engine||'offline';
+        else if(ch==='reasoning') this.live.reasoning+=data.text;
+        else if(ch==='content') this.live.content+=data.text;
+        else if(ch==='reset'){ this.live.reasoning=''; this.live.content=''; }
+      } else if(name==='message'){
+        const m=data;
+        // 正文已流式给出的文本消息：落库版本接手展示，live 气泡让位
+        if(m.kind==='text' && m.role==='assistant' && this.live.content && m.meta && m.meta.streamed)
+          this.live.content='';
+        this.pushMsg(m);
+      } else if(name==='done'){
+        this.live.done=true;
+      }
+      this.$nextTick(this.scroll);
+    },
+    // 慢段心跳兜底：后端有心跳 step，但本地模型卡住/分析大文件时仍可能长时间
+    // 无任何事件。静默超 30s 就提示「还在等」，避免被当成假死；收到任何帧即复位。
+    _startSilenceWatch(){
+      this.lastEventAt = Date.now();
+      this._silenceTimer = setInterval(()=>{
+        const idle = Math.round((Date.now()-this.lastEventAt)/1000);
+        if(idle > 30)
+          this.notice = `仍在等待模型响应（已静默 ${idle}s）：本地模型较慢或正在加载/分析大文件，`
+                      + '可按「■ 停止」中止本轮。';
+      }, 3000);
+    },
+    _stopSilenceWatch(){
+      if(this._silenceTimer){ clearInterval(this._silenceTimer); this._silenceTimer=null; }
+      this.notice='';
+    },
+    // 读取一条 SSE 流：记录每帧 seq，供断线后增量续传；返回是否正常读完
+    async consumeStream(response){
+      const reader=response.body.getReader(), dec=new TextDecoder();
+      let buf='', sawDone=false;
+      const feed=(frame)=>{
+        this.lastEventAt=Date.now();
+        let ev='message', payload='', idv=null;
+        for(const line of frame.split('\n')){
+          if(line.startsWith('event:')) ev=line.slice(6).trim();
+          else if(line.startsWith('data:')) payload+=line.slice(5).trim();
+          else if(line.startsWith('id:')) idv=line.slice(3).trim();
+        }
+        if(!payload) return;
+        let obj=null;
+        try{ obj=JSON.parse(payload); }catch(e){ return; }
+        // 先派发再推进 seq：派发异常时下次重连会重放这一帧，不会静默丢事件
+        if(ev==='done') sawDone=true;
+        this.onEvent(ev, obj);
+        if(idv!==null && Number(idv)>=this.lastSeq) this.lastSeq=Number(idv)+1;
+      };
+      for(;;){
+        const {value, done} = await reader.read();
+        if(done) break;
+        buf += dec.decode(value, {stream:true});
+        let k;
+        while((k=buf.indexOf('\n\n'))>=0){ feed(buf.slice(0,k)); buf=buf.slice(k+2); }
+      }
+      return sawDone;
+    },
+    async followRun(runId){
+      // 订阅直到本轮真正结束；连接断了就凭 lastSeq 增量重连（服务端有缓冲，不丢字）
+      for(let attempt=0; attempt<8; attempt++){
+        if(this.chatId!==this.runCid) return true;        // 用户切走了：别再往这个会话写
+        try{
+          const r = await fetch(`/api/runs/${runId}/stream?after=${this.lastSeq-1}`);
+          if(r.status===404) return true;            // 已回收：消息已落库，读历史即可
+          if(!r.ok) throw new Error('HTTP '+r.status);
+          if(await this.consumeStream(r)) return true;
+        }catch(e){ /* 断线：下面重试 */ }
+        if(this.chatId!==this.runCid) return true;
+        const st = await fetch(`/api/chats/${this.chatId}/run`).then(x=>x.json()).catch(()=>({run:null}));
+        if(!st.run || st.run.run_id!==runId) return true;   // 后台已跑完
+        await new Promise(res=>setTimeout(res, 600));
+      }
+      return false;
+    },
+    async streamSend(text){
+      this.live = blankLive();
+      this.lastSeq = 0; this.currentRunId = ''; this.runCid = this.chatId;
+      this._startSilenceWatch();
+      const r = await fetch(`/api/chats/${this.chatId}/messages/stream`,
+        {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+      if(!r.ok){
+        let detail='请求失败'; let runId='';
+        try{
+          const d=(await r.json()).detail;
+          if(d && typeof d==='object'){ detail=d.message||detail; runId=d.run_id||''; }
+          else detail=d||detail;
+        }catch(e){}
+        // 409：本会话还有一轮在跑。这不是「发送失败」而是「有一轮没收尾」——
+        // 原来只弹一条错误，界面就停在既没有轮号（停止键按不动）又等不出结果的状态。
+        // 现在拿它给的 run_id 直接连上去：进度补回来，停止键也有对象了。
+        if(r.status===409 && runId){
+          this.currentRunId = runId;
+          // 字与说明当场给出，而不是等接上的那一轮跑完才回填（那一轮可能还要很久）
+          if(!this.draft) this.draft = text;
+          this.notice = '上一轮还没收尾：已连上那一轮的进度，可以直接按「■ 停止」结束它；'
+                      + '本次输入留在输入框里，等它收尾后再发。';
+          await this.followRun(runId);
+          return {ok:true, attached:true};
+        }
+        return {ok:false, detail};
+      }
+      const finished = await this.consumeStream(r);
+      // 连接中断但后台仍在跑 → 自动续订，用户不需要刷新
+      if(!finished && this.currentRunId) await this.followRun(this.currentRunId);
+      return {ok:true};
+    },
+    async send(){
+      const text=this.draft.trim();
+      if(!text && !this.pending.length) return;
+      if(this.busy) return;
+      this.busy=true; this.notice='';
+      const tmpId='tmp_u'+Date.now();
+      try{
+        if(!(await this.uploadPending())) return;
+        if(!text) { await this.openChat(this.chatId); return; }
+        this.draft='';
+        this.chat.messages.push({message_id:tmpId,role:'user',kind:'text',content:text,meta:{}});
+        this.$nextTick(this.scroll);
+        const res = await this.streamSend(text);
+        if(!res.ok){
+          this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:res.detail,meta:{}});
+        } else if(res.attached){
+          // 这一句并没有真的发出去（上一轮还占着会话）：把乐观推上去的气泡撤掉，
+          // 否则界面上留着一条「我说了」而服务端历史记录里根本没有它
+          const i=this.chat.messages.findIndex(x=>x.message_id===tmpId);
+          if(i>=0) this.chat.messages.splice(i,1);
+        }
+        await this.loadChats();
+        await this.openChatKeepScroll();
+      } finally {
+        this.busy=false;
+        this.stopping=false;
+        this._stopSilenceWatch();
+        this.live=blankLive(); this.runCid='';   // 本轮已结束，指针一律复位
+        this.$nextTick(this.scroll);
+      }
+    },
+    async choose(m,c){
+      const rec=m.data;
+      if(rec.hop==='function') return this.select('function',c.key,null,m,c.name);
+      return this.select('condition',c.key,null,m,c.name);
+    },
+    dimsOf(m){
+      const d=m.data||{};
+      if(d.profile_dims&&d.profile_dims.length)
+        return d.profile_dims.filter(x=>x&&x.length);
+      const ps=d.profiles||(d.target&&d.target.profiles)||[];
+      return ps.length?this.chunkDims(ps):[];
+    },
+    async select(t,key,profile,panel,label){
+      // 连点保护：上一次选择未返回时忽略新点击（否则同一面板会重复触发分析）
+      if(this.busy) return;
+      // 乐观折叠：点下去就把面板变成回执，等服务端确认（存储层同样会写 consumed）
+      if(panel){
+        panel.meta = Object.assign({}, panel.meta, {consumed:true, chosen: label || (panel.meta&&panel.meta.chosen) || key});
+      }
+      this.busy=true;
+      // /select 在服务端同步执行、不属于任何 run：清掉旧 id，停止键才不会被上一轮的 id 误导
+      this.currentRunId = '';
+      try{
+        const r=await fetch(`/api/chats/${this.chatId}/select`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_type:t,target_key:key,profile:profile})});
+        const d=await r.json();
+        if(!r.ok){ this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:d.detail||'操作失败',meta:{}}); }
+        else {
+          (d.messages||[]).forEach(x=>this.pushMsg(x));
+        }
+        await this.openChatKeepScroll();
+      } finally{ this.busy=false; }
+    },
+    async chooseProfile(m){
+      const sel=this.pfSel[m.message_id]||[];
+      const profile=sel.filter(Boolean).join('|');
+      const key=(m.data.target&&m.data.target.key) || (m.data.candidates&&m.data.candidates[0]&&m.data.candidates[0].key);
+      if(!key){ alert('缺少工况 key'); return; }
+      const label=((m.data.target&&m.data.target.name)||key)+`（${profile}）`;
+      await this.select('condition',key,profile,m,label);
+    },
+    async otherGo(m){
+      const t=(this.otherText[m.message_id]||'').trim();
+      if(!t || this.busy) return;
+      this.otherText[m.message_id]='';
+      // 改用手打目标：本面板作废（服务端本轮开始同样会标记 consumed）
+      m.meta = Object.assign({}, m.meta, {consumed:true});
+      this.busy=true; this.notice='';
+      const tmpId='tmp_u'+Date.now();
+      try{
+        this.chat.messages.push({message_id:tmpId,role:'user',kind:'text',content:t,meta:{}});
+        const res = await this.streamSend(t);
+        if(!res.ok) this.chat.messages.push({message_id:'tmp_e'+Date.now(),role:'assistant',kind:'error',content:res.detail,meta:{}});
+        else if(res.attached){
+          // 同 send()：被上一轮挡住的那句没有真的发出去，撤掉乐观气泡（字已退回输入框）
+          if(!this.draft) this.draft = t;
+          const i=this.chat.messages.findIndex(x=>x.message_id===tmpId);
+          if(i>=0) this.chat.messages.splice(i,1);
+        }
+        await this.openChatKeepScroll();
+      } finally{
+        this.busy=false;
+        this.stopping=false;
+        this.live=blankLive(); this.runCid='';   // 本轮已结束，指针一律复位
+      }
+    },
+    async stopRun(){
+      // 只置服务端标记：引擎在下一个检查点（每个流式块 / 每个工具 / 每个文件）自己收尾，
+      // 已流出的正文会落成消息，事件流照常走到 done，前端不用断开重连。
+      if(!this.busy || this.stopping) return;
+      // 没有轮号时不能再静默 return —— 那正是「点了停止没反应」：界面以为 busy
+      // 就有轮可停，实际 currentRunId 空着（上一轮 409 没拿到号 / 切换会话后失联）。
+      // 先问服务端本会话到底还有没有进行中的一轮，有就拿它的号继续停。
+      if(!this.currentRunId){
+        let run=null;
+        try{ run=(await (await fetch(`/api/chats/${this.chatId}/run`)).json()).run; }catch(e){}
+        if(!run){
+          // 确实没有可停的一轮：这一步是服务端的同步动作（面板点选），说清楚而不是静默
+          this.notice = '当前没有可停止的运行：这一步在服务端同步执行（面板点选/分析），等它返回即可；'
+                      + '刷新页面不会中断它。';
+          return;
+        }
+        // 只补轮号，不再另开一条订阅：本会话的流若正在读，双连接会把同一批事件
+        // 各派发一遍（正文重复出现）；没在读的，停止后照常由发起方收尾。
+        // runCid 不动：它由发起这一轮的 send/followRun 设，这里抢过来会把那一条流
+        // 的归属判给别的会话，事件会被 onEvent 直接丢掉。
+        this.currentRunId = run.run_id;
+      }
+      this.stopping = true;
+      try{
+        const r = await fetch(`/api/runs/${this.currentRunId}/stop`, {method:'POST'});
+        if(!r.ok){
+          const d = await r.json().catch(()=>({}));
+          if(r.status !== 404) alert(d.detail || '停止请求失败');
+        }
+      }catch(e){ alert('停止请求未能送达'); }
+      finally{ if(!this.busy) this.stopping = false; }   // 本轮已抢先结束则立即复位
+    },
+    async openChatKeepScroll(){
+      const el=this.$refs.msgs; const at=el?el.scrollTop:0;
+      this.chat = await (await fetch('/api/chats/'+this.chatId)).json();
+      this.initPanelState(this.chat.messages);
+      this.loadDbgCtx();                // 一轮跑完上下文变了，徽标跟着刷新
+      await this.loadChats();
+      this.$nextTick(()=>{ if(el) el.scrollTop=at; this.scroll(); });
+    },
+    scroll(){ const el=this.$refs.msgs; if(el) el.scrollTop=el.scrollHeight; },
+    toggle(key){ this.opened[key]=!this.opened[key]; },
+    // ------------------------------------------------ 图表：多 grid 共享 x 轴
+    async showChart(s){
+      this.chartTitle=`${s.file_name} · run ${s.run_index}`;
+      const r=await fetch(`/api/analyses/${s.sample_id}/timeseries`);
+      if(!r.ok){ alert((await r.json()).detail||'无法获取时序'); return; }
+      const data = await r.json();
+      this.chartData=Vue.markRaw(data);
+      const opt=data.chart_option||{};
+      this.chartGroups=(opt._groups)||[];
+      this.chartHidden=[];
+      // ECharts 会向传入 setOption 的对象写入 __ec_inner_ 内部符号：
+      // 渲染用一份、按组显隐重建用另一份干净深拷贝，避免二次注入报错
+      this.chartFull=Vue.markRaw(JSON.parse(JSON.stringify(opt)));
+      this.$nextTick(()=>{ this.renderSeries(); });
+    },
+    toggleGroup(i){
+      const k=this.chartHidden.indexOf(i);
+      if(k>=0) this.chartHidden.splice(k,1); else this.chartHidden.push(i);
+      if(!this._chart||this._chart.isDisposed()) return;
+      // 显隐走 legend.selected（merge 更新）：不重建 grid/轴，避开多 grid notMerge 崩溃
+      const sel={};
+      const hidden=new Set(this.chartHidden);
+      (this.chartGroups||[]).forEach(g=>{
+        g.signals.forEach(s=>{ sel[s]=!hidden.has(g.index); });
+      });
+      this._chart.setOption({legend:{selected:sel}});
+    },
+    closeChart(){
+      this.chartData=null;
+      if(this._chart && !this._chart.isDisposed()) this._chart.dispose();
+      this._chart=null;
+    },
+    renderSeries(){
+      const el=this.$refs.chartEl;
+      if(!el||!this.chartData||!this.chartFull) return;
+      if(this._chart && !this._chart.isDisposed()) this._chart.dispose();
+      this._chart=Vue.markRaw(echarts.init(el,null,{renderer:'canvas'}));
+      // 服务端已排好多 grid/共享 x：原样渲染，显隐交给 legend.selected
+      const opt=JSON.parse(JSON.stringify(this.chartFull));
+      const sel={};
+      const hidden=new Set(this.chartHidden);
+      (this.chartGroups||[]).forEach(g=>{
+        g.signals.forEach(s=>{ sel[s]=!hidden.has(g.index); });
+      });
+      opt.legend={show:false, data:(opt.series||[]).map(s=>s.name), selected:sel, type:'scroll'};
+      opt.textStyle={color:'#e2e8f0'};
+      opt.backgroundColor='transparent';
+      (opt.xAxis||[]).forEach(ax=>{
+        ax.axisLine={lineStyle:{color:'#334155'}};
+        ax.axisLabel=Object.assign({}, ax.axisLabel, {color:'#94a3b8'});
+      });
+      (opt.yAxis||[]).forEach(ax=>{
+        ax.nameTextStyle=Object.assign({}, ax.nameTextStyle, {color:'#94a3b8'});
+        ax.axisLabel=Object.assign({}, ax.axisLabel, {color:'#94a3b8'});
+      });
+      (opt.series||[]).forEach(s=>{ s.lineStyle=Object.assign({width:1.2}, s.lineStyle); });
+
+      // 游标读数列出全部信号：axisPointer.link 联动各行 x 轴，trigger:'axis'
+      // 会把所有行的系列并进同一个浮层（12 条 ≈ 500px，confine 保证不出绘图区）。
+      // 隐藏的组（legend.selected 勾掉）ECharts 自动不进 tooltip，无需处理
+      const fmtRow=(params)=>{
+        if(!params||!params.length) return '';
+        const t=Array.isArray(params[0].value)?params[0].value[0]:null;
+        const head=t==null?'':`<div style="opacity:.7">t = ${Number(t).toFixed(3)} s</div>`;
+        return head+params.map(p=>{
+          const v=Array.isArray(p.value)?p.value[1]:p.value;
+          return `${p.marker}${p.seriesName}&nbsp;&nbsp;<b>${v==null?'—':v}</b>`;
+        }).join('<br/>');
+      };
+      opt.tooltip=Object.assign({}, opt.tooltip,
+        {trigger:'axis', confine:true, formatter:fmtRow});
+      // 跨行对齐的竖直游标要留着（这是多行共享时间轴的意义所在）
+      opt.axisPointer={link:[{xAxisIndex:'all'}]};
+
+      this._chart.setOption(opt, true);
+      this._chart.resize();
+    },
+  }
+}).mount('#app');
+</script>
+</body>
+</html>

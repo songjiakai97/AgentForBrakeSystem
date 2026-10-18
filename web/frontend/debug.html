@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Trace 调试 · Brake Agent</title>
+<style>
+body{margin:0;font-family:ui-monospace,Menlo,monospace;background:#0f172a;color:#e2e8f0;font-size:12px}
+header{padding:10px 16px;border-bottom:1px solid #1e293b;display:flex;gap:12px;align-items:center}
+h1{font-size:14px;margin:0;color:#38bdf8}
+.list{height:calc(100vh - 49px);overflow:auto;padding:6px 10px}
+/* 1 级：会话（可收缩）；2 级：单条请求（可收缩，展开看完整 JSON） */
+.chat{padding:8px 6px;border-bottom:1px solid #1e293b;cursor:pointer;display:flex;gap:8px;align-items:baseline}
+.chat:hover{background:#1e293b}
+.chat .cnt{color:#38bdf8;font-size:11px;border:1px solid #164e63;border-radius:8px;padding:1px 7px}
+.trace{padding:5px 6px 5px 26px;border-bottom:1px dashed #1e293b;cursor:pointer;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.trace:hover{background:#1e293b}
+.detail{margin:4px 0 10px 26px}
+.chev{color:#64748b;width:12px;display:inline-block}
+.t{color:#94a3b8}
+.k{color:#7dd3fc;margin-top:6px}
+pre{white-space:pre-wrap;word-break:break-all;background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:10px;max-height:40vh;overflow:auto;margin:4px 0}
+button{background:#334155;border:none;color:#e2e8f0;border-radius:6px;padding:4px 10px;cursor:pointer}
+input{background:#0b1220;border:1px solid #334155;color:#e2e8f0;border-radius:6px;padding:4px 8px}
+.err{color:#fca5a5}
+</style></head>
+<body>
+<header><h1>LLM Trace（仅内存，最近 500 条）</h1>
+<input id="chatf" placeholder="按 chat_id 过滤" style="background:#0b1220;border:1px solid #334155;color:#e2e8f0;border-radius:6px;padding:4px 8px">
+<button onclick="load()">刷新</button>
+<a href="/" style="color:#38bdf8">← 返回对话</a></header>
+<div class="list" id="list"></div>
+<script>
+// 两级结构：1 级 = 会话（chat_id），2 级 = 每条 LLM 请求。点标题收缩/展开，
+// trace 展开后内联完整 request/reply/tools JSON。
+let traces=[];
+const openChats=new Set(), openTraces=new Set();
+
+async function load(){
+  const f=document.getElementById('chatf').value.trim();
+  const r=await fetch('/api/debug/traces'+(f?`?chat_id=${encodeURIComponent(f)}`:''));
+  traces=await r.json();
+  if(!openChats.size && traces.length) openChats.add(traces[0].chat_id);  // 默认展开最近的会话
+  render();
+}
+
+function groupByChat(){
+  const map=new Map();
+  for(const t of traces){
+    if(!map.has(t.chat_id)) map.set(t.chat_id, []);
+    map.get(t.chat_id).push(t);
+  }
+  return map;
+}
+
+function render(){
+  const g=groupByChat();
+  const el=document.getElementById('list');
+  if(!traces.length){
+    el.innerHTML='<div class="chat">暂无 trace（离线路由不产生 trace；配置 OPENAI_API_KEY 后由 LLM 链路写入）</div>';
+    return;
+  }
+  el.innerHTML=[...g.entries()].map(([cid, arr])=>{
+    const open=openChats.has(cid);
+    const head=`<div class="chat" onclick="toggleChat('${cid}')">
+      <span class="chev">${open?'▾':'▸'}</span><b>${cid}</b>
+      <span class="cnt">${arr.length} 条</span>
+      <span class="t">最近 ${new Date((arr[0].ts||0)*1000).toLocaleTimeString()}</span></div>`;
+    const rows = !open ? '' : arr.map(t=>{
+      const open2=openTraces.has(t.trace_id);
+      const row=`<div class="trace" onclick="toggleTrace('${t.trace_id}')">
+        <span class="chev">${open2?'▾':'▸'}</span>
+        <b>R${t.round}</b>
+        <span class="${t.error?'err':''}">[${t.error?('错误: '+t.error):t.finish_reason}]</span>
+        <span class="t">${esc((t.user_text||'').slice(0,60))}</span></div>`;
+      const det=!open2 ? '' : `<div class="detail" onclick="event.stopPropagation()">
+        <div class="k">user_text</div><pre>${esc(t.user_text)}</pre>
+        <div class="k">request messages</div><pre>${esc(JSON.stringify(t.request,null,1))}</pre>
+        <div class="k">reply</div><pre>${esc(JSON.stringify(t.reply,null,1))}</pre>
+        <div class="k">tools executed</div><pre>${esc(JSON.stringify(t.tools,null,1))}</pre></div>`;
+      return row+det;
+    }).join('');
+    return head+rows;
+  }).join('');
+}
+
+function toggleChat(cid){ openChats.has(cid)?openChats.delete(cid):openChats.add(cid); render(); }
+function toggleTrace(tid){ openTraces.has(tid)?openTraces.delete(tid):openTraces.add(tid); render(); }
+
+function esc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;')}
+load();setInterval(()=>{if(!document.hidden)load();},5000);
+</script></body></html>

@@ -1,0 +1,24 @@
+case_id: CASE-2026-ABS-001
+meta:
+  vehicle: {platform: DEMO-P1, brake: IPB-2, tire: 235/50R19}
+  date: 2026-03-14
+  engineer: 示例工程师
+function: abs
+condition: abs_full_brake_dry_asphalt_100kph
+profile: null
+run_count: 6
+anomaly:
+  metric: brake_distance
+  observed: 44.2
+  unit: m
+  status: abnormal
+root_cause_hypothesis: 首次增压请求滞后约 80 ms，初始夹紧力建立慢，ABS 首介入点车速偏高
+tuning_actions:
+  - param: 增压请求阈值
+    direction: increase
+    delta: +5%
+    effect: 提前建立压力，缩短空行程
+    risk: 低附路面早介入风险略增，需复测玄武岩工况
+validation: {metric: brake_distance, after: 38.1}
+outcome: {status: resolved, note: 制动距离回到限值内，横摆无恶化}
+learnings: 干沥青距离超限优先查增压响应链路，而非压力调节频率
