@@ -466,7 +466,7 @@ LLM 可选/降级。`AnalysisResult` 一次生成，Web 各视图共用。
 
 所有对话请求都经由 `agent/` 编排。
 
-工具集（内置六个，规格全部由配置生成，见 §13；外部 MCP 工具挂载后并列进同一份规格表，
+工具集（内置七个，规格全部由配置生成，见 §13；外部 MCP 工具挂载后并列进同一份规格表，
 见 §6.11）：
 
 - `resolve_condition(function_key?, maneuver?, surface_code?, params?, query, evidence)`：
@@ -481,8 +481,12 @@ LLM 可选/降级。`AnalysisResult` 一次生成，Web 各视图共用。
   模型按 prompt 里编号点名的文件（1 起），供「把这几份对比一下」这类明确要求使用。
 - `recommend_targets(query, max_items)`：两跳规则打分，保留为**兜底与离线路径**——
   在线 LLM 不可用、或描述无法转成结构化槽位时使用，与离线路由同一实现，保证降级一致。
-- `search_manual(query, top_k?)`：手册知识检索（§11.4 三通道）。知识性问答的数据来源；
-  无命中必须如实说明，不得编造手册内容。结果标 `transient`。
+- `search_manual(query, condition?, top_k?)`：手册知识检索（§11.4 混合检索）。知识性问答
+  的数据来源；`condition` 传工况词做硬过滤（查询明确针对某工况时必填，防同名表跨工况
+  串扰）。无命中必须如实说明，不得编造手册内容。结果标 `transient`。
+- `get_param(name, condition?)`：按参数名精确查询手册表格行（归一化匹配；无命中降级
+  子串匹配并标 `match: partial`），初始值/当前值/单位分字段返回——参数值类问答首选，
+  值必须原样引用。结果标 `transient`。
 - `list_files(file_index?)`：会话文件清单（编号/名称/大小/是否本轮默认范围）；
   带 `file_index` 才加载该文件信号并返回通道名（加载前发心跳事件）。结果标 `transient`。
 
@@ -828,7 +832,7 @@ MATLAB 侧还要注意：`--matlab-root` / `--initialize-matlab-on-startup` /
 
 #### 与内置工具的关系
 
-外部工具与六个内置工具（resolve/list/recommend/run_analysis/search_manual/list_files）
+外部工具与七个内置工具（resolve/list/recommend/run_analysis/search_manual/get_param/list_files）
 **并列在同一份 `tool_specs` 里**（`engine.py`），模型看到的是
 一次 list，不需要知道哪些来自外部——分开列会让它以为有两套调用规则。执行时
 `exec_tools` 查不到且 `mcp.is_external(name)` 才走 hub，查不到又不是外部的仍是
@@ -1650,18 +1654,33 @@ learnings: <text>
 
 ### 11.4 检索与注入
 
-三通道，按置信度取用（`kb.search`）：
+**分层分块**：索引粒度是**块**不是整节——节内按 `####` 子标题切块（无子标题整节一块），
+块文本带节标题前缀（脱离上下文的块也知道自己讲哪个工况）；块 id 为 `section_id` 或
+`section_id#N`。动机：真实标定手册一节内混着工况说明/参数表/评价标准/结果分析，
+整节一个向量会让「查参数名」和「查评价标准」命中同一大块。
+
+检索 = 三通道混合（`kb.search`）：
 
 1. **精确引用**：规则 verdict 的 `kb_ref` → `section_id` 直取原文段（规范依据，确定性最强）；
-2. **语义检索**：sqlite-vec KNN，向量按「模型名+内容 hash」**增量同步**（改手册只重算变更节，
-   换 embedding 模型自动按表隔离）；`ENABLE_RAG` 开关，embedding 端点不可用自动降级；
-3. **关键词 bigram 兜底**：中文无分词场景的子句覆盖率打分，保证语义通道挂掉也不空手。
+2. **语义**：sqlite-vec KNN over 块向量，按「模型名+块内容 hash」增量同步（改一个 ####
+   小块只重算那一块）；
+3. **关键词**：整词命中 + 中文 bigram 覆盖率——对 `Opt_Instabil_Lambda_HA` 这类精确
+   参数名（稀有 token）恰好是语义检索的短板、关键词的长板。
+
+语义与关键词**都有结果时按 RRF（Reciprocal Rank Fusion，k=60）融合排序**：
+各通道按名次给 `1/(60+名次)` 求和——参数块即使语义排名靠后，关键词第一名也会把它
+抬到融合榜首。`ENABLE_RAG` 开关，embedding 不可用自动退纯关键词；`last_search_mode`
+回显实际通道（hybrid/semantic/keyword）。
 
 - LLM 注入结构（标定建议，§6.9 `_maybe_suggest`）：
-  - 规则触发结论 + 对应手册 section，标注"规范依据"；
-  - 语义补充 top-2（规则没引用 ≠ 手册没有相关内容），与精确引用去重；
+  - 规则触发结论 + 对应手册 section，标注"规范依据"（注入 400 字，覆盖节级合并后的
+    参数表/评价标准主体）；
+  - 语义补充 top-2（规则没引用 ≠ 手册没有相关内容），**带 `condition=当前工况` 过滤**
+    （防同名表跨工况串扰），与精确引用去重（注入 500 字，small-to-big 节级文本）；
   - 相似历史案例 top-k 摘要，标注"参考，可推广，注意差异"；
   - 指示 LLM 只能把手册当硬约束。
+- 参数查询：`kb.get_param(name, condition)` 归一化精确匹配，无命中降级子串匹配
+  （`match: partial`）；对话路径由 `get_param` 工具暴露，参数值必须原样引用。
 - 对话路径：`search_manual` 工具（§6.9）让 LLM 知识性问答直接检索手册，无命中必须如实说明。
 
 ### 11.5 治理
@@ -2024,6 +2043,20 @@ curl -s -X POST localhost:8000/api/mcp/call/mcp__matlab__detect_matlab_toolboxes
   表格转 md 表，前言自动成节，section id（`slug.s<N>`）自动生成并回显；原件存 `knowledge/archive/`。
 - 语义检索：sqlite-vec 单文件向量库（§11.4 三通道）；手册与工况共用 `vectors.db`（前缀隔离），
   内容 hash **增量同步**；demo 手册已删，`rag_sample.md` 为验证样例。
+
+**检索升级（§11.4）**
+- 知识检索从整节粒度升级为 **#### 分块 + 语义/关键词 RRF 混合**：真实标定手册
+  （参数表+评价标准+结果分析混在一节）按块命中，参数名精确查询走关键词通道。
+- **P1 参数索引**：表格行结构化抽取（内存态，`kb.get_param(name, condition)`），
+  参数值类问答走精确/归一化匹配，初始值/当前值分字段返回，不走向量；
+  新增 `get_param` 工具（`search_manual` 增加 `condition` 参数做工况硬过滤）。
+- **P2 工况硬过滤**：`kb.search(condition=...)` 按节标题/文档标题过滤块，防同名
+  参数表/条款跨工况串扰；过滤为空回退不过滤（宁多勿缺）。
+- **P3 符号保护回归测试**：U+2011/±/· 等特殊符号在摄取→切节→检索全链路逐字符
+  断言不变（真实文档 `[-4 ‑4 ‑4 ‑4 ‑4 ‑4]` 曾被发现丢空格，已修正原文）。
+- **A+B 收尾**：标定建议通道对齐（语义补充带 `condition=当前工况` 过滤；注入长度
+  400/500 适配节级合并）；`get_param` 精确无命中降级子串匹配（`match: partial`）；
+  内置工具 6 → 7。
 
 **工况识别（§13）**
 - A：`resolve_condition` 唯一键零命中时语义召回（`agent/cond_index.py`），双阈值

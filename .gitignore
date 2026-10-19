@@ -225,3 +225,6 @@ knowledge/archive/
 .pytest_cache/
 *.pyc
 __pycache__/
+
+# 内部标定文档（保密），仅本机知识库使用
+knowledge/manual/abs_calib.md

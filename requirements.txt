@@ -1,4 +1,6 @@
 # core
+# chardet 钉在 5.x：7.x 的编译二进制（.pyd）在部分 Windows 环境加载失败（DLL 错误）
+chardet>=5,<6
 numpy
 scipy
 pyyaml

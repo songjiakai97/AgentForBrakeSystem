@@ -160,7 +160,7 @@ def test_build_tool_specs_enums_come_from_config(cfg):
     specs = {s["function"]["name"]: s for s in build_tool_specs(cfg)}
     assert set(specs) == {"resolve_condition", "list_conditions",
                           "run_analysis_on_files", "recommend_targets",
-                          "search_manual", "list_files"}
+                          "search_manual", "get_param", "list_files"}
     props = specs["resolve_condition"]["function"]["parameters"]["properties"]
     v = cfg.vocab()
     assert props["maneuver"]["enum"] == v["maneuver"]
@@ -699,7 +699,7 @@ def test_engine_sends_config_derived_tool_specs():
         pass
     names = llm.tools_seen[0]
     assert {"resolve_condition", "list_conditions", "run_analysis_on_files",
-            "recommend_targets", "search_manual", "list_files"} == set(names),         "六个工具都要暴露，兜底路径同一实现"
+            "recommend_targets", "search_manual", "get_param", "list_files"} == set(names),         "七个工具都要暴露，兜底路径同一实现"
 
 
 def test_engine_prunes_old_catalog_from_later_requests():

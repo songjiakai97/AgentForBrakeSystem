@@ -292,7 +292,10 @@ class ChatEngine:
                 self.cfg, args.get("query", text), args.get("max_items", 15),
                 function_key=chat.selected_function,
             ),
-            "search_manual": lambda args: self._kb_search_tool(args.get("query", "")),
+            "search_manual": lambda args: self._kb_search_tool(
+                args.get("query", ""), condition=args.get("condition")),
+            "get_param": lambda args: self._get_param_tool(
+                args.get("name", ""), condition=args.get("condition")),
             "list_files": lambda args: self._list_files_tool(chat, args.get("file_index")),
             "run_analysis_on_files": lambda args: self._analyze(
                 chat, args.get("condition_id"), args.get("profile"), stop_event,
@@ -668,19 +671,42 @@ class ChatEngine:
         return added, digests
 
     # ------------------------------------------------------------ 知识/文件工具
-    def _kb_search_tool(self, query: str) -> dict:
+    def _kb_search_tool(self, query: str, condition: Optional[str] = None) -> dict:
         """手册语义检索工具：知识性问答的数据来源，无命中也如实回执（防编造）。"""
         query = (query or "").strip()
         if not query:
             return {"ok": False, "note": "query 为空：给一句检索问句"}
-        hits = self.kb.search(query, top_k=3)
+        hits = self.kb.search(query, top_k=5, condition=condition)
+        # 1500：标定手册的参数表块实测 ~1100 字符（19 行基础参数表），截 400 会把
+        # 表格大半裁掉，"有哪些参数"类问题就答不全。超长块裁掉尾部并明示，
+        # 引导模型改用 get_param 按参数名逐个查询
+        out = []
+        for h in hits:
+            snippet = h["text"][:1500]
+            if len(h["text"]) > 1500:
+                snippet += "…（内容已截断：需要具体参数值时用 get_param 按参数名查询）"
+            out.append({"id": h["id"], "title": h["title"], "snippet": snippet})
         return {
             "ok": True,
             "transient": True,          # 检索结果用完即弃：下一轮压缩成存根
             "mode": self.kb.last_search_mode,
             "note": "" if hits else "手册中没有相关内容；如实告知用户，不要编造手册内容",
-            "results": [{"id": h["id"], "title": h["title"],
-                         "snippet": h["text"][:400]} for h in hits],
+            "results": out,
+        }
+
+    def _get_param_tool(self, name: str, condition: Optional[str] = None) -> dict:
+        """参数精确查询工具（P1 参数索引）：参数值类问答的首选，值原样引用。"""
+        name = (name or "").strip()
+        if not name:
+            return {"ok": False, "note": "name 为空：给参数名，如 Cp_FA"}
+        rows = self.kb.get_param(name, condition=condition)
+        return {
+            "ok": True,
+            "transient": True,
+            "note": "" if rows else "手册表格中没有该参数名；"
+                    "确认参数名拼写与手册一致，或用 search_manual 语义检索",
+            "results": [{"param": r["param"], "fields": r["fields"],
+                         "section": r["section"]} for r in rows],
         }
 
     def _list_files_tool(self, chat, file_index) -> dict:
@@ -754,7 +780,8 @@ class ChatEngine:
             return
         snippets = self._kb_snippets(res, fn, query=" ".join(
             [cond.name] + list(dict.fromkeys(
-                v.fault_domain for s in res.samples for v in s.verdicts))))
+                v.fault_domain for s in res.samples for v in s.verdicts))),
+            condition=cond.name)
         user = suggestion_prompt(self.cfg, fn, cond, res, snippets)
         if user is None:
             return
@@ -775,7 +802,8 @@ class ChatEngine:
         else:
             res.degraded = True
 
-    def _kb_snippets(self, res: AnalysisResult, fn, query: str = "") -> List[str]:
+    def _kb_snippets(self, res: AnalysisResult, fn, query: str = "",
+                     condition: Optional[str] = None) -> List[str]:
         out = []
         seen = set()
         for s in res.samples:
@@ -790,14 +818,17 @@ class ChatEngine:
                                 sec = self.kb.section(sid)
                                 break
                     if sec:
-                        out.append(f"[{ref}] {sec.text[:300]}")
+                        # 节级合并后 text 是完整节（真实手册 1100+ 字），400 才够覆盖
+                        # 参数表/评价标准主体
+                        out.append(f"[{ref}] {sec.text[:400]}")
         # 语义补充：kb_ref 是规则写死的引用，规则没引用 ≠ 手册里没有相关内容；
-        # 按工况名+故障域做语义召回 top-2，注入前与精确引用去重
+        # 按工况名+故障域做语义召回 top-2（带工况过滤防同名表跨工况串扰），
+        # 注入前与精确引用去重
         if query:
-            for hit in self.kb.search(query, top_k=2):
-                if hit["id"] not in seen and hit.get("text"):
-                    seen.add(hit["id"])
-                    out.append(f"[{hit['id']}] {hit['text'][:300]}")
+            for hit in self.kb.search(query, top_k=2, condition=condition):
+                if (hit.get("chunk") or hit["id"]) not in seen and hit.get("text"):
+                    seen.add(hit.get("chunk") or hit["id"])
+                    out.append(f"[{hit['id']}] {hit['text'][:500]}")
         return out
 
     def _case_hint(self, res: AnalysisResult, fn) -> str:

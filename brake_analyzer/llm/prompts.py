@@ -183,17 +183,42 @@ def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> L
             "function": {
                 "name": "search_manual",
                 "description": (
-                    "检索标定手册/知识库（语义匹配，支持自然语言问句）。"
-                    "用户问判定标准、超限成因、标定方向等知识性问题时调用；"
-                    "回答时引用结果里的节 id。没有命中也如实说明，不要编手册内容。"
+                    "检索标定手册/知识库（语义+关键词混合，支持自然语言问句）。"
+                    "用户问判定标准、超限成因、标定方向、工况流程等知识性问题时调用；"
+                    "查具体参数值优先用 get_param。回答时引用结果里的节 id。"
+                    "没有命中也如实说明，不要编手册内容。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "检索问句或要点"},
-                        "top_k": {"type": "integer", "description": "返回条数，默认 3，最大 5"},
+                        "condition": {"type": "string",
+                                      "description": "工况词（如 洒水玄武岩）。查询明确针对"
+                                                     "某个工况时填写，避免同名内容跨工况串扰"},
+                        "top_k": {"type": "integer", "description": "返回条数，默认 5"},
                     },
                     "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_param",
+                "description": (
+                    "按参数名精确查询手册表格中的参数定义/初始值/当前值/单位。"
+                    "「某参数是多少/当前值是什么」类问题首选本工具，值必须原样引用。"
+                    "参数名必须与手册一致（如 Cp_FA、Opt_Instabil_Lambda_HA）。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "参数名，与手册一致"},
+                        "condition": {"type": "string",
+                                      "description": "工况词；同名参数存在于多个工况时必填，"
+                                                     "否则会返回各工况的全部取值"},
+                    },
+                    "required": ["name"],
                 },
             },
         },
