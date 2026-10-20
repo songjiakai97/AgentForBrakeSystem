@@ -211,24 +211,23 @@ def test_system_chat_routes_knowledge_questions_away_from_upload():
     assert "清单为空" in SYSTEM_CHAT
 
 
-def test_system_chat_distinguishes_split_and_rolling_mu():
-    """对开（split-μ，横向左右不同）与对接（rolling-μ，纵向沿程突变）必须分开定义。
+def test_surface_code_desc_warns_about_combined_surfaces(cfg):
+    """对开(split-μ)、对接(rolling-μ)不在 surface_code 取值域内，enum 挡不住语义混淆。
 
-    两者常被混为一谈，混了之后照着错误的失效机理给标定方向：对开考核偏航/跑偏，
-    对接考核跨边界瞬间的减速度突变与介入迟滞。
+    实测 `resolve_condition(evidence="ABS 对开沥青路面 …", surface_code="dry_asphalt")`
+    返回 hop=resolved——槽位证据校验只查原话里有没有那个词，「沥青」二字就过了。
+    路面分类的长篇口径已按成本删掉，这里只保留工具描述这一行边界提示；真要硬拦
+    得在 tools.py 加组合路面守卫（未做）。
     """
-    from brake_analyzer.llm.prompts import ROAD_SURFACE_PRIMER, SYSTEM_CHAT
+    from brake_analyzer.llm.prompts import SYSTEM_CHAT
 
-    assert "对开路面" in SYSTEM_CHAT and "对接路面" in SYSTEM_CHAT
-    assert "split-μ" in ROAD_SURFACE_PRIMER and "rolling-μ" in ROAD_SURFACE_PRIMER
-    assert "横向不对称" in ROAD_SURFACE_PRIMER   # 对开 = 左右
-    assert "纵向跨时间" in ROAD_SURFACE_PRIMER   # 对接 = 沿程
-    # 对接的两个方向都得点名，模型常只写一个
-    assert "step-down" in ROAD_SURFACE_PRIMER and "step-up" in ROAD_SURFACE_PRIMER
-    # 词表里只有匀质三类：必须明说对开/对接不能塞进 surface_code
-    for code in ("dry_asphalt", "wet_basalt", "wet_tile"):
-        assert code in ROAD_SURFACE_PRIMER
-    assert "不在 surface_code 取值域内" in ROAD_SURFACE_PRIMER
+    sc = next(p for p in build_tool_specs(cfg)
+              if p["function"]["name"] == "resolve_condition") \
+        ["function"]["parameters"]["properties"]["surface_code"]
+    assert "对开" in sc["description"] and "对接" in sc["description"]
+    assert "不要挑一个凑唯一命中" in sc["description"]
+    # 分类长文已移除：SYSTEM_CHAT 里不该再有路面口径段落
+    assert "路面与附着分类口径" not in SYSTEM_CHAT
 
 
 def test_profiles_presented_as_dimensions_not_flat_choices(cfg):

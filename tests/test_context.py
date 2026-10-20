@@ -217,7 +217,7 @@ class FakeLlm:
 def _resident_floor() -> int:
     """空会话下 resident 部分的实测 token：system prompt + 功能目录 + 文件清单块。
 
-    提示词演进会让它变长（路面分类口径一次就加了约 500 tok），
+    提示词演进会让它变长（分流规则一次就加了约 220 tok），
     所以下面的预算都按它的倍数推导，不写死数字。
     """
     import os
