@@ -579,7 +579,7 @@ class KnowledgeBase:
                     knn = self._vec_db.execute(
                         f'SELECT rowid, distance FROM "{table}" '
                         "WHERE embedding MATCH ? AND k=? ORDER BY distance",
-                        (qb, min(10, max(top_k * 2, 6)))).fetchall()
+                        (qb, min(16, max(top_k * 3, 8)))).fetchall()
                 for rowid, _dist in knn:
                     row = self._vec_db.execute(
                         "SELECT section_id FROM items WHERE id=?", (rowid,)).fetchone()

@@ -840,9 +840,12 @@ class ChatEngine:
                                 sec = self.kb.section(sid)
                                 break
                     if sec:
-                        # 节级合并后 text 是完整节（真实手册 1100+ 字），400 才够覆盖
-                        # 参数表/评价标准主体
-                        out.append(f"[{ref}] {sec.text[:400]}")
+                        # 1200：覆盖整张参数表；精确引用没有命中块可围绕，退而求
+                        # 其次锚到节内第一张表格——kb_ref 进建议 prompt 就是冲
+                        # 限值表去的，从节头叙述裁会让表尾丢在窗口外
+                        anchor = 0 if sec.text.startswith("|") else sec.text.find("\n|")
+                        start = anchor if anchor >= 0 else 0
+                        out.append(f"[{ref}] {sec.text[start:start + 1200]}")
         # 语义补充：kb_ref 是规则写死的引用，规则没引用 ≠ 手册里没有相关内容；
         # 按工况名+故障域做语义召回 top-2（带工况过滤防同名表跨工况串扰），
         # 注入前与精确引用去重
@@ -868,7 +871,7 @@ class ChatEngine:
         for c in cases:
             act = c.data.get("tuning_actions", [])
             a = "; ".join(f"{x.get('param')} {x.get('direction')}" for x in act[:2])
-            lines.append(f"- {c.case_id}: {c.data.get('root_cause_hypothesis', '')[:60]} 动作[{a}]")
+            lines.append(f"- {c.case_id}: {c.data.get('root_cause_hypothesis', '')[:120]} 动作[{a}]")
         return "\n".join(lines)
 
     # ------------------------------------------------------------ 消息工厂

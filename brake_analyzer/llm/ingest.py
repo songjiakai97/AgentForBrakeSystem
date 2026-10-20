@@ -3,7 +3,9 @@
 - 段落与表格按文档顺序转换；表格转 Markdown 表——标定手册的信息大头在
   限值表/参数表里，丢了表格语义就丢了一半。
 - Heading 1 → 文档标题；Heading 2 → 一节（### <slug>.s<N> — 标题）；
-  Heading 3+ → 节内子标题。整篇没有 Heading 2 时退化用 Heading 1 切节。
+  Heading 3 → 节内子标题（#### 父节标题 · 子标题：各工况下子标题大量同名，
+  拼接父级让 md 里的标题行自解释、可区分归属）；Heading 4+ → 更深子标题。
+  整篇没有 Heading 2 时退化用 Heading 1 切节。
 - 节 id 由「文件 slug + 序号」生成：真实手册标题五花八门，不假设能从标题
   造出合法 id；返回 id↔标题对照，规则引擎的 kb_ref 将来要引用这些 id，
   用户在导入回执里能看到、能改。
@@ -124,6 +126,11 @@ def docx_to_markdown(path: str, source_name: str = "") -> IngestResult:
             sections.append(cur)
         if lvl == -1:
             cur["lines"].append(text)
+        elif lvl == sec_level + 1:
+            # 子标题拼接父级节名：标定手册每个工况下都有同名「标定参数说明」
+            # 「评价标准说明」，光看 `####` 行无法区分归属——检索片段、Web 浏览、
+            # 表格定位都靠这行认上下文，必须在转 md 时就做成唯一、自解释的标题
+            cur["lines"].append("#### " + f"{cur['title']} · {text}")
         elif lvl > sec_level:
             cur["lines"].append("#" * (lvl + 1) + " " + text)
         else:

@@ -34,7 +34,11 @@ SYSTEM_CHAT = """你是制动系统测试数据分析与标定指导助手，服
 - 回答使用简体中文，简洁、面向工程师。"""
 
 HISTORY_TAIL = 40   # 回灌的历史条数上限：只是保险丝，真正的长度由 token 预算控制
-TOOL_PAYLOAD_CLIP_CHARS = 4000   # 单个工具结果写入上下文的字数上限
+TOOL_PAYLOAD_CLIP_CHARS = 10000  # 单个工具结果写入上下文的字数上限
+# 10000 ≈ 10k token（CJK 1 字 1 token）：对话模型窗口按 >100k 规划时，单轮
+# 工具结果约占 CONTEXT_MAX_TOKENS 的 1/3，6 轮循环仍有余量；配合 _kb_payload
+# 的预算均分，search_manual 不再撞外层硬闸。注意这是用量控制不是容量兜底——
+# 放大它对每轮 prefill 延迟/计费是线性的。
 
 # 挂了外部 MCP 工具时才注入的口径（§6.11）。写成常量而不是散在 engine 里，
 # 是为了让它进 token 实测：这段文本每轮都付，长一分就贵一分。

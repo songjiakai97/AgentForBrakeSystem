@@ -347,11 +347,13 @@ class ContextCompressor:
                 role = m.get("role", "?")
                 content = m.get("content")
                 if isinstance(content, str) and content.strip():
-                    lines.append(f"{role}: {content.strip()[:300]}")
+                    # 600/240：对话模型窗口按 >100k 规划、摘要预算随之放宽后，
+                    # 素材二次带损没有必要——摘要质量取决于这里看到多少原文
+                    lines.append(f"{role}: {content.strip()[:600]}")
                 for tc in m.get("tool_calls") or []:
                     fn = (tc or {}).get("function") or {}
                     lines.append(f"{role} 调用 {fn.get('name', '?')} "
-                                 f"{str(fn.get('arguments') or '')[:120]}")
+                                 f"{str(fn.get('arguments') or '')[:240]}")
             parts.append(" / ".join(lines))
         return "\n".join(parts)
 

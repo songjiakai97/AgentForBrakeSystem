@@ -652,7 +652,9 @@ Token 估算：不引入 tokenizer 依赖（core/web 环境未必装 openai/tikt
   `prompts.HISTORY_TAIL = 40`；条数只是保险丝，真正的长度由 token 预算决定。
   `analysis_result` 只回灌 `content`（含 §6.9 的数值行），`data` 里的图表数据不进 prompt；
   `steps` / `target_options` / `attachment` 仍不进 prompt。
-- 单个工具结果写入上下文上限 `prompts.TOOL_PAYLOAD_CLIP_CHARS = 4000` 字。
+- 单个工具结果写入上下文上限 `prompts.TOOL_PAYLOAD_CLIP_CHARS = 10000` 字
+  （对话模型窗口按 >100k 规划时的用量档位；`.env` 的 `CONTEXT_MAX_TOKENS`
+  相应调大，属部署配置）。
 
 观测：`GET /api/context/stats?cid=` 返回当前会话上下文的估算 token 与两条阈值的关系；
 `GET /api/meta` 的 `context` 字段回显生效的预算与摘要方式（`llm` / `extractive`）。
@@ -1673,8 +1675,9 @@ learnings: <text>
 回显实际通道（hybrid/semantic/keyword）。
 
 - LLM 注入结构（标定建议，§6.9 `_maybe_suggest`）：
-  - 规则触发结论 + 对应手册 section，标注"规范依据"（注入 400 字，覆盖节级合并后的
-    参数表/评价标准主体）；
+  - 规则触发结论 + 对应手册 section，标注"规范依据"（注入 1200 字，锚到节内
+    第一张表格起裁——kb_ref 进 prompt 就是冲限值表去的，从节头叙述裁会让表尾
+    丢在窗口外）；
   - 语义补充 top-2（规则没引用 ≠ 手册没有相关内容），**带 `condition=当前工况` 过滤**
     （防同名表跨工况串扰），与精确引用去重（注入 500 字，`snippet_window` 中心窗口）；
   - 相似历史案例 top-k 摘要，标注"参考，可推广，注意差异"；

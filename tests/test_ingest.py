@@ -46,10 +46,9 @@ def test_docx_sections_tables_and_ids(tmp_path):
     # 表格转 md 表（标定手册的信息大头）
     assert "| 指标 | 限值 |" in res.markdown
     assert "| yaw | 5 |" in res.markdown
-    # H3 保留为节内子标题，不切断节
-    assert "#### 详细说明" in res.markdown
-    assert any(s["title"] == "横摆稳定性" and "详细说明" in s for s in res.sections) or \
-        "节内子标题下的细节" in res.markdown
+    # H3 保留为节内子标题，不切断节；且拼接父级节名保证唯一（见下）
+    assert "#### 横摆稳定性 · 详细说明" in res.markdown
+    assert "节内子标题下的细节" in res.markdown
 
 
 def test_ingested_markdown_is_kb_parseable(tmp_path):
@@ -115,3 +114,21 @@ def test_upload_rejects_bad_ext(client):
     r = client.post("/api/kb/manual",
                     files={"files": ("x.pdf", b"fake", "application/pdf")})
     assert r.status_code == 400
+
+
+def test_subheadings_unique_across_sections(tmp_path):
+    """同名子标题（各工况都有「标定参数说明」）拼接父级后必须唯一可辨。"""
+    import docx
+    d = docx.Document()
+    d.add_heading("ABS 标定手册", level=1)
+    for cond in ("干沥青100km/h", "洒水玄武岩60km/h"):
+        d.add_heading(cond, level=2)
+        d.add_heading("标定参数说明", level=3)
+        d.add_paragraph(f"{cond} 的参数表")
+    p = tmp_path / "m2.docx"
+    d.save(str(p))
+    res = docx_to_markdown(str(p), source_name="m2.docx")
+    subs = [ln for ln in res.markdown.splitlines() if ln.startswith("#### ")]
+    assert len(subs) == 2
+    assert len(set(subs)) == 2, f"子标题撞名: {subs}"
+    assert any("干沥青100km/h · 标定参数说明" in s for s in subs)

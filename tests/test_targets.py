@@ -651,13 +651,20 @@ def test_digest_payload_degrades_instead_of_breaking_json():
                           "conclusion": "说明" * 60, "direction": "高于上界 40m",
                           "severity": "high"}]}]}
 
-    many = [fake(i) for i in range(40)]
+    many = [fake(i) for i in range(400)]
+    # 条数按预算动态取：4× 原始可容纳量，保证三级降级（去结论→去 verdicts→
+    # 丢旧份）全部走完仍超预算——必须测到「丢份数」这一步，且常量再变大时
+    # 断言不形同虚设
+    many = [fake(i) for i in range(200)]
+    per = len(json.dumps(many[0], ensure_ascii=False))
+    n = max(3, (TOOL_PAYLOAD_CLIP_CHARS - 256) // per * 4)
+    many = many[:n]
     kept = digest_payload(many, TOOL_PAYLOAD_CLIP_CHARS - 256)
     assert kept and len(json.dumps(kept, ensure_ascii=False)) <= TOOL_PAYLOAD_CLIP_CHARS
     assert len(kept) < len(many)
-    # 保留的是最近的几份，且数值仍完整
+    # 保留的是最近的几份，且数值仍完整（条数动态，不能硬编码工况39）
     assert kept[-1]["condition_name"] == many[-1]["condition_name"]
-    assert kept[-1]["samples"][0]["metrics"][0]["value"] == 79.0
+    assert kept[-1]["samples"][0]["metrics"][0]["value"] == many[-1]["samples"][0]["metrics"][0]["value"]
     # 单份就超限的极端情况不崩：宁可不给，也不给坏 JSON
     huge = [{"condition_name": "x", "samples": [{"run": 1, "file": "f",
               "metrics": [{"metric": "m" * 3000, "value": 1, "unit": "", "status": "ok"}]}]}]
