@@ -1,6 +1,7 @@
 """docx 手册摄取 + KB 上传/删除链路测试。python-docx 缺失时整文件跳过（与 BLF 同口径）。"""
 
 import os
+import uuid
 
 import pytest
 
@@ -86,28 +87,39 @@ def client():
 
 def test_upload_delete_roundtrip(client, tmp_path):
     """上传 docx → 节出现在 /api/kb → 删除 → /api/kb 恢复为空（不污染真实 knowledge/）。"""
+    import uuid as _uuid
+
     from web import main as m
 
     p = tmp_path / "up.docx"
     _make_docx(p)
+    fname = _uuid.uuid4().hex[:6] + ".docx"
     before = len(m.KB.sections)
     with open(str(p), "rb") as f:
         r = client.post("/api/kb/manual",
-                        files={"files": ("up.docx", f, "application/octet-stream")})
+                        files={"files": (fname, f, "application/octet-stream")})
     assert r.status_code == 200, r.text
     body = r.json()["files"][0]
-    assert body["source"] == "docx" and body["section_count"] == 3
-    assert body["sections"][0]["id"].startswith("up.s")
+    assert body["source"] == "docx" and body["section_count"] == 4
+    # markitdown 产物按 H1/H2/H3 层级切节：id 为 <hex>.NN（两位序号），
+    # 节标题带 doc_title 面包屑
+    assert [x["id"] for x in body["sections"]] ==         [f"{fname.split('.')[0]}.0{i}" for i in (1, 2, 3, 4)]
+    assert [x["title"] for x in body["sections"]] ==         ["测试标定手册",
+     "测试标定手册 · 横摆稳定性",
+     "测试标定手册 · 横摆稳定性 · 详细说明",
+     "测试标定手册 · 制动距离"]
     kb = client.get("/api/kb").json()
-    assert any(g["function"] == "up" for g in kb["manual"])
+    assert any(g["function"] == fname.split(".")[0] for g in kb["manual"])
     # 原件留底
-    assert os.path.isfile(os.path.join(m.KB_ARCHIVE_DIR, "up.docx"))
+    assert os.path.isfile(os.path.join(m.KB_ARCHIVE_DIR, fname))
 
-    r = client.delete("/api/kb/manual/up")
+    r = client.delete("/api/kb/manual/" + body["file"].rsplit(".", 1)[0])
     assert r.status_code == 200, r.text
     assert len(m.KB.sections) == before
     kb = client.get("/api/kb").json()
-    assert not any(g["function"] == "up" for g in kb["manual"])
+    assert not any(g["function"] == fname.split(".")[0] for g in kb["manual"])
+    # 删除接口应连留底原件一起清掉，否则测试反复跑会堆积 archive
+    assert not os.path.isfile(os.path.join(m.KB_ARCHIVE_DIR, fname))
 
 
 def test_upload_rejects_bad_ext(client):
@@ -250,3 +262,33 @@ def test_no_h2_chapter_doc_splits_by_chapter(tmp_path):
     assert "第1章 对开路面" in titles and "第2章 高附对接低附" in titles
     assert any(ln.startswith("#### 第1章 对开路面 · 标定参数说明")
                for ln in res.markdown.splitlines())
+
+
+def test_md_without_headings_rejected(client, tmp_path):
+    """无标题 md → 400 拒绝：防止贡献 0 节的"死文件"静默入库。"""
+    p = tmp_path / "plain.md"
+    p.write_text("就是一段纯文字，没有任何标题。", encoding="utf-8")
+    with open(str(p), "rb") as f:
+        r = client.post("/api/kb/manual",
+                        files={"files": ("plain.md", f, "text/markdown")})
+    assert r.status_code == 400
+    assert "标题" in r.json()["detail"]
+
+
+def test_md_upload_report_changed_sections(client, tmp_path):
+    """md 直传的回执同样返回新增/变化节对照（⑤ docx/md 统一口径）。"""
+    import uuid as _uuid
+
+    fname = _uuid.uuid4().hex[:6] + ".md"
+    p = tmp_path / "m.md"
+    p.write_text("### m.s1 — 横摆稳定性\n\n判定内容。\n", encoding="utf-8")
+    try:
+        with open(str(p), "rb") as f:
+            r = client.post("/api/kb/manual",
+                            files={"files": (fname, f, "text/markdown")})
+        body = r.json()["files"][0]
+        assert body["section_count"] >= 1
+        # md 里有声明式标题 `### m.s1 — …` → 节 id 取声明的 id（不是文件名前缀）
+        assert body["sections"][0]["id"] == "m.s1"
+    finally:
+        client.delete("/api/kb/manual/" + fname.rsplit(".", 1)[0])

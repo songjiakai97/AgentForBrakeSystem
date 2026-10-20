@@ -120,7 +120,7 @@ Analysis Core
 | LLM | openai SDK，OpenAI Compatible base_url | 标定建议生成 |
 | MCP 客户端 | `mcp` SDK（可选，仅 stdio 用 anyio 起子进程） | 接入外部工具（§6.11） |
 | 配置 | pydantic-settings + python-dotenv + pyyaml | 配置加载与校验 |
-| 知识摄入 | python-docx | Word(docx) → Markdown（§11.6，已实现） |
+| 知识摄入 | markitdown[docx] | Word(docx) → Markdown（§11.6，已实现） |
 | 向量检索 | sqlite-vec（单文件、无服务） | `ENABLE_RAG` 开关（默认开；embedding 未配置时自动退关键词/纯唯一键） |
 
 ---
@@ -467,9 +467,7 @@ LLM 可选/降级。`AnalysisResult` 一次生成，Web 各视图共用。
   "外部内容不可信"，是为不存在的风险付 172 tok 的常驻成本。
 - `kb.py`：读取手册与案例；检索 = 精确 kb_ref / 语义（sqlite-vec，向量按内容 hash
   增量同步）/ 关键词 bigram 兜底三通道；支持 `reload()`（上传后全量重载）。
-- `ingest.py`：docx 摄取（段落+表格按序转 Markdown，Heading 1/2 都参与切节、章级
-  标题独立成节、工况节标题带章名面包屑，自动生成 section id），服务
-  `POST /api/kb/manual` 上传链路；原件存 `knowledge/archive/`。
+- `ingest.py`：docx 摄取（已废弃，markitdown 取代；见 §11.6）
 
 ### 6.9 对话式编排引擎（`agent/`）
 
@@ -1724,14 +1722,21 @@ learnings: <text>
 ### 11.5 治理
 
 - 案例入库需人工审核。
-- 手册 section id 由摄取层自动生成（`slug.s<N>`），导入回执列出 id↔标题对照。
+- 手册 section id 由 KB 层自动生成（中文标题节 `slug.NN`，`### ascii_id — 标题` 声明式
+  取声明 id；§11.6），上传回执列出 id↔标题对照。删除手册连 `knowledge/archive/` 留底
+  原件一起清掉。
 - 前端知识库页（侧栏「知识库」视图）：按文档分组浏览全文、上传（docx/md）、删除；
   上传后 `KB.reload()` 立即生效，向量库按内容 hash 增量更新。
 
 ### 11.6 Word/PDF 摄入与向量检索（已实现 docx 部分）
 
-- 已实现：Word（.docx）→ Markdown（段落+表格按序，Heading 1/2 参与切节，Heading 3+
-  作节内子标题并拼接父级节名，表格转 md 表，首个标题前内容自动归「前言」节）；Markdown 直传。
+- 已实现：Word（.docx）→ Markdown 用 **markitdown**（`markitdown[docx]`）转换，
+  上传接口对产物做两步后处理：图片语法替换为「图片占位（原件在
+  `knowledge/archive/`）」；全文无 `#`~`###` 标题则 400 拒收（防 0 节死文件）。
+  Markdown 切节由 KB 层统一负责：H1/H2/H3 都参与切节（中文标题节 id 为
+  `slug.NN`、标题带面包屑；`### ascii_id — 标题` 声明式形态取声明 id，跨文件
+  撞车自动加文件前缀）；`####`+ 作节内切块边界。`ingest.py` 自研转换器已
+  废弃，仅作 markitdown 不可用时的回退与测试夹具。Markdown 直传不变。
 - 规范类 → Markdown + section；历史报告类 → 结构化案例 YAML（案例上传入口待做）。
 - 向量检索：sqlite-vec（单文件、无服务、增量同步），规模到十万节级；数据规模再上一个
   数量级时评估 pgvector / Qdrant，迁移面仅限 `kb.search`/`_sync_vectors` 与工况索引。
@@ -2093,11 +2098,12 @@ curl -s -X POST localhost:8000/api/mcp/call/mcp__matlab__detect_matlab_toolboxes
 本批已在代码中实现并测试通过，正文相关章节已同步更新。按主题汇总：
 
 **知识库与 RAG（§11）**
+- docx 转换改用 markitdown（`markitdown[docx]`）：上传接口转换后做图片占位替换与
+  无标题拒收；自研 `ingest.py` 转换器废弃保留作回退（§11.6）。
 - 知识库 web 化：侧栏「知识库」视图（浏览全文/上传/删除）+ `POST/DELETE /api/kb/manual` + `KB.reload()`。
-- docx 摄取层 `llm/ingest.py`：段落+表格按序转 Markdown，Heading 1/2 都参与切节
-  （章级 H1 独立成节，工况节标题带章名面包屑；无 H2 按 H1 切节），
-  Heading 3 子标题拼接父级节名，表格转 md 表，前言自动成节，section id（`slug.s<N>`）自动生成并回显；
-  原件存 `knowledge/archive/`。
+- docx 摄取层 `llm/ingest.py`（已被 markitdown 取代，保留作回退）：切节规则由 KB 层
+  统一承接——H1/H2/H3 都参与切节（章级独立成节，工况节标题带章名面包屑；
+  `slug.NN` id 自动生成并回显），原件存 `knowledge/archive/`，删除时一并清理。
 - 语义检索：sqlite-vec 单文件向量库（§11.4 三通道）；手册与工况共用 `vectors.db`（前缀隔离），
   内容 hash **增量同步**；demo 手册已删，`rag_sample.md` 为验证样例。
 

@@ -321,3 +321,32 @@ def test_kb_snippets_passes_condition(tmp_path):
     fn = load_configs(CONFIG_DIR).function("abs")
     eng._kb_snippets(res, fn, query="干沥青 全力制动", condition=res.condition_name)
     assert captured["condition"] == "干沥青100km/h全力制动"
+
+
+def test_condition_filter_matches_doc_slug(tmp_path):
+    """多文档：同名节标题按文件 slug/文档名隔离（condition=ABS/TCS 各归各）。"""
+    mdir = tmp_path / "manual"
+    mdir.mkdir()
+    (mdir / "abs_calib.md").write_text(
+        "# 前言\n\n### abs.s1 — 干沥青工况\n\nABS 专属内容。\n", encoding="utf-8")
+    (mdir / "tcs_calib.md").write_text(
+        "# 前言\n\n### tcs.s1 — 干沥青工况\n\nTCS 专属内容。\n", encoding="utf-8")
+    kb = KnowledgeBase(str(tmp_path))
+    hits = kb.search("干沥青工况", condition="ABS", top_k=5)
+    assert hits and all(h["id"].startswith("abs") for h in hits), \
+        "condition=ABS 应按 id 前缀隔离到 abs 文档"
+    assert any("ABS 专属" in h["text"] for h in hits)
+    assert all(h.get("doc") == "abs_calib" for h in hits), "命中需带所属文档名"
+    hits_t = kb.search("干沥青工况", condition="TCS", top_k=5)
+    assert hits_t and all(h["id"].startswith("tcs") for h in hits_t)
+
+
+def test_doc_title_falls_back_to_filename_when_generic(tmp_path):
+    """首 H1 是「前言」这类通用词时，doc_title 退回文件名（多文档过滤的前提）。"""
+    mdir = tmp_path / "manual"
+    mdir.mkdir()
+    (mdir / "vdc_manual.md").write_text("# 前言\n\n## 功能目的\n\nVDC 内容。\n",
+                                        encoding="utf-8")
+    kb = KnowledgeBase(str(tmp_path))
+    sec = next(s for s in kb.sections.values() if "功能目的" in s.title)
+    assert sec.doc_title == "vdc_manual", "通用词 H1 不应充当文档标题"

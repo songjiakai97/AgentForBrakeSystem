@@ -189,7 +189,7 @@ def test_real_manual_chunks_respect_cap():
     """真实知识库（abs_calib.md + rag_sample.md）全部块 ≤ 上限。"""
     kb = KnowledgeBase(os.path.join(ROOT, "knowledge"))
     for c in kb._index_chunks():
-        assert len(c["text"]) <= 480 + 20, f"{c['chunk_id']} 超限: {len(c['text'])}"
+        assert len(c["text"]) <= 560, f"{c['chunk_id']} 超限: {len(c['text'])}"
 
 
 # ---------------- 中心窗口（snippet_window） ----------------

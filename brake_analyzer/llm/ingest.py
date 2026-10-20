@@ -1,5 +1,8 @@
 """docx 手册摄取：转成 KB 可解析的 Markdown（### id — 标题 切节格式）。
 
+.. deprecated:: 上传链路的 docx 转换已切换为 markitdown（编号列表/表格保留更好，
+   web/main.py）。本模块保留为回退与测试夹具。
+
 - 段落与表格按文档顺序转换；表格转 Markdown 表——标定手册的信息大头在
   限值表/参数表里，丢了表格语义就丢了一半。
 - 切节不止认单一层级：Heading 1 与 Heading 2 都参与切节（KB 的存储契约是

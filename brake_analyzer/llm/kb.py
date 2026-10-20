@@ -96,20 +96,70 @@ class KnowledgeBase:
                 continue
             with open(os.path.join(mdir, fn), "r", encoding="utf-8") as f:
                 text = f.read()
-            # 以 "### id — 标题" 切 section
-            pattern = re.compile(r"^###\s+([\w.\-]+)(?:\s+[—-]\s*(.+))?$", re.M)
-            matches = list(pattern.finditer(text))
-            doc_title_m = re.search(r"^#\s+(.+)$", text, re.M)
-            doc_title = doc_title_m.group(1).strip() if doc_title_m else ""
-            for i, m in enumerate(matches):
-                start = m.end()
-                end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-                self.sections[m.group(1)] = ManualSection(
-                    section_id=m.group(1),
-                    title=(m.group(2) or "").strip(),
-                    text=text[start:end].strip(),
-                    doc_title=doc_title,
-                )
+            self._load_manual_text(text, fn)
+
+    def _load_manual_text(self, text: str, filename: str) -> None:
+        """md 手册解析（§11.6）：与 docx 摄取同一套层级语义。
+
+        - 转义还原：Word→md 导出会把参数名写成 m\_Vehicle，不还原则
+          get_param 的归一化匹配全空（真实文档实测踩坑）。
+        - 层级切节：H1/H2/H3 都参与切节（真实手册是 章→节→小节 的多层结构，
+          只认 `###` 会把章导语粘进相邻节、且 H2 标题全丢）；`####` 及更深
+          留在节内，由 _index_chunks 继续切块。
+        - 两种节标题形态：
+          * `### <ascii_id> — 标题`（本仓库约定，规则 kb_ref 引用的锚）→
+            用声明的 id，扁平化，不参与面包屑；
+          * 其余（中文标题的 H1/H2/H3）→ 生成 `slug.NN` id，节标题带上级
+            面包屑路径（`实车标定 · 对开工况`）。
+        - 首个节标题之前的内容（封面/前言/概述）收为 `<slug>.00` 前言节，
+          不静默丢弃（功能目的/物理原理是高价值知识）。
+        """
+        text = text.replace("\_", "_").replace("\*", "*")
+        slug = re.sub(r"[^\w\-]+", "_", os.path.splitext(os.path.basename(filename))[0])             .strip("_").lower() or "doc"
+        pat = re.compile(r"^(#{1,3})\s+(.+?)\s*$", re.M)
+        heads = list(pat.finditer(text))
+        if not heads:
+            return
+        # doc_title 兜底链：首个 H1 是通用词（前言/引言——章节式手册的常见开头，
+        # 不具备文档区分度）时退回文件名；否则多文档场景下 condition 过滤失效
+        first_h1 = next((m.group(2) for m in heads if len(m.group(1)) == 1), "")
+        _generic = {"前言", "引言", "概述", "目录", "简介", "附录", "正文"}
+        doc_title = first_h1 if first_h1 and first_h1 not in _generic             else os.path.splitext(filename)[0]
+        declared = re.compile(r"^([A-Za-z0-9_.\-]+)(?:\s+[—-]\s*(.+))?$")
+
+        def _emit(sid: str, title: str, body: str) -> None:
+            if not body.strip():
+                return          # 纯标题行（如只有一行文档大标题）不产生空节
+            self.sections[sid] = ManualSection(
+                section_id=sid, title=title, text=body.strip(), doc_title=doc_title)
+
+        # 首个节标题前的内容 → 前言节
+        pre = text[:heads[0].start()].strip()
+        if pre:
+            _emit(f"{slug}.00", f"{doc_title} · 前言", pre)
+
+        path: List[str] = []          # 层级 → 标题（面包屑，按层级覆盖）
+        for k, m in enumerate(heads):
+            lvl = len(m.group(1))
+            raw = m.group(2).strip()
+            dm = declared.match(raw) if lvl == 3 else None
+            if lvl == 3 and dm and dm.group(1):
+                # 仓库约定形态：扁平 id，标题照旧，面包屑复位。
+                # 声明 id 只保证单文件内唯一；跨文件撞车（两本手册都有
+                # "### abs.s1"）时自动加文件前缀，避免后加载的静默覆盖前者
+                sid = dm.group(1)
+                if sid in self.sections:
+                    sid = f"{slug}.{sid}"
+                title = (dm.group(2) or raw).strip()
+                _emit(sid, title, text[m.end(): heads[k + 1].start()
+                                       if k + 1 < len(heads) else len(text)])
+                continue
+            path = path[:lvl - 1]
+            path.append(raw)
+            crumb = " · ".join(p for p in path[:lvl] if p)
+            start = m.end()
+            end = heads[k + 1].start() if k + 1 < len(heads) else len(text)
+            _emit(f"{slug}.{k + 1:02d}", crumb, text[start:end])
 
     def section(self, section_id: str) -> Optional[ManualSection]:
         return self.sections.get(section_id)
@@ -536,6 +586,7 @@ class KnowledgeBase:
                 best = (s0, e0)
             merged = f"{sec.title}\n{sec.text}" if sec.title else sec.text
             out.append({"id": sid, "chunk": best_cid or sid, "title": sec.title,
+                        "doc": sec.doc_title,
                         "text": merged, "full": sec.text, "pieces": spans,
                         "best": best, "fallback": fallback or best is None,
                         "score": round(max((chunk_scores.get(c["chunk_id"], 0.0)
@@ -565,15 +616,51 @@ class KnowledgeBase:
         if not chunks:
             return []
         if condition and condition.strip():
-            cond = condition.strip()
+            cond = condition.strip().lower()
             def _in_cond(c):
                 sec = self.sections.get(c["section_id"])
-                return sec is not None and (cond in sec.title or cond in sec.doc_title)
+                if sec is None:
+                    return False
+                # 节 id 前缀（=文件名 slug，如 abs_calib.NN）是天然的文档标识：
+                # 手册首行常是「前言」这类通用词，标题里反而没有功能名
+                return (cond in c["section_id"].lower()
+                        or cond in (sec.title or "").lower()
+                        or cond in (sec.doc_title or "").lower())
             scoped = {cid: c for cid, c in chunks.items() if _in_cond(c)}
             if scoped:
                 chunks = scoped
 
         kw_scored = self._keyword_rank(query, chunks)
+        # 标题通道（第三路）：节标题/文档标题命中查询词（整词+bigram）的节是强证据。
+        # 用户措辞与节标题常有微差（"对开路面" vs 节标题"对开工况"），整词匹配不上，
+        # bigram 命中能把同一主题的多处内容一起抬进结果。
+        title_rank: Dict[str, int] = {}
+        _tq = [t for t in re.split(r"[\s,，、;；]+", query) if t]
+
+        def _title_score(sec: ManualSection) -> float:
+            # 只匹配节标题：doc_title 对所有节相同，计入只会把「无命中」
+            # 误抬成「全体命中」，且不提供任何节间区分度
+            hay = (sec.title or "").lower()
+            sc = 0.0
+            for t in _tq:
+                tl = t.lower()
+                if tl in hay:
+                    sc += 3.0
+                    continue
+                grams = [tl[i:i + 2] for i in range(len(tl) - 1)] if len(tl) > 2 else [tl]
+                if grams:
+                    sc += sum(1.0 for g in grams if g in hay) / len(grams)
+            return sc
+
+        _tsc = []
+        for sid, sec in self.sections.items():
+            if sid not in chunks:
+                continue
+            _s = _title_score(sec)
+            if _s > 0:
+                _tsc.append((_s, sid))
+        _tsc.sort(key=lambda x: -x[0])
+        title_rank = {sid: r for r, (_s, sid) in enumerate(_tsc)}
         sem_order: List[str] = []
         if self._vec_db is not None and self._sync_vectors():
             qv = self._embed_fn([query])
@@ -588,23 +675,35 @@ class KnowledgeBase:
                 for rowid, _dist in knn:
                     row = self._vec_db.execute(
                         "SELECT section_id FROM items WHERE id=?", (rowid,)).fetchone()
-                    if row:
+                    # sem 通道查的是全库向量：condition 过滤只作用于 chunks 字典，
+                    # 这里必须把过滤掉的块剔掉，否则它们带着旧 id 进合并层直接 KeyError
+                    if row and row[0] in chunks:
                         sem_order.append(row[0])
 
-        if not sem_order:
-            selected = [(cid, s) for s, cid in kw_scored[:top_k]]
-            mode = "keyword"
-        else:
-            scores: Dict[str, float] = {}
-            for r, cid in enumerate(sem_order):
-                scores[cid] = scores.get(cid, 0.0) + 1.0 / (60 + r)
-            for r, (_s, cid) in enumerate(kw_scored):
-                scores[cid] = scores.get(cid, 0.0) + 1.0 / (60 + r)
-            selected = [(cid, scores[cid])
-                        for cid in sorted(scores, key=lambda c: -scores[c])[:top_k]]
-            mode = "hybrid" if kw_scored else "semantic"
-        if not selected:
+        scores: Dict[str, float] = {}
+        for r, cid in enumerate(sem_order):
+            scores[cid] = scores.get(cid, 0.0) + 1.0 / (60 + r)
+        for r, (_s, cid) in enumerate(kw_scored):
+            scores[cid] = scores.get(cid, 0.0) + 1.0 / (60 + r)
+        for r, sid in enumerate(title_rank):
+            b = 1.0 / (60 + r)
+            for c in chunks.values():
+                if c["section_id"] == sid:
+                    scores[c["chunk_id"]] = scores.get(c["chunk_id"], 0.0) + b
+        mode = "hybrid" if (sem_order and kw_scored) else "keyword"
+        if not scores:
             return []
+        # 选择按节去重：返回时同节会合并（small-to-big），若选择仍按块取 top-k，
+        # 同节的第二块会挤掉另一个节的名额（实测把实车·对开工况挤到第 6 位）
+        selected, seen_sec = [], set()
+        for cid in sorted(scores, key=lambda c: -scores[c]):
+            sid = chunks[cid]["section_id"]
+            if sid in seen_sec:
+                continue
+            seen_sec.add(sid)
+            selected.append((cid, scores[cid]))
+            if len(selected) >= top_k:
+                break
         chunk_scores = {cid: s for cid, s in selected}
         hits = self._merge_section_hits([cid for cid, _ in selected], chunks, chunk_scores)
         if hits:
@@ -619,35 +718,68 @@ class KnowledgeBase:
         return re.sub(r"[\s_\-]+", "", (name or "").lower())
 
     def _extract_param_rows(self) -> List[dict]:
-        """从手册 md 表格逐行抽取结构化参数记录。
+        """从手册 md 表格逐行抽取结构化参数记录（§11.4 参数索引）。
 
-        表头首列是序号列（序号/#/No）时剔除；行 key = 归一化后的首个数据格
-        （约定为参数名列）。标定手册的表格是主数据载体，参数值查询走这里
-        精确命中，不走向量。"""
+        兼容两种表头形态：
+        - 常规：表头行 + 分隔行 + 数据行；
+        - Word 导出（真实手册实测）：空表头行 + 分隔行 + **加粗表头行** + 数据行
+          —— 加粗行必须识别为表头，否则 key 取到序号数字、参数名查询全空。
+        key 取该行首个"像标识符"的单元格（含字母、非纯数字/区间），归一化后
+        作为精确匹配键；单元格剥掉 ** 加粗标记。
+        """
         rows: List[dict] = []
         for sid, sec in self.sections.items():
             lines = sec.text.splitlines()
             i = 0
             while i < len(lines):
                 stripped = lines[i].lstrip()
-                if stripped.startswith("|") and i + 1 < len(lines)                         and re.match(r"^\s*\|[\s:\-|]+\|\s*$", lines[i + 1]):
-                    headers = [c.strip() for c in stripped.strip("|").split("|")]
-                    j = i + 2
-                    while j < len(lines) and lines[j].lstrip().startswith("|"):
-                        cells = [c.strip() for c in lines[j].strip().strip("|").split("|")]
-                        h, c = headers, cells
-                        if h and h[0] in ("序号", "#", "No", "no"):
-                            h, c = h[1:], c[1:]
-                        if c and any(c):
-                            key = self._norm_param(c[0]) if c[0] else ""
-                            rows.append({"section_id": sid, "title": sec.title,
-                                         "doc_title": sec.doc_title,
-                                         "headers": h, "cells": c, "key": key})
-                        j += 1
-                    i = j
-                else:
+                if not stripped.startswith("|") or i + 1 >= len(lines)                         or not re.match(r"^\s*\|[\s:\-|]+\|\s*$", lines[i + 1]):
                     i += 1
+                    continue
+                headers = [self._clean_cell(c) for c in stripped.strip("|").split("|")]
+                j = i + 2
+                # Word 导出的加粗表头行：紧跟分隔行且单元格带 **，用它替换空/占位表头
+                if j < len(lines) and lines[j].lstrip().startswith("|")                         and "**" in lines[j]:
+                    bold = [self._clean_cell(c)
+                            for c in lines[j].strip().strip("|").split("|")]
+                    if any(bold) and not any(headers):
+                        headers = bold
+                    j += 1
+                # Word 导出的非加粗真实表头行：空表头 + 分隔行 + 首格非纯数字的行
+                # （如表5.9「参数名|参数含义|默认值|标定思路」）→ 升格为表头。
+                # 不升格的后果：首列表头为空触发剥列逻辑，每行数据都丢参数名列
+                if j < len(lines) and lines[j].lstrip().startswith("|")                         and not any(headers):
+                    promo = [self._clean_cell(c)
+                             for c in lines[j].strip().strip("|").split("|")]
+                    if promo and promo[0] and not re.fullmatch(r"[\d.\-]+", promo[0]):
+                        headers = promo
+                        j += 1
+                while j < len(lines) and lines[j].lstrip().startswith("|"):
+                    cells = [self._clean_cell(c)
+                             for c in lines[j].strip().strip("|").split("|")]
+                    h, c = headers, cells
+                    # 剥序号列：仅当表头明确写「序号」且首格是纯数字（空表头不能触发，
+                    # 否则 Word 导出表格每行都丢第一列）
+                    if h and h[0] in ("序号", "#", "No", "no") and c                             and re.fullmatch(r"\d+", c[0] or ""):
+                        h, c = h[1:], c[1:]
+                    key_c = next((x for x in c
+                                  if re.search(r"[A-Za-z]", x)
+                                  and not re.fullmatch(r"[\d.\s\[\]\-]+", x)), "")
+                    if c and any(c) and self._norm_param(key_c):
+                        # key 为空的行（纯数值/片段行）不进索引：空串是任何
+                        # 查询的子串，会在 get_param 的部分匹配里污染全部结果
+                        rows.append({"section_id": sid, "title": sec.title,
+                                     "doc_title": sec.doc_title,
+                                     "headers": h, "cells": c,
+                                     "key": self._norm_param(key_c)})
+                    j += 1
+                i = j
         return rows
+
+    @staticmethod
+    def _clean_cell(c: str) -> str:
+        """单元格清洗：剥 ** 加粗与首尾空白，其余（±/·/U+2011/方括号）原样保留。"""
+        return (c or "").strip().strip("*").strip()
 
     def get_param(self, name: str, condition: Optional[str] = None,
                   top_k: int = 5) -> List[dict]:
