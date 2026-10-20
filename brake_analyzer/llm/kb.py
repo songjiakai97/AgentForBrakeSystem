@@ -44,6 +44,9 @@ def _vec_table(model: str) -> str:
 # 上限更大的模型（如 qwen3-embedding 的 32K）下只是多切几块，无害。
 MAX_CHUNK_CHARS = 480
 
+# 单条命中的最小可读长度：窗口分配再紧张也不能低于它，否则只能丢命中
+SNIPPET_MIN_CHARS = 240
+
 
 class KnowledgeBase:
     def __init__(self, kb_dir: str = "knowledge"):
@@ -213,27 +216,35 @@ class KnowledgeBase:
         按尺寸强制再切（段落边界 → 行 → 字符），保证 embedding 输入永远有界——
         超限的块会被 embedding 端点静默截断，块尾内容就永远搜不到了。
         单块节沿用 section_id；多块节为 `section_id#N`。每块文本都带节标题前缀。
+
+        body 是不含标题前缀与子标题前缀的原文切片（必为节正文的连续子串），
+        合并回节时用它定位块的字节区间，供 snippet_window 取中心窗口。
         """
         chunks = []
         for sid, sec in self.sections.items():
             pieces = []
             for head, body in self._split_chunks(sec.text):
                 head_txt = f"{head}\n" if head else ""
+                # _split_chunks 保留了 #### 原行：块正文已以该子标题开头时不再
+                # 注入裸标题，否则合并回节会出现「子标题\n#### 子标题」双写
+                if head_txt and body.lstrip().startswith(f"#### {head}"):
+                    head_txt = ""
                 if len(head_txt) + len(body) <= MAX_CHUNK_CHARS:
-                    pieces.append(f"{head_txt}{body}")
+                    pieces.append((body, f"{head_txt}{body}"))
                 else:
                     for piece in self._split_oversized(body, MAX_CHUNK_CHARS - len(head_txt)):
-                        pieces.append(f"{head_txt}{piece}")
+                        pieces.append((piece, f"{head_txt}{piece}"))
             if not pieces:
-                pieces = [sec.text]
+                pieces = [(sec.text, sec.text)]
+            prefix = f"{sec.title}\n" if sec.title else ""
             if len(pieces) == 1:
                 chunks.append({"chunk_id": sid, "section_id": sid,
-                               "text": f"{sec.title}\n{pieces[0]}"})
+                               "body": pieces[0][0], "text": prefix + pieces[0][1]})
                 continue
-            for k, body in enumerate(pieces, start=1):
+            for k, (body, piece) in enumerate(pieces, start=1):
                 cid = sid if k == 1 else f"{sid}#{k}"
                 chunks.append({"chunk_id": cid, "section_id": sid,
-                               "text": f"{sec.title}\n{body}"})
+                               "body": body, "text": prefix + piece})
         return chunks
 
     def _open_vec_store(self) -> bool:
@@ -342,13 +353,153 @@ class KnowledgeBase:
         except ValueError:
             return (chunk_id, 0)
 
+    @staticmethod
+    def _locate_piece(text: str, body: str, cursor: int = 0):
+        """在节原文里定位一个块的 [start, end)。
+
+        精确 find 优先；尺寸硬切会丢掉段落间的空行，导致精确匹配失败，此时用
+        「首行 + 尾行」锚定近似区间（窗口裁剪只需落在行边界，不要求逐字对齐）。
+        定位不到返回 None，调用方整节降级。
+        """
+        if not body:
+            return None
+        idx = text.find(body, cursor)
+        if idx < 0:
+            idx = text.find(body)
+        if idx >= 0:
+            return (idx, idx + len(body))
+        first = body.splitlines()[0]
+        last = body.splitlines()[-1]
+        s = text.find(first, cursor)
+        if s < 0:
+            s = text.find(first)
+        if s < 0:
+            return None
+        e = text.find(last, s)
+        if e < 0:
+            return None
+        return (s, e + len(last))
+
+    @staticmethod
+    def _table_head_row(text: str, pos: int):
+        """pos 落在 Markdown 表格内时返回该表格块（表头行）的起点，否则 None。
+
+        窗口只截到表格中段时，裸值行没有列名，模型会把「初始值」当「当前值」
+        念——那是比漏行更坏的错，所以调用方宁可丢尾部几行也要把表头带进来。
+        """
+        lines = text.splitlines(keepends=True)
+        offs, acc = [], 0
+        for ln in lines:
+            offs.append(acc)
+            acc += len(ln)
+        idx = 0
+        for k, o in enumerate(offs):
+            if o <= pos:
+                idx = k
+            else:
+                break
+        if idx >= len(lines) or not lines[idx].lstrip().startswith("|"):
+            return None
+        head = idx
+        while head - 1 >= 0 and lines[head - 1].lstrip().startswith("|"):
+            head -= 1
+        return offs[head] if head != idx else None
+
+    @staticmethod
+    def snippet_window(hit: dict, budget: int):
+        """以命中块为中心裁出 ≤ budget 字符的窗口（small-to-big 的下半段）。
+
+        small-to-big 把块还原成整节返回，但节长轻易超过给 LLM 的片段预算；若从
+        节头开始裁，窗口永远是「节标题 + 第一个块的前半」，命中块（常在表尾或
+        后几块）连同答案一起被切掉——这就是「只搜到某个 #### 的前面部分」。
+        这里围绕最佳命中块取窗，右扩步长大于左扩（表格阅读顺序向下），切点吸附
+        到行边界，避免给出半行参数名。
+
+        返回 (snippet, note)：note 非空表示仍有内容没给到模型，调用方据此提示。
+        """
+        title = (hit.get("title") or "").strip()
+        text = hit.get("full") or hit.get("text") or ""
+        header = f"## {title}\n" if title else ""
+        # text 已带 "标题\n" 前缀（_merge_section_hits 的合并字段），剥掉避免双写
+        if title and text.startswith(title + "\n"):
+            text = text[len(title) + 1:]
+        # "… " / " …" 省略标记各 2 字，预算要为它们留位，否则窗口反而超 budget
+        room = budget - len(header) - 4
+        if room < SNIPPET_MIN_CHARS:
+            return ("", "（窗口预算不足，未给出正文）")
+        if len(text) <= room:
+            return (header + text, "")
+
+        best = hit.get("best")
+        if hit.get("fallback") or not best:
+            return (header + text[:room], "…（未能按命中块定位，已按节头截断）")
+        s0, e0 = best
+
+        def _snap_start(i):
+            j = text.rfind("\n", 0, i)
+            return 0 if j < 0 else j + 1
+
+        def _snap_end(i):
+            j = text.find("\n", i)
+            return len(text) if j < 0 else j
+
+        lo, hi = _snap_start(s0), _snap_end(e0)
+        if hi - lo > room:                      # 命中块自己就超预算：保住它本身
+            return (header + "… " + text[lo:lo + room] + " …",
+                    "…（命中块超出窗口：按参数名用 get_param 精查）")
+
+        # 贪心扩张：每轮先试右（表格阅读顺序向下，权重更高），再试左；
+        # 只有两侧都扩不动才停——单侧到文本边界不能终止另一侧
+        def _expand(side):
+            nonlocal lo, hi
+            steps = ((240, 120, 60, 24) if side == "r" else (160, 80, 40, 16))
+            for step in steps:
+                if side == "r":
+                    n_hi = _snap_end(min(len(text), hi + step))
+                    if n_hi > hi and n_hi - lo <= room:
+                        hi = n_hi
+                        return True
+                else:
+                    n_lo = _snap_start(max(0, lo - step))
+                    if n_lo < lo and hi - n_lo <= room:
+                        lo = n_lo
+                        return True
+            return False
+
+        while True:
+            if not _expand("r") and not _expand("l"):
+                break
+
+        # 窗口起点落在表格中段时，把起点提到表头行：裸值行脱离列名，模型会把
+        # 「初始值」当「当前值」念——比漏行更坏的错。前提是表头+命中行仍装得下，
+        # 装不下就保持原窗口（命中块本身永远优先）
+        th = KnowledgeBase._table_head_row(text, lo)
+        if th is not None and th < lo:
+            hit_end = _snap_end(min(len(text), e0 + 1))
+            if hit_end - th <= room:
+                lo = th
+                hi = max(_snap_start(th + room), hit_end)
+        notes = []
+        if lo > 0:
+            notes.append("前文已省略")
+        if hi < len(text):
+            notes.append("后文已省略：需要具体参数值用 get_param 按参数名查询")
+        return ((header + ("… " if lo > 0 else "") + text[lo:hi]
+                 + (" …" if hi < len(text) else "")),
+                ("（" + "；".join(notes) + "）" if notes else ""))
+
     def _merge_section_hits(self, selected: List[str], chunks: Dict[str, dict],
                             chunk_scores: Dict[str, float]) -> List[dict]:
         """small-to-big：**块做排序精度，节做返回完整性**。
 
-        命中的块所属节，返回时合并为节级完整文本（该节全部 #### 块按序拼接）——
-        否则 19 行参数表被切成 3 块后，top-5 里凑不齐就漏行，"有哪些参数"类
-        问题答不全。score 取该节所有命中块中的最高分。"""
+        命中的块所属节，返回时合并为节级完整文本（直接用节原文 sec.text，
+        不再按块拼接——硬切块用空行 join 会在表格中间插空行，后半段行脱离
+        表头变成裸值）。score 取该节所有命中块中的最高分。
+
+        同时给出每个块在 sec.text 里的区间（pieces）与最佳块（best），供
+        snippet_window 做「以命中块为中心」的窗口裁剪；正文里定位失败的节
+        标记 fallback=True，调用方退回从头裁剪。
+        """
         seen, order = [], []
         for cid in selected:
             sid = chunks[cid]["section_id"]
@@ -362,14 +513,26 @@ class KnowledgeBase:
                 continue
             pieces = sorted((c for c in chunks.values() if c["section_id"] == sid),
                             key=lambda c: self._piece_sort_key(c["chunk_id"]))
-            bodies = []
+            # 定位各块在节原文中的区间：body 是切块时的原文连续子串，
+            # 顺序游标查找复原位置；尺寸硬切可能吃掉段落间的空行，故精确查找
+            # 失败时退化为「首行+尾行」锚定（窗口只需近似边界，落在行首即可）
+            spans, cursor, fallback = [], 0, False
             for p in pieces:
-                t = p["text"]
-                if t.startswith(sec.title + "\n"):
-                    t = t[len(sec.title) + 1:]
-                bodies.append(t)
-            out.append({"id": sid, "chunk": sid, "title": sec.title,
-                        "text": sec.title + "\n" + "\n\n".join(bodies),
+                loc = self._locate_piece(sec.text, p["body"], cursor)
+                if loc is None:
+                    fallback = True
+                    break
+                spans.append((p["chunk_id"], loc[0], loc[1]))
+                cursor = loc[1]
+            best_cid, best = None, None
+            if not fallback and spans:
+                best_cid, s0, e0 = max(spans, key=lambda t: (chunk_scores.get(t[0], 0.0),
+                                                             -t[1]))
+                best = (s0, e0)
+            merged = f"{sec.title}\n{sec.text}" if sec.title else sec.text
+            out.append({"id": sid, "chunk": best_cid or sid, "title": sec.title,
+                        "text": merged, "full": sec.text, "pieces": spans,
+                        "best": best, "fallback": fallback or best is None,
                         "score": round(max((chunk_scores.get(c["chunk_id"], 0.0)
                                             for c in pieces), default=0.0), 4)})
         return out
@@ -383,8 +546,11 @@ class KnowledgeBase:
         跨工况串扰（真实标定手册多个工况下有同名"标定参数说明"表）。
         过滤后为空则回退不过滤（宁多勿缺，LLM 侧有 query 上下文兜着）。
 
-        返回 [{"id"(节id), "title", "text"(节完整文本), "score"}]，按相关度降序。
-        last_search_mode 记录实际通道：hybrid / semantic / keyword。
+        返回 [{"id"(节id), "title", "text"(节完整文本), "score"}]，按相关度降序；
+        另带三个内部字段供调用方做窗口裁剪：full（不含标题前缀的节正文）、
+        pieces（[(块id, 起, 止)] 在 full 里的区间）、best（最佳命中块区间）、
+        fallback（区间定位失败）。last_search_mode 记录实际通道：
+        hybrid / semantic / keyword。
         """
         self.last_search_mode = ""
         query = (query or "").strip()

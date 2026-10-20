@@ -190,3 +190,74 @@ def test_real_manual_chunks_respect_cap():
     kb = KnowledgeBase(os.path.join(ROOT, "knowledge"))
     for c in kb._index_chunks():
         assert len(c["text"]) <= 480 + 20, f"{c['chunk_id']} 超限: {len(c['text'])}"
+
+
+# ---------------- 中心窗口（snippet_window） ----------------
+
+@pytest.fixture
+def tail_kb(tmp_path):
+    """目标串在超大节最后一个块里的知识库：复现「只搜到 #### 前面部分」。"""
+    mdir = tmp_path / "manual"
+    mdir.mkdir()
+    rows = "\n".join(f"| {i} | Opt_pad_{i:03d} | 填充参数{i} | 0.{i % 9} |"
+                     for i in range(1, 25))
+    (mdir / "big.md").write_text(
+        "# ABS 手册\n\n"
+        "### big.s1 — ABS 车型参数\n\n"
+        "#### 车型基础参数表\n\n"
+        "| 序号 | 参数 | 描述 | 值 |\n|---|---|---|---|\n"
+        f"{rows}\n\n| 99 | Cp_RA | 后轴CP值 | 26.87 |\n",
+        encoding="utf-8")
+    return KnowledgeBase(str(tmp_path))
+
+
+def test_hit_block_span_located_in_section(tail_kb):
+    """合并命中给出最佳块在节正文中的区间，且区间确实包住目标内容。"""
+    hits = tail_kb.search("后轴CP值", top_k=1)
+    assert hits and not hits[0]["fallback"]
+    s0, e0 = hits[0]["best"]
+    assert "Cp_RA" in hits[0]["full"][s0:e0]
+    assert hits[0]["chunk"].startswith("big.s1")   # chunk 字段=最佳块 id
+
+
+def test_window_contains_tail_marker(tail_kb):
+    """窗口预算小于节长时，内容必须来自命中块（而非节头），且不超过预算。"""
+    hit = tail_kb.search("后轴CP值", top_k=1)[0]
+    for budget in (480, 300, 260):
+        snip, _note = KnowledgeBase.snippet_window(hit, budget)
+        assert len(snip) <= budget
+        assert "Cp_RA" in snip and "26.87" in snip
+        assert "ABS 车型参数" in snip            # 标题前缀恒在
+    # 预算充足时全文给出、无省略注记
+    snip, note = KnowledgeBase.snippet_window(hit, 4000)
+    assert snip.count("Cp_RA") == 1 and note == ""
+
+
+def test_window_snaps_to_line_bounds(tail_kb):
+    """切点吸附行边界：表格行要么完整要么不出现，不许有半行参数名。"""
+    hit = tail_kb.search("后轴CP值", top_k=1)[0]
+    snip, _ = KnowledgeBase.snippet_window(hit, 300)
+    for ln in snip.splitlines():
+        if ln.lstrip().startswith("|"):
+            # 完整 Markdown 行：首尾都有竖线，列数与表头一致（4 列 → 5 个竖线）
+            assert ln.startswith("|") and ln.endswith("|"), f"半行表格: {ln!r}"
+            assert ln.count("|") == 5, f"列数残缺: {ln!r}"
+
+
+def test_merged_text_is_verbatim_section(tail_kb):
+    """small-to-big 合并不再用空行 join 硬切块：节正文原样可寻（表格不断行）。"""
+    hit = tail_kb.search("后轴CP值", top_k=1)[0]
+    sec = tail_kb.sections["big.s1"]
+    assert hit["full"] == sec.text
+    assert hit["text"].startswith("ABS 车型参数\n")   # 合并字段带标题前缀（裸题）
+    # 旧实现按块 join 会在表格中段插 \n\n；原文里没有这种空洞（表行连续）
+    table_block = sec.text[sec.text.index("| 序号"):sec.text.index("\n\n| 99")]
+    assert "\n\n" not in table_block
+    assert table_block in hit["full"]
+
+
+def test_title_not_duplicated_in_chunks(tail_kb):
+    """块文本身以 #### 子标题开头时不重复注入子标题（合并后无双写）。"""
+    texts = [c["text"] for c in tail_kb._index_chunks() if c["section_id"] == "big.s1"]
+    joined = "\n".join(texts)
+    assert "车型基础参数表\n#### 车型基础参数表" not in joined

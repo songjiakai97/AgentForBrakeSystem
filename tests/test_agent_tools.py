@@ -75,6 +75,53 @@ def test_search_manual_empty_query_rejected(tmp_path):
     assert eng._kb_search_tool("   ")["ok"] is False
 
 
+def _tail_manual_kb(tmp_path):
+    """节尾埋参数、需要多节命中才能撑爆预算的知识库。"""
+    mdir = tmp_path / "manual"
+    mdir.mkdir()
+    rows = "\n".join(f"| {i} | Opt_pad_{i:03d} | 填充参数{i} | 0.{i % 9} |"
+                     for i in range(1, 25))
+    (mdir / "big.md").write_text(
+        "# ABS 手册\n\n"
+        "### big.s1 — ABS 车型参数\n\n"
+        "#### 车型基础参数表\n\n"
+        "| 序号 | 参数 | 描述 | 值 |\n|---|---|---|---|\n"
+        f"{rows}\n\n| 99 | Cp_RA | 后轴CP值 | 26.87 |\n\n"
+        "### big.s2 — ABS 开关表\n\n"
+        "#### 开关参数表\n\n"
+        "| 序号 | 参数 | 描述 | 值 |\n|---|---|---|---|\n"
+        f"{rows}\n\n| 99 | FS_ABS_ACH | ABS开关 | 1 |\n",
+        encoding="utf-8")
+    return str(tmp_path)
+
+
+def test_search_manual_snippet_centers_on_hit_block(tmp_path):
+    """命中块在节尾时，snippet 必须含节尾内容——旧实现 [:1500] 从节头裁会丢掉它。"""
+    eng = _engine(_tail_manual_kb(tmp_path))
+    payload = eng._kb_search_tool("后轴CP值")
+    assert payload["results"], "应命中含 Cp_RA 的节"
+    target = [r for r in payload["results"] if r["id"] == "big.s1"][0]
+    assert "Cp_RA" in target["snippet"]
+    assert "26.87" in target["snippet"]
+
+
+def test_search_manual_payload_survives_json_roundtrip(tmp_path):
+    """payload 序列化必须 ≤ TOOL_PAYLOAD_CLIP_CHARS 且是合法 JSON。
+
+    旧实现 5 条 ×1500 字 ≈ 7.8k，被外层硬砍成半截 JSON；现在预算均分 +
+    装不下就丢最弱命中，外层 [:CLIP] 砍不到东西。
+    """
+    from brake_analyzer.llm.prompts import TOOL_PAYLOAD_CLIP_CHARS
+
+    eng = _engine(_tail_manual_kb(tmp_path))
+    payload = eng._kb_search_tool("参数表")
+    js = json.dumps(payload, ensure_ascii=False)
+    assert len(js) <= TOOL_PAYLOAD_CLIP_CHARS, f"payload {len(js)} 超闸，外层会砍出坏 JSON"
+    assert json.loads(js[:TOOL_PAYLOAD_CLIP_CHARS]) == payload, "外层截断不应改变内容"
+    for r in payload["results"]:
+        assert r["snippet"], "预算降级丢命中，不交空串"
+
+
 def test_search_manual_tool_roundtrip_through_events(tmp_path):
     """工具调用全链路：LLM 发 search_manual → 结果回灌为 tool 应答。"""
     eng = ChatEngine(load_configs(CONFIG_DIR), ToolLlm([("search_manual", {"query": "横摆"})]),

@@ -22,7 +22,7 @@ from ..agent.tools import list_conditions, recommend_targets, resolve_condition
 from ..configs import AppConfigs
 from ..llm.client import LlmClient
 from ..llm.context import ContextBudget, ContextCompressor
-from ..llm.kb import KnowledgeBase
+from ..llm.kb import KnowledgeBase, SNIPPET_MIN_CHARS
 from ..llm.prompts import (
     TOOL_PAYLOAD_CLIP_CHARS,
     EXTERNAL_TOOL_NOTE,
@@ -671,28 +671,50 @@ class ChatEngine:
         return added, digests
 
     # ------------------------------------------------------------ 知识/文件工具
+    def _kb_payload(self, hits: List[dict]) -> dict:
+        """把命中装进 TOOL_PAYLOAD_CLIP_CHARS：预算均分 + 中心窗口 + 主动降级。
+
+        原先每条固定 [:1500]、top_k=5，序列化后约 7.8k 字，必然超 4000 的硬闸；
+        而硬闸是按字符砍 JSON（engine 外层），砍出来是坏 JSON——模型既读不到第
+        3 条之后的命中，`transient` 标记也只剩字符串嗅探能认。small-to-big 之后
+        节长更容易超预算，所以这里改为主动分配：每条命中拿「剩余预算/命中数」
+        的中心窗口，均分后低于可读下限就丢掉最弱的一条重算——宁可少给一条完整
+        命中，不给五条半截。
+        """
+        base = {"ok": True, "transient": True, "mode": self.kb.last_search_mode,
+                "note": "" if hits else "手册中没有相关内容；如实告知用户，不要编造手册内容",
+                "results": []}
+        overhead = len(json.dumps(base, ensure_ascii=False)) + 96   # 引号/分隔/转义余量
+        kept = list(hits)
+        while kept:
+            room = (TOOL_PAYLOAD_CLIP_CHARS - overhead) // len(kept)
+            if room < SNIPPET_MIN_CHARS:
+                kept.pop()
+                continue
+            results = []
+            for h in kept:
+                snippet, cut = KnowledgeBase.snippet_window(h, room)
+                if not snippet:            # 预算被标题吃满：退回从头裁，别交空串
+                    snippet, cut = h["text"][:room], ""
+                item = {"id": h["id"], "title": h["title"], "snippet": snippet}
+                if cut:
+                    item["note"] = cut
+                results.append(item)
+            payload = {**base, "results": results}
+            if len(json.dumps(payload, ensure_ascii=False)) <= TOOL_PAYLOAD_CLIP_CHARS:
+                return payload
+            kept.pop()                     # 转义放大体积：丢一条再试
+        return base
+
     def _kb_search_tool(self, query: str, condition: Optional[str] = None) -> dict:
         """手册语义检索工具：知识性问答的数据来源，无命中也如实回执（防编造）。"""
         query = (query or "").strip()
         if not query:
             return {"ok": False, "note": "query 为空：给一句检索问句"}
         hits = self.kb.search(query, top_k=5, condition=condition)
-        # 1500：标定手册的参数表块实测 ~1100 字符（19 行基础参数表），截 400 会把
-        # 表格大半裁掉，"有哪些参数"类问题就答不全。超长块裁掉尾部并明示，
-        # 引导模型改用 get_param 按参数名逐个查询
-        out = []
-        for h in hits:
-            snippet = h["text"][:1500]
-            if len(h["text"]) > 1500:
-                snippet += "…（内容已截断：需要具体参数值时用 get_param 按参数名查询）"
-            out.append({"id": h["id"], "title": h["title"], "snippet": snippet})
-        return {
-            "ok": True,
-            "transient": True,          # 检索结果用完即弃：下一轮压缩成存根
-            "mode": self.kb.last_search_mode,
-            "note": "" if hits else "手册中没有相关内容；如实告知用户，不要编造手册内容",
-            "results": out,
-        }
+        # 窗口以命中块为中心（KnowledgeBase.snippet_window）：从节头裁会让窗口
+        # 永远是「节标题 + 第一个块的前半」，命中块在表尾时答案连同表格一起被切掉
+        return self._kb_payload(hits)
 
     def _get_param_tool(self, name: str, condition: Optional[str] = None) -> dict:
         """参数精确查询工具（P1 参数索引）：参数值类问答的首选，值原样引用。"""
@@ -826,9 +848,12 @@ class ChatEngine:
         # 注入前与精确引用去重
         if query:
             for hit in self.kb.search(query, top_k=2, condition=condition):
-                if (hit.get("chunk") or hit["id"]) not in seen and hit.get("text"):
-                    seen.add(hit.get("chunk") or hit["id"])
-                    out.append(f"[{hit['id']}] {hit['text'][:500]}")
+                key = hit.get("chunk") or hit["id"]
+                if key not in seen and hit.get("text"):
+                    seen.add(key)
+                    # 同样按命中块取窗：从节头裁会让建议 prompt 只看到第一个块
+                    snip, _ = KnowledgeBase.snippet_window(hit, 500)
+                    out.append(f"[{hit['id']}] {snip}")
         return out
 
     def _case_hint(self, res: AnalysisResult, fn) -> str:
