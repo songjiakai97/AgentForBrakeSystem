@@ -183,15 +183,19 @@ def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> L
             "function": {
                 "name": "search_manual",
                 "description": (
-                    "检索标定手册/知识库（语义+关键词混合，支持自然语言问句）。"
-                    "用户问判定标准、超限成因、标定方向、工况流程等知识性问题时调用；"
-                    "查具体参数值优先用 get_param。回答时引用结果里的节 id。"
-                    "没有命中也如实说明，不要编手册内容。"
+                    "检索标定手册/知识库（语义+关键词混合）。用户问判定标准、超限成因、"
+                    "标定方向、工况流程等知识性问题时调用；查具体参数值优先用 get_param。"
+                    "回答时引用结果里的节 id。没有命中也如实说明，不要编手册内容。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "检索问句或要点"},
+                        "query": {"type": "string", "description": (
+                            "检索要点，**不要照抄用户整句**。提炼主题词/参数名/工况词，"
+                            "用空格分隔。例：用户问「干沥青工况下后轴最小保压滑移率是多少」"
+                            "→ query 传「干沥青 后轴 最小保压滑移率」；疑问词（是什么/多少/"
+                            "有哪些/怎么）会稀释关键词打分、降低召回精度。"
+                            "对话中已确认的工况、功能名等上下文要一并带上作主题词。")},
                         "condition": {"type": "string",
                                       "description": "工况词（如 洒水玄武岩）。查询明确针对"
                                                      "某个工况时填写，避免同名内容跨工况串扰"},
