@@ -132,3 +132,121 @@ def test_subheadings_unique_across_sections(tmp_path):
     assert len(subs) == 2
     assert len(set(subs)) == 2, f"子标题撞名: {subs}"
     assert any("干沥青100km/h · 标定参数说明" in s for s in subs)
+
+
+def _make_chapter_docx(path, title=None):
+    """章级手册：多个 Heading 1 章 + 章下 Heading 2 工况 + Heading 3 子标题。"""
+    import docx
+    d = docx.Document()
+    if title is not None:
+        d.add_heading(title, level=1)
+    d.add_paragraph("手册总则：覆盖全部工况。")
+    d.add_heading("第1章 对开路面", level=1)
+    d.add_paragraph("对开路面章节导语：左右附着系数不同。")
+    t = d.add_table(rows=2, cols=2)
+    t.rows[0].cells[0].text = "章级限值"
+    t.rows[0].cells[1].text = "值"
+    t.rows[1].cells[0].text = "k"
+    t.rows[1].cells[1].text = "1"
+    d.add_heading("干沥青100km/h", level=2)
+    d.add_paragraph("工况说明。")
+    d.add_heading("标定参数说明", level=3)
+    d.add_paragraph("参数表如下。")
+    d.add_heading("第2章 高附对接低附", level=1)
+    d.add_paragraph("第2章导语。")
+    d.add_heading("干沥青100km/h", level=2)      # 同名工况、不同章
+    d.add_paragraph("工况说明2。")
+    d.save(str(path))
+
+
+def test_chapter_headings_are_not_dropped(tmp_path):
+    """比节更浅的层级（章 H1）过去被降级成段落、连导语和限值表一起粘进相邻工况节。
+    现在章自己成节，内容必须在库里查得到。"""
+    p = tmp_path / "ch.docx"
+    _make_chapter_docx(p)
+    res = docx_to_markdown(str(p), source_name="ch.docx")
+    titles = [s["title"] for s in res.sections]
+    assert "第1章 对开路面" in titles and "第2章 高附对接低附" in titles
+
+    kb_dir = tmp_path / "kb"
+    (kb_dir / "manual").mkdir(parents=True)
+    (kb_dir / "manual" / "ch.md").write_text(res.markdown, encoding="utf-8")
+    kb = KnowledgeBase(str(kb_dir))
+    chap = next(s for s in kb.sections.values() if s.title == "第1章 对开路面")
+    assert "对开路面章节导语" in chap.text
+    assert "| 章级限值 | 值 |" in chap.text, "章级表格丢失"
+    # 章内容不再粘进工况节
+    cond = next(s for s in kb.sections.values() if s.title.endswith("干沥青100km/h"))
+    assert "章级限值" not in cond.text
+
+
+def test_section_title_carries_chapter_breadcrumb(tmp_path):
+    """扁平成一串 ### 后顺序是唯一体现层级的东西——工况节标题必须带上所属章，
+    且同名工况分属不同章时不能撞车。"""
+    p = tmp_path / "ch.docx"
+    _make_chapter_docx(p)
+    res = docx_to_markdown(str(p), source_name="ch.docx")
+    titles = [s["title"] for s in res.sections]
+    assert "第1章 对开路面 · 干沥青100km/h" in titles
+    assert "第2章 高附对接低附 · 干沥青100km/h" in titles
+    assert len(set(titles)) == len(titles), f"同名工况跨章撞车: {titles}"
+
+
+def test_doc_title_falls_back_when_headings_are_chapters(tmp_path):
+    """全是章级 H1、没有封面标题时，doc_title 退回文件名，markdown 仍带一行 `# `
+    （KB 靠它取 doc_title）。"""
+    p = tmp_path / "fallback.docx"
+    _make_chapter_docx(p, title=None)
+    res = docx_to_markdown(str(p), source_name="fallback.docx")
+    assert res.doc_title == "fallback"
+    assert res.markdown.startswith("# fallback\n")
+
+    kb_dir = tmp_path / "kb2"
+    (kb_dir / "manual").mkdir(parents=True)
+    (kb_dir / "manual" / "fallback.md").write_text(res.markdown, encoding="utf-8")
+    kb = KnowledgeBase(str(kb_dir))
+    assert all(s.doc_title == "fallback" for s in kb.sections.values())
+
+
+def test_deeper_subheading_level_still_chunks(tmp_path):
+    """子标题层级不写死 Heading 3：手册直接跳到 H4 时也要产出 `####`（kb 的切块边界），
+    过去输出 `#####` 会让整节退化成一整块。"""
+    import docx
+    d = docx.Document()
+    d.add_heading("手册", level=1)
+    d.add_heading("干沥青", level=2)
+    d.add_paragraph("说明")
+    d.add_heading("标定参数说明", level=4)
+    d.add_paragraph("参数表内容")
+    d.add_heading("评价标准说明", level=4)
+    d.add_paragraph("评价内容")
+    p = tmp_path / "h4.docx"
+    d.save(str(p))
+    res = docx_to_markdown(str(p), source_name="h4.docx")
+    subs = [ln for ln in res.markdown.splitlines() if ln.startswith("#### ")]
+    assert subs == ["#### 干沥青 · 标定参数说明", "#### 干沥青 · 评价标准说明"]
+
+    kb_dir = tmp_path / "kb3"
+    (kb_dir / "manual").mkdir(parents=True)
+    (kb_dir / "manual" / "h4.md").write_text(res.markdown, encoding="utf-8")
+    kb = KnowledgeBase(str(kb_dir))
+    # 切块边界生效：一节切成三块（节头 + 两个子标题块）
+    assert len(kb._index_chunks()) == 3
+
+
+def test_no_h2_chapter_doc_splits_by_chapter(tmp_path):
+    """退化路径：只有章级 H1、没有 H2 时按章切节，章标题保持原样（无面包屑）。"""
+    import docx
+    d = docx.Document()
+    for name in ("第1章 对开路面", "第2章 高附对接低附"):
+        d.add_heading(name, level=1)
+        d.add_paragraph(f"{name} 的内容。")
+        d.add_heading("标定参数说明", level=3)
+        d.add_paragraph("深层内容。")
+    p = tmp_path / "noh2.docx"
+    d.save(str(p))
+    res = docx_to_markdown(str(p), source_name="noh2.docx")
+    titles = [s["title"] for s in res.sections]
+    assert "第1章 对开路面" in titles and "第2章 高附对接低附" in titles
+    assert any(ln.startswith("#### 第1章 对开路面 · 标定参数说明")
+               for ln in res.markdown.splitlines())
