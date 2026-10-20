@@ -105,6 +105,37 @@ def test_search_manual_snippet_centers_on_hit_block(tmp_path):
     assert "26.87" in target["snippet"]
 
 
+def test_search_manual_keeps_all_hits_when_sections_are_long(tmp_path):
+    """节很长（表格手册的常态）时，5 条命中都要进 payload，不能因预算核算漏项连锁丢。
+
+    旧实现的 room 只扣 base 的一次性开销：每条 item 的 id/标题/JSON 字段名，以及
+    表格里每个换行序列化后的 \\n（2 字符），都没算进去——n 条实际长度恒定略超闸，
+    pop 后重算又超，最后只剩 1 条命中进模型。
+    """
+    from brake_analyzer.llm.prompts import TOOL_PAYLOAD_CLIP_CHARS
+
+    mdir = tmp_path / "manual"
+    mdir.mkdir()
+    md = ["# 长表格手册"]
+    for i in range(6):
+        rows = "\n".join(f"| Cp_{i}_{j} | 值 | 单位 |" for j in range(300))
+        md.append(f"\n### wide.s{i + 1} — 工况{i}\n\n"
+                  f"| 参数 | 值 | 单位 |\n| --- | --- | --- |\n{rows}\n")
+    (mdir / "wide.md").write_text("\n".join(md), encoding="utf-8")
+
+    eng = _engine(str(tmp_path))
+    hits = eng.kb.search("工况 参数 Cp 值", top_k=5)
+    assert len(hits) >= 3, f"前提失效：长表格手册至少应命中 3 节，实得 {len(hits)}"
+    payload = eng._kb_payload(hits)
+    assert len(payload["results"]) == len(hits), \
+        f"命中 {len(hits)} 节只喂入 {len(payload['results'])} 节：预算核算漏项导致连锁丢命中"
+    js = json.dumps(payload, ensure_ascii=False)
+    assert len(js) <= TOOL_PAYLOAD_CLIP_CHARS, f"payload {len(js)} 超闸"
+    assert json.loads(js) == payload
+    for r in payload["results"]:
+        assert len(r["snippet"]) >= 240, "窗口被压到不可读"
+
+
 def test_search_manual_payload_survives_json_roundtrip(tmp_path):
     """payload 序列化必须 ≤ TOOL_PAYLOAD_CLIP_CHARS 且是合法 JSON。
 

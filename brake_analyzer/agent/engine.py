@@ -22,7 +22,7 @@ from ..agent.tools import list_conditions, recommend_targets, resolve_condition
 from ..configs import AppConfigs
 from ..llm.client import LlmClient
 from ..llm.context import ContextBudget, ContextCompressor
-from ..llm.kb import KnowledgeBase, SNIPPET_MIN_CHARS
+from ..llm.kb import KnowledgeBase, SNIPPET_MIN_CHARS, CUT_NOTE_MAX_CHARS
 from ..llm.prompts import (
     TOOL_PAYLOAD_CLIP_CHARS,
     EXTERNAL_TOOL_NOTE,
@@ -671,6 +671,18 @@ class ChatEngine:
         return added, digests
 
     # ------------------------------------------------------------ 知识/文件工具
+    @staticmethod
+    def _kb_item_frame(h: dict) -> int:
+        """一条命中除 snippet 之外必须付的 JSON 包装长度。
+
+        = 字段名/引号/逗号 + id 与面包屑标题的实际字数 + 最坏情况的裁剪标记。
+        snippet_window 在窗口装不下整节时一定会附带 note，所以按最坏情况预留
+        （CUT_NOTE_MAX_CHARS 是 kb.py 各处 note 文案的字数上界）。
+        """
+        probe = {"id": h.get("id", ""), "title": h.get("title", ""),
+                 "snippet": "", "note": "x" * CUT_NOTE_MAX_CHARS}
+        return len(json.dumps(probe, ensure_ascii=False)) - 2   # 扣掉 snippet 的两个引号
+
     def _kb_payload(self, hits: List[dict]) -> dict:
         """把命中装进 TOOL_PAYLOAD_CLIP_CHARS：预算均分 + 中心窗口 + 主动降级。
 
@@ -680,31 +692,47 @@ class ChatEngine:
         节长更容易超预算，所以这里改为主动分配：每条命中拿「剩余预算/命中数」
         的中心窗口，均分后低于可读下限就丢掉最弱的一条重算——宁可少给一条完整
         命中，不给五条半截。
+
+        剩余预算必须先扣掉每条的 JSON 包装（_kb_item_frame）；扣完也不能直接用满
+        room：换行、引号序列化后各占 2 字符，markdown 表格每行都要付一次，实测
+        长表格手册每条仍额外放大 ~70 字。所以按实际超出量回收 room 重试，压到
+        可读下限仍装不下才丢整条命中——旧实现两项都没算，5 节命中最后只剩
+        1 节进模型，其余 4 节白检索。
         """
         base = {"ok": True, "transient": True, "mode": self.kb.last_search_mode,
                 "note": "" if hits else "手册中没有相关内容；如实告知用户，不要编造手册内容",
                 "results": []}
-        overhead = len(json.dumps(base, ensure_ascii=False)) + 96   # 引号/分隔/转义余量
+        overhead = len(json.dumps(base, ensure_ascii=False)) + 32   # 数组外框余量
         kept = list(hits)
         while kept:
-            room = (TOOL_PAYLOAD_CLIP_CHARS - overhead) // len(kept)
-            if room < SNIPPET_MIN_CHARS:
-                kept.pop()
-                continue
-            results = []
-            for h in kept:
-                snippet, cut = KnowledgeBase.snippet_window(h, room)
-                if not snippet:            # 预算被标题吃满：退回从头裁，别交空串
-                    snippet, cut = h["text"][:room], ""
-                item = {"id": h["id"], "title": h["title"], "snippet": snippet}
-                if cut:
-                    item["note"] = cut
-                results.append(item)
-            payload = {**base, "results": results}
-            if len(json.dumps(payload, ensure_ascii=False)) <= TOOL_PAYLOAD_CLIP_CHARS:
-                return payload
-            kept.pop()                     # 转义放大体积：丢一条再试
+            frames = [self._kb_item_frame(h) for h in kept]
+            room = ((TOOL_PAYLOAD_CLIP_CHARS - overhead - sum(frames)
+                     - (len(kept) - 1)) // len(kept))
+            # 转义放大量只有裁完才知道：按超出的字数从每条窗口里等量扣回。
+            # 窗口是行边界对齐的，扣一次不会正好；最多试 4 次，免得为一两字
+            # 反复重裁。仍装不下就丢最弱的一条重算
+            for _ in range(4):
+                if room < SNIPPET_MIN_CHARS:
+                    break
+                payload = {**base,
+                           "results": [self._kb_hit_item(h, room) for h in kept]}
+                excess = len(json.dumps(payload, ensure_ascii=False)) - TOOL_PAYLOAD_CLIP_CHARS
+                if excess <= 0:
+                    return payload
+                room -= excess // len(kept) + 1
+            kept.pop()
         return base
+
+    @staticmethod
+    def _kb_hit_item(h: dict, room: int) -> dict:
+        """一条命中 → payload 条目：以命中块为中心裁窗口，附带裁剪说明。"""
+        snippet, cut = KnowledgeBase.snippet_window(h, room)
+        if not snippet:            # 预算被标题吃满：退回从头裁，别交空串
+            snippet, cut = h["text"][:room], ""
+        item = {"id": h["id"], "title": h["title"], "snippet": snippet}
+        if cut:
+            item["note"] = cut
+        return item
 
     def _kb_search_tool(self, query: str, condition: Optional[str] = None) -> dict:
         """手册语义检索工具：知识性问答的数据来源，无命中也如实回执（防编造）。"""

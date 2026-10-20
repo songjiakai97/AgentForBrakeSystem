@@ -47,6 +47,11 @@ MAX_CHUNK_CHARS = 480
 # 单条命中的最小可读长度：窗口分配再紧张也不能低于它，否则只能丢命中
 SNIPPET_MIN_CHARS = 240
 
+# snippet_window 可能返回的最长裁剪标记（note）的字数上界。调用方按它给每条
+# 命中预留 JSON 包装预算——新增/加长 note 文案时必须同步这里，低估会让
+# payload 撞外层硬闸、多丢一条命中。
+CUT_NOTE_MAX_CHARS = 40
+
 
 class KnowledgeBase:
     def __init__(self, kb_dir: str = "knowledge"):

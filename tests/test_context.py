@@ -214,12 +214,28 @@ class FakeLlm:
         return None
 
 
-def _engine(tool_rounds=0, max_tokens=1200, compress_tokens=700):
+def _resident_floor() -> int:
+    """空会话下 resident 部分的实测 token：system prompt + 功能目录 + 文件清单块。
+
+    提示词演进会让它变长（路面分类口径一次就加了约 500 tok），
+    所以下面的预算都按它的倍数推导，不写死数字。
+    """
+    import os
+
+    from brake_analyzer.configs import load_configs
+    from brake_analyzer.llm.prompts import build_chat_messages as _bcm
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = load_configs(os.path.join(root, "configs"))
+    return estimate_message_tokens(_bcm(cfg, [], "x", [], {}))
+
+
+def _engine(tool_rounds=0, max_tokens=None, compress_tokens=None):
     """小预算引擎：预算数值是刻意选小的，好让压缩在几轮对话内就触发。
 
     注意 resident 部分（system prompt + 功能目录 + 文件清单）本身就有几百 token，
     压不出这个量级的用例（如「未超限就不压」）必须把 compress 阈值放在这个地板之上，
-    否则测的是阈值选得准不准，不是引擎压不压。
+    否则测的是阈值选得准不准，不是引擎压不压。地板按 _resident_floor 实测得出。
     """
     import os
 
@@ -227,6 +243,12 @@ def _engine(tool_rounds=0, max_tokens=1200, compress_tokens=700):
     from brake_analyzer.configs import load_configs
     from brake_analyzer.llm.kb import KnowledgeBase
     from web.store import Store
+
+    floor = _resident_floor()
+    if max_tokens is None:
+        max_tokens = int(floor * 1.7)      # 装得下 resident，但装不下整段历史
+    if compress_tokens is None:
+        compress_tokens = int(floor * 1.2)
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     llm = FakeLlm(tool_rounds=tool_rounds)

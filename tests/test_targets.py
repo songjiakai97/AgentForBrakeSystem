@@ -197,6 +197,40 @@ def test_system_chat_forbids_autopick():
     assert "list_conditions" in SYSTEM_CHAT
 
 
+def test_system_chat_routes_knowledge_questions_away_from_upload():
+    """知识性提问不得被引到「先上传数据」这条链上。
+
+    旧职责描述只有一条流程（判功能→定位工况→跑分析→建议），模型照着走时
+    对「ABS 对开路面有哪些标定参数」这类问题也先要文件，而答案其实在手册里。
+    """
+    from brake_analyzer.llm.prompts import SYSTEM_CHAT
+
+    assert "先分流再动手" in SYSTEM_CHAT
+    assert "search_manual" in SYSTEM_CHAT and "不要要求用户上传数据" in SYSTEM_CHAT
+    # 要文件的条件写清楚：只有算数据才要，且清单为空才提上传
+    assert "清单为空" in SYSTEM_CHAT
+
+
+def test_system_chat_distinguishes_split_and_rolling_mu():
+    """对开（split-μ，横向左右不同）与对接（rolling-μ，纵向沿程突变）必须分开定义。
+
+    两者常被混为一谈，混了之后照着错误的失效机理给标定方向：对开考核偏航/跑偏，
+    对接考核跨边界瞬间的减速度突变与介入迟滞。
+    """
+    from brake_analyzer.llm.prompts import ROAD_SURFACE_PRIMER, SYSTEM_CHAT
+
+    assert "对开路面" in SYSTEM_CHAT and "对接路面" in SYSTEM_CHAT
+    assert "split-μ" in ROAD_SURFACE_PRIMER and "rolling-μ" in ROAD_SURFACE_PRIMER
+    assert "横向不对称" in ROAD_SURFACE_PRIMER   # 对开 = 左右
+    assert "纵向跨时间" in ROAD_SURFACE_PRIMER   # 对接 = 沿程
+    # 对接的两个方向都得点名，模型常只写一个
+    assert "step-down" in ROAD_SURFACE_PRIMER and "step-up" in ROAD_SURFACE_PRIMER
+    # 词表里只有匀质三类：必须明说对开/对接不能塞进 surface_code
+    for code in ("dry_asphalt", "wet_basalt", "wet_tile"):
+        assert code in ROAD_SURFACE_PRIMER
+    assert "不在 surface_code 取值域内" in ROAD_SURFACE_PRIMER
+
+
 def test_profiles_presented_as_dimensions_not_flat_choices(cfg):
     """档位必须按维度呈现：4WD/2WD 与 DTCS/TCS 是两维各取一个。
 
