@@ -687,11 +687,12 @@ class ChatEngine:
                         f"清单 {res.get('count')} 条（仅本轮可见）", status)
             n_cand = len(res.get("candidates", []) or [])
             label = f"{name} → hop={hop}" if hop else f"{name} 完成"
-            hit = res.get("target") or res.get("condition") or {}
-            detail = f"候选：{n_cand} 项"
-            if hop == "resolved" and isinstance(hit, dict) and hit.get("id"):
-                detail = hit["id"]
-            return (label, detail, status)
+            if hop == "resolved":
+                # target 的形状是 {key, name, via, ...}（tools.resolve_condition），
+                # detail 给工况名比给「候选：1 项」有用得多
+                tgt = res.get("target") or {}
+                return (label, str(tgt.get("name") or tgt.get("key") or ""), status)
+            return (label, f"候选：{n_cand} 项", status)
         if name == "search_manual":
             if res.get("ok") is False:      # 参数错（query 为空）：把 note 摊开
                 return (f"{name} 参数有误", str(res.get("note", ""))[:120], "warn")
