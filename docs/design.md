@@ -507,6 +507,14 @@ LLM 可选/降级。`AnalysisResult` 一次生成，Web 各视图共用。
   （`search_manual → 命中 3 节`，detail 带检索通道与送入字数）。早先所有工具共用一行
   `hop={result["hop"]}`，于是 trace 里出现「search_manual → hop=None」，看着像检索挂了。
   命中 0 节标 warn——它不是工具失败，但模型接下来开始编手册内容时，这行是唯一的线索。
+- 每条命中同时进这一行的 `hits` 字段（`_step_hits`）：对话「过程」区在 `→ 命中 N 节`
+  下面逐条列出（标题 / 节 id / 送入字数，点开是**实际送进模型的那段 snippet**，被预算
+  裁掉的弱命中不在其中；正文超过 `STEP_HIT_TEXT_MAX` 只展示前段并写明完整内容看
+  `/debug`）。steps 消息不回灌 prompt（`is_injected`），所以这段明细只给用户看，
+  不会占模型上下文。
+- `/debug` 每条 trace 另有「tool 返回（逐条）」区：从该轮 request 里的 `role:"tool"`
+  应答还原出模型真正读到的 JSON，`search_manual` / `get_param` 逐条列出，其余工具
+  原样 pretty-print。
 - 工况选择确认与档位选择由前端 `/select` 写入 `Chat.selected_*`，不作为 LLM 工具。
 - 文件清单与信号通道已作为 LLM 工具暴露（`list_files`，带 `file_index` 才加载信号）；
   上传/删除仍是前端职责，不作为工具。

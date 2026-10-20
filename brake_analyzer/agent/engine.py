@@ -466,8 +466,14 @@ class ChatEngine:
                             payload = result
                             res = result if isinstance(result, dict) else {}
                             hop = res.get("hop")
-                            yield self._mevent(self._step_on(
-                                chat, [self._tool_step_label(name, res)]))
+                            label, detail, status = self._tool_step_label(name, res)
+                            row = {"label": label, "detail": detail, "status": status}
+                            hits = self._step_hits(name, res)
+                            if hits:
+                                # 「命中 N 节」只说明有条数，用户看不到到底命中了什么；
+                                # 把每条命中摊进这一行，前端可逐条展开（截断说明一并给出）
+                                row["hits"] = hits
+                            yield self._mevent(self._step_on(chat, [row]))
                             # 面板只在信息不足时弹；hop=function 的候选由工具保证是功能级，
                             # 工况清单（catalog）不会走到这里，不混进用户可见选项
                             if hop in ("function", "condition", "profile"):
@@ -673,6 +679,8 @@ class ChatEngine:
     # 概念**，硬套 `hop=None` 只会让人以为检索失败了（实测困扰）。数据类按返回内容
     # 给命中数/通道数，并带上检索通道 mode。
     _ROUTING_TOOLS = ("resolve_condition", "list_conditions", "recommend_targets")
+    # 对话「过程」里每条命中的展示正文上限（超出只给前段 + 一句去向说明）
+    STEP_HIT_TEXT_MAX = 600
 
     @staticmethod
     def _tool_step_label(name: str, res: dict) -> Tuple[str, str, str]:
@@ -714,6 +722,45 @@ class ChatEngine:
                 else f"{len(rows)} 个文件"
             return (f"{name} → {detail}", "", status)
         return (f"{name} 完成", "", status)
+
+    @staticmethod
+    def _step_hits(name: str, res: dict) -> List[dict]:
+        """每条工具命中的展示行（对话「过程」里逐条展开用）。
+
+        search_manual 走喂给模型的 payload 条目（同一份 snippet，所见即所喂；
+        被预算丢掉的弱命中不在 payload 里，本来就没影响回答，不展示）。
+        get_param 走原始行：fields 在 payload 与展示之间需求不同，直接格式化。
+
+        正文按 STEP_HIT_TEXT_MAX 截：steps 消息会随每次轮询整体序列化给前端，
+        一次检索最多带 10k 字进来，长会话白占内存与带宽。完整原文在 /debug 的
+        tool 返回区看，这里只保证「看得清命中了什么」。
+        """
+        if not isinstance(res, dict) or res.get("ok") is False:
+            return []
+        if name == "search_manual":
+            out = []
+            for r in res.get("results", []) or []:
+                snip = r.get("snippet", "")
+                note = r.get("note", "")
+                shown = snip[:ChatEngine.STEP_HIT_TEXT_MAX]
+                if len(snip) > len(shown):
+                    shown += "…"
+                    note = (note + "；" if note else "") + "界面只展示前段全文，完整内容看 /debug"
+                line = {"title": r.get("title", ""), "id": r.get("id", ""),
+                        "chars": len(snip), "text": shown}
+                if note:
+                    line["note"] = note
+                out.append(line)
+            return out
+        if name == "get_param":
+            out = []
+            for r in res.get("results", []) or []:
+                fields = r.get("fields") or {}
+                out.append({"title": r.get("param", ""),
+                            "id": r.get("section", ""),
+                            "text": " · ".join(f"{k}={v}" for k, v in fields.items())})
+            return out
+        return []
 
     @staticmethod
     def _kb_item_frame(h: dict) -> int:
@@ -952,11 +999,22 @@ class ChatEngine:
                                       data=data, meta=meta)
 
     def _step_on(self, chat, items: List):
-        """把步骤落进本轮最近的未封存 steps 消息（追加），否则新建一条。"""
+        """把步骤落进本轮最近的未封存 steps 消息（追加），否则新建一条。
+
+        items 元素可以是 (label, detail, status) 三元组，也可以是已经带额外字段
+        （如 hits）的 dict —— 后者让工具命中明细随步骤行一起持久化给前端。
+        """
         rows = []
         for it in items:
-            label, detail, status = (list(it) + [None, "info"])[:3]
-            rows.append({"label": label, "detail": detail, "status": status or "info"})
+            if isinstance(it, dict):
+                row = {"label": it.get("label", ""), "detail": it.get("detail", ""),
+                       "status": it.get("status") or "info"}
+                if it.get("hits"):
+                    row["hits"] = it["hits"]
+            else:
+                label, detail, status = (list(it) + [None, "info"])[:3]
+                row = {"label": label, "detail": detail, "status": status or "info"}
+            rows.append(row)
         for m in chat.messages[::-1]:
             if m.kind == "steps" and not m.meta.get("sealed"):
                 # 写时替换而非原地 extend：本轮在后台线程跑，

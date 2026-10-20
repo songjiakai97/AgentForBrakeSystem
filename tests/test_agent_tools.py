@@ -198,6 +198,64 @@ def test_search_manual_tool_roundtrip_through_events(tmp_path):
     assert payload["ok"] is True and payload["results"][0]["id"] == "m.s1"
 
 
+def test_search_manual_step_row_shows_each_hit(tmp_path):
+    """每条命中要在对话「过程」里逐条可见（steps 消息 data.items[].hits）。
+
+    旧实现只有「命中 N 节」这一行计数：用户看不到到底命中了什么，只能去 debug
+    页翻 JSON。snippet 展示的是**实际送进模型的那段**，不是节全文——两者在
+    预算裁剪后不同，界面要说清送了多少字。
+    """
+    eng = ChatEngine(load_configs(CONFIG_DIR), ToolLlm([("search_manual", {"query": "后轴CP值"})]),
+                     KnowledgeBase(_tail_manual_kb(tmp_path)), Store(),
+                     budget=ContextBudget(max_tokens=8000, compress_tokens=6000))
+    chat = eng.store.create_chat()
+    for _ in eng.events(chat, "后轴CP值是多少"):
+        pass
+    steps = [m for m in chat.messages if m.kind == "steps"]
+    assert steps, "必须有 steps 消息"
+    rows = [r for m in steps for r in (m.data or {}).get("items", [])
+            if r.get("label", "").startswith("search_manual")]
+    assert rows, "应有一行 search_manual 步骤"
+    hits = rows[-1]["hits"]
+    assert hits, "hits 必须非空：用户要看到逐条命中"
+    # 与喂给模型的 payload 条目一一对应；展示正文按 STEP_HIT_TEXT_MAX 截，
+    # chars 仍是实际送入模型的字数（两者不同要说清，别让界面冒充全文）
+    tool_msgs = [m for m in eng.llm.calls[1] if m.get("role") == "tool"]
+    payload = json.loads(tool_msgs[-1]["content"])
+    assert [h["id"] for h in hits] == [r["id"] for r in payload["results"]]
+    cap = ChatEngine.STEP_HIT_TEXT_MAX
+    for h, r in zip(hits, payload["results"]):
+        assert h["chars"] == len(r["snippet"])
+        assert h["title"]
+        if len(r["snippet"]) <= cap:
+            assert h["text"] == r["snippet"]
+        else:
+            assert h["text"] == r["snippet"][:cap] + "…"
+            assert "/debug" in h.get("note", "")
+    # 明细只随 steps 消息给前端；steps 不回灌 prompt（is_injected），模型那边不多占 token
+    assert all("hits" not in str(m) for m in eng.llm.calls[1])
+
+
+def test_step_hits_only_for_data_tools_with_results(tmp_path):
+    """hits 只给 search_manual / get_param 生成；空结果与路由类不产生该字段。"""
+    eng = _engine(_tail_manual_kb(tmp_path))
+    assert eng._step_hits("search_manual", eng._kb_search_tool("后轴CP值"))
+    assert eng._step_hits("search_manual", eng._kb_search_tool("手册里没有的词zzz")) == []
+    assert eng._step_hits("search_manual", {"ok": False, "note": "query 为空"}) == []
+    assert eng._step_hits("list_conditions", {"hop": "catalog", "count": 6}) == []
+    param = eng._get_param_tool("Cp_RA")
+    rows = eng._step_hits("get_param", param)
+    if param.get("results"):
+        assert rows and rows[0]["title"] == param["results"][0]["param"]
+    # 长 snippet 只展示前段，chars 仍是送入模型的全长
+    long_hit = {"ok": True, "results": [{"id": "a.b", "title": "T",
+                                        "snippet": "字" * (ChatEngine.STEP_HIT_TEXT_MAX + 300)}]}
+    h = eng._step_hits("search_manual", long_hit)[0]
+    assert h["chars"] == ChatEngine.STEP_HIT_TEXT_MAX + 300
+    assert len(h["text"]) == ChatEngine.STEP_HIT_TEXT_MAX + 1   # 截断处补了省略号
+    assert "/debug" in h["note"]
+
+
 # ---------------- list_files ----------------
 
 def _upload(eng, chat, fname):

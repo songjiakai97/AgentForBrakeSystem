@@ -137,6 +137,14 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
 .step-row.warn .dot{background:#f59e0b} .step-row.error .dot{background:var(--abn)}
 .step-row b{font-weight:600;color:#cbd5e1}
 .step-row .det{color:var(--muted);font-size:11px}
+/* 逐条命中：一条一行，正文可滚动，不指望用户去 debug 页翻 JSON */
+.hitList{margin:2px 0 6px 15px;border-left:1px solid #233248;padding-left:10px}
+.hitItem{padding:3px 0}
+.hitHead{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;color:#cbd5e1;cursor:pointer}
+.hitHead .idx{color:#7dd3fc;font-size:10px}
+.hitBody{white-space:pre-wrap;word-break:break-all;background:#0b1220;border:1px solid #1e293b;
+  border-radius:6px;padding:7px 9px;margin-top:3px;font-size:11px;color:#94a3b8;max-height:220px;overflow:auto}
+.hitCut{color:#f59e0b;font-size:10px}
 /* 流式思考/正文 */
 .think{background:#0b1220;border:1px dashed #334155;border-radius:10px;max-width:86%;padding:7px 12px;font-size:12px}
 .think-head{cursor:pointer;color:#7dd3fc;display:flex;gap:6px;align-items:center}
@@ -256,9 +264,24 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
             <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{(m.data&&m.data.items||[]).length}} 步</span>
           </div>
           <div class="steps-body" v-if="openState['st:'+m.message_id]">
-            <div v-for="(r,ri) in (m.data&&m.data.items)||[]" :key="ri" class="step-row" :class="r.status">
-              <span class="dot"></span><b>{{r.label}}</b><span class="det">{{r.detail}}</span>
-            </div>
+            <template v-for="(r,ri) in (m.data&&m.data.items)||[]" :key="ri">
+              <div class="step-row" :class="r.status">
+                <span class="dot"></span><b>{{r.label}}</b><span class="det">{{r.detail}}</span>
+              </div>
+              <!-- 工具命中的每一条：手册节/参数行逐条列出，点开看实际送进模型的原文 -->
+              <div v-if="r.hits&&r.hits.length" class="hitList">
+                <div v-for="(h,hi) in r.hits" :key="hi" class="hitItem">
+                  <div class="hitHead" @click="toggleOpen('hit:'+m.message_id+':'+ri+':'+hi)">
+                    <span>{{openState['hit:'+m.message_id+':'+ri+':'+hi] ? '▾' : '▸'}}</span>
+                    <span class="idx">{{hi+1}}</span>
+                    <b style="font-weight:600">{{h.title}}</b>
+                    <span class="det">{{h.id}}{{h.chars?' · '+h.chars+' 字':''}}</span>
+                    <span v-if="h.note" class="hitCut">已裁剪</span>
+                  </div>
+                  <div v-if="openState['hit:'+m.message_id+':'+ri+':'+hi]" class="hitBody">{{h.text}}<div v-if="h.note" class="hitCut">{{h.note}}</div></div>
+                </div>
+              </div>
+            </template>
           </div>
         </div>
 

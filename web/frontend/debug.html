@@ -22,6 +22,11 @@ pre{white-space:pre-wrap;word-break:break-all;background:#0b1220;border:1px soli
 button{background:#334155;border:none;color:#e2e8f0;border-radius:6px;padding:4px 10px;cursor:pointer}
 input{background:#0b1220;border:1px solid #334155;color:#e2e8f0;border-radius:6px;padding:4px 8px}
 .err{color:#fca5a5}
+/* 逐条 tool 返回：一条一节，标题行给 id/字数/裁剪说明，正文用 pre 保留表格原样 */
+.hit{border-left:2px solid #164e63;padding:2px 0 2px 8px;margin:4px 0}
+.hit .idx{color:#38bdf8;margin-right:6px}
+.hit .hid{color:#64748b;font-size:11px;margin-left:6px}
+.hit pre{max-height:26vh}
 </style></head>
 <body>
 <header><h1>LLM Trace（仅内存，最近 500 条）</h1>
@@ -74,6 +79,7 @@ function render(){
         <span class="t">${esc((t.user_text||'').slice(0,60))}</span></div>`;
       const det=!open2 ? '' : `<div class="detail" onclick="event.stopPropagation()">
         <div class="k">user_text</div><pre>${esc(t.user_text)}</pre>
+        <div class="k">tool 返回（逐条）</div>${toolBlock(t)}
         <div class="k">request messages</div><pre>${esc(JSON.stringify(t.request,null,1))}</pre>
         <div class="k">reply</div><pre>${esc(JSON.stringify(t.reply,null,1))}</pre>
         <div class="k">tools executed</div><pre>${esc(JSON.stringify(t.tools,null,1))}</pre></div>`;
@@ -85,6 +91,34 @@ function render(){
 
 function toggleChat(cid){ openChats.has(cid)?openChats.delete(cid):openChats.add(cid); render(); }
 function toggleTrace(tid){ openTraces.has(tid)?openTraces.delete(tid):openTraces.add(tid); render(); }
+
+// 逐条展示本轮工具真正返回了什么：search_manual / get_param 的 results 一条一行。
+// 数据来自 request 里的 role:"tool" 应答——那串 JSON 正是模型看到的原文，
+// 比翻整段 request 好读；其余工具原样 pretty-print，不猜结构。
+function toolBlock(t){
+  const msgs=(t.request||[]);
+  const names={};
+  for(const m of msgs) for(const c of (m.tool_calls||[])) names[c.id]=c.function.name;
+  const rows=msgs.filter(m=>m.role==='tool').map(m=>{
+    let p; try{ p=JSON.parse(m.content); }catch(e){ return `<pre>${esc(m.content)}</pre>`; }
+    const nm=names[m.tool_call_id]||m.tool_call_id;
+    const hits=(nm==='search_manual'||nm==='get_param') ? (Array.isArray(p.results)?p.results:null) : null;
+    if(hits===null) return `<div class="k">${esc(nm)}</div><pre>${esc(JSON.stringify(p,null,1))}</pre>`;
+    const items=hits.map((h,i)=>{
+      const title=nm==='search_manual'?(h.title||h.id):(h.param||'');
+      const id=nm==='search_manual'?h.id:(h.section||'');
+      const body=nm==='search_manual'?h.snippet:JSON.stringify(h.fields||{},null,1);
+      const cut=h.note?`<span class="err"> ${esc(h.note)}</span>`:'';
+      return `<div class="hit"><span class="idx">${i+1}</span><b>${esc(title)}</b>`+
+             `<span class="hid">${esc(id)} · ${(body||'').length} 字</span>${cut}`+
+             `<pre>${esc(body)}</pre></div>`;
+    }).join('');
+    const miss=p.ok===false ? `<span class="err">ok=false：${esc(p.note||'')}</span>`
+      : (!hits.length ? '<span class="err">命中 0 条</span>' : '');
+    return `<div class="k">${esc(nm)} → ${hits.length} 条 ${miss} · mode ${esc(p.mode||'—')}</div>${items}`;
+  });
+  return rows.length ? rows.join('') : '<pre>（本轮无 tool 应答）</pre>';
+}
 
 function esc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;')}
 load();
