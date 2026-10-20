@@ -501,6 +501,12 @@ LLM 可选/降级。`AnalysisResult` 一次生成，Web 各视图共用。
 
 说明：
 
+- 步骤标签按工具种类分两套（`_tool_step_label`）：路由类（`resolve_condition` /
+  `list_conditions` / `recommend_targets`）返回 `hop`，标签就是 `→ hop=xxx`；数据类
+  （`search_manual` / `get_param` / `list_files`）**没有 hop 这个概念**，标签给命中数
+  （`search_manual → 命中 3 节`，detail 带检索通道与送入字数）。早先所有工具共用一行
+  `hop={result["hop"]}`，于是 trace 里出现「search_manual → hop=None」，看着像检索挂了。
+  命中 0 节标 warn——它不是工具失败，但模型接下来开始编手册内容时，这行是唯一的线索。
 - 工况选择确认与档位选择由前端 `/select` 写入 `Chat.selected_*`，不作为 LLM 工具。
 - 文件清单与信号通道已作为 LLM 工具暴露（`list_files`，带 `file_index` 才加载信号）；
   上传/删除仍是前端职责，不作为工具。
@@ -2126,5 +2132,6 @@ curl -s -X POST localhost:8000/api/mcp/call/mcp__matlab__detect_matlab_toolboxes
 - 标定建议闭环：`POST /api/analyses/{id}/feedback`（accepted/verified/ineffective + note）
   → LLM 基于反馈生成 `followup` 标定动作 → 分析卡片就地更新。
 - 前端：侧栏三视图（对话/知识库/外部工具）；顶栏 `ctx` 徽标 + hover 卡（总估算/窗口/状态）；
-  压缩摘要文本落步骤消息；debug 页 trace 两级折叠（会话→请求）。
+  压缩摘要文本落步骤消息；debug 页 trace 两级折叠（会话→请求），**不自动刷新**——
+  5 秒一次的整页重绘会丢掉展开状态与滚动位置，正是要看 trace 的时候最碍事，改为手动点「刷新」。
 - 性能：`_crossings` numpy 向量化；anyio 线程池 40→200（SSE 长连接占线程问题）。

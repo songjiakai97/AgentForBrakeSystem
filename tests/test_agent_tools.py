@@ -95,6 +95,36 @@ def _tail_manual_kb(tmp_path):
     return str(tmp_path)
 
 
+def test_step_label_for_data_tools_has_no_hop(tmp_path):
+    """search_manual / get_param / list_files 不返回 hop，标签不该写成 hop=None。
+
+    旧实现所有工具共用 `f"{name} → hop={hop}"`，数据类工具没有 hop 这个概念，
+    trace 里就出现「search_manual → hop=None」，看着像检索失败（实际命中若干节）。
+    """
+    eng = _engine(_tail_manual_kb(tmp_path))
+    hits = eng.kb.search("后轴CP值", top_k=5)
+    label, detail, status = eng._tool_step_label(
+        "search_manual", eng._kb_payload(hits))
+    assert "hop=" not in label, label
+    assert label == f"search_manual → 命中 {len(hits)} 节"
+    assert "keyword" in detail or "hybrid" in detail or "semantic" in detail
+    assert status == "ok"
+
+    # 路由类仍然带 hop（面板判定依赖它，别顺手改坏）
+    assert eng._tool_step_label("resolve_condition", {"hop": "resolved",
+                                                     "candidates": []})[0] \
+        == "resolve_condition → hop=resolved"
+    assert eng._tool_step_label("list_conditions", {"hop": "catalog", "count": 6}) \
+        == ("list_conditions → hop=catalog", "清单 6 条（仅本轮可见）", "ok")
+
+
+def test_search_manual_empty_hit_label_is_warn(tmp_path):
+    eng = _engine(_tail_manual_kb(tmp_path))
+    label, detail, status = eng._tool_step_label(
+        "search_manual", eng._kb_search_tool("手册里没有的词zzz"))
+    assert label.endswith("命中 0 节") and status == "warn"
+
+
 def test_search_manual_snippet_centers_on_hit_block(tmp_path):
     """命中块在节尾时，snippet 必须含节尾内容——旧实现 [:1500] 从节头裁会丢掉它。"""
     eng = _engine(_tail_manual_kb(tmp_path))

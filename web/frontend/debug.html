@@ -87,5 +87,5 @@ function toggleChat(cid){ openChats.has(cid)?openChats.delete(cid):openChats.add
 function toggleTrace(tid){ openTraces.has(tid)?openTraces.delete(tid):openTraces.add(tid); render(); }
 
 function esc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;')}
-load();setInterval(()=>{if(!document.hidden)load();},5000);
+load();
 </script></body></html>

@@ -464,14 +464,10 @@ class ChatEngine:
                                  "ok" if digests else "warn")]))
                         else:
                             payload = result
-                            hop = (result or {}).get("hop")
-                            n_cand = len(result.get("candidates", [])) if isinstance(result, dict) else 0
-                            n_cond = (result.get("count") if isinstance(result, dict) else None)
-                            yield self._mevent(self._step_on(chat, [(
-                                f"{name} → hop={hop}",
-                                (f"清单 {n_cond} 条（仅本轮可见）" if hop == "catalog" else
-                                 f"候选：{n_cand} 项"),
-                                "ok")]))
+                            res = result if isinstance(result, dict) else {}
+                            hop = res.get("hop")
+                            yield self._mevent(self._step_on(
+                                chat, [self._tool_step_label(name, res)]))
                             # 面板只在信息不足时弹；hop=function 的候选由工具保证是功能级，
                             # 工况清单（catalog）不会走到这里，不混进用户可见选项
                             if hop in ("function", "condition", "profile"):
@@ -671,6 +667,53 @@ class ChatEngine:
         return added, digests
 
     # ------------------------------------------------------------ 知识/文件工具
+    # 工具分两类，trace 步骤标签不能共用一个格式：
+    # 路由类（resolve_condition / list_conditions / recommend_targets）返回 hop，
+    # 标签就是 hop；数据类（search_manual / get_param / list_files）**没有 hop 这个
+    # 概念**，硬套 `hop=None` 只会让人以为检索失败了（实测困扰）。数据类按返回内容
+    # 给命中数/通道数，并带上检索通道 mode。
+    _ROUTING_TOOLS = ("resolve_condition", "list_conditions", "recommend_targets")
+
+    @staticmethod
+    def _tool_step_label(name: str, res: dict) -> Tuple[str, str, str]:
+        """(标签, 详情, 状态)：路由类看 hop，数据类看返回条数。"""
+        status = "ok" if res.get("ok", True) else "warn"
+        if name in ChatEngine._ROUTING_TOOLS:
+            hop = res.get("hop")
+            if hop == "error":
+                status = "warn"
+            if hop == "catalog":
+                return (f"{name} → hop=catalog",
+                        f"清单 {res.get('count')} 条（仅本轮可见）", status)
+            n_cand = len(res.get("candidates", []) or [])
+            label = f"{name} → hop={hop}" if hop else f"{name} 完成"
+            hit = res.get("target") or res.get("condition") or {}
+            detail = f"候选：{n_cand} 项"
+            if hop == "resolved" and isinstance(hit, dict) and hit.get("id"):
+                detail = hit["id"]
+            return (label, detail, status)
+        if name == "search_manual":
+            if res.get("ok") is False:      # 参数错（query 为空）：把 note 摊开
+                return (f"{name} 参数有误", str(res.get("note", ""))[:120], "warn")
+            n = len(res.get("results", []) or [])
+            if not n:
+                # 空命中不是工具失败，但对 trace 是信号（模型接下来可能开始编）
+                return (f"{name} → 命中 0 节", "手册无相关内容", "warn")
+            mode = res.get("mode") or "keyword"
+            chars = sum(len(r.get("snippet", "")) for r in (res.get("results") or []))
+            return (f"{name} → 命中 {n} 节", f"通道 {mode} · 送入 {chars} 字", status)
+        if name == "get_param":
+            n = len(res.get("results", []) or [])
+            first = (res.get("results") or [{}])[0].get("param", "")
+            return (f"{name} → 命中 {n} 条", str(first), status)
+        if name == "list_files":
+            rows = res.get("files", []) or []
+            ch = next((r for r in rows if r.get("channels")), None)
+            detail = f"{ch['name']}：{len(ch['channels'])} 个通道" if ch \
+                else f"{len(rows)} 个文件"
+            return (f"{name} → {detail}", "", status)
+        return (f"{name} 完成", "", status)
+
     @staticmethod
     def _kb_item_frame(h: dict) -> int:
         """一条命中除 snippet 之外必须付的 JSON 包装长度。
