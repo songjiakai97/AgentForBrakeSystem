@@ -86,8 +86,6 @@ abs:
     maneuver: full_brake
     surface_code: pos_jump
     params:
-      v0_kph: 50
-      v_stop_kph: 0.8
       pedal_arm_pct: 80
     metrics:
       - {key: yaw_rate_max, ok_range: [null, 5]}
@@ -97,8 +95,6 @@ abs:
     maneuver: full_brake
     surface_code: neg_jump
     params:
-      v0_kph: 50
-      v_stop_kph: 0.8
       pedal_arm_pct: 80
     metrics:
       - {key: yaw_rate_max, ok_range: [null, 5]}
@@ -160,8 +156,6 @@ tcs:
     maneuver: full_throttle
     surface_code: neg_jump
     params:
-      v_start_kph: 0.8
-      v_target_kph: 10
       pedal_arm_pct: 95
     metrics:
       - {key: yaw_rate_max, ok_range: [null, 5]}
@@ -173,8 +167,6 @@ tcs:
     maneuver: full_throttle
     surface_code: pos_jump
     params:
-      v_start_kph: 0.8
-      v_target_kph: 10
       pedal_arm_pct: 95
     metrics:
       - {key: yaw_rate_max, ok_range: [null, 5]}
