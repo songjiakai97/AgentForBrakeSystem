@@ -294,8 +294,7 @@ class ChatEngine:
             ),
             "search_manual": lambda args: self._kb_search_tool(
                 args.get("query", ""), condition=args.get("condition")),
-            "get_param": lambda args: self._get_param_tool(
-                args.get("name", ""), condition=args.get("condition")),
+            "get_param": lambda args: self._get_param_tool(args.get("name", "")),
             "list_files": lambda args: self._list_files_tool(chat, args.get("file_index")),
             "run_analysis_on_files": lambda args: self._analyze(
                 chat, args.get("condition_id"), args.get("profile"), stop_event,
@@ -712,9 +711,13 @@ class ChatEngine:
             chars = sum(len(r.get("snippet", "")) for r in (res.get("results") or []))
             return (f"{name} → 命中 {n} 节", f"通道 {mode} · 送入 {chars} 字", status)
         if name == "get_param":
-            n = len(res.get("results", []) or [])
-            first = (res.get("results") or [{}])[0].get("param", "")
-            return (f"{name} → 命中 {n} 条", str(first), status)
+            rows = res.get("results", []) or []
+            first = (rows or [{}])[0].get("param", "")
+            secs = len({r.get("section", "") for r in rows})
+            # 多工况同参数是常态（不再按工况过滤）：detail 直接点出有几处，
+            # 免得「命中 3 条」被当成三个不同参数
+            detail = f"{first} · {secs} 个工况" if secs > 1 else str(first)
+            return (f"{name} → 命中 {len(rows)} 条", detail, status)
         if name == "list_files":
             rows = res.get("files", []) or []
             ch = next((r for r in rows if r.get("channels")), None)
@@ -756,9 +759,12 @@ class ChatEngine:
             out = []
             for r in res.get("results", []) or []:
                 fields = r.get("fields") or {}
-                out.append({"title": r.get("param", ""),
-                            "id": r.get("section", ""),
-                            "text": " · ".join(f"{k}={v}" for k, v in fields.items())})
+                line = {"title": r.get("param", ""),
+                        "id": r.get("section", ""),
+                        "text": " · ".join(f"{k}={v}" for k, v in fields.items())}
+                if r.get("match") == "partial":
+                    line["note"] = "子串近似匹配，引用前确认是同一个参数"
+                out.append(line)
             return out
         return []
 
@@ -835,19 +841,37 @@ class ChatEngine:
         # 永远是「节标题 + 第一个块的前半」，命中块在表尾时答案连同表格一起被切掉
         return self._kb_payload(hits)
 
-    def _get_param_tool(self, name: str, condition: Optional[str] = None) -> dict:
-        """参数精确查询工具（P1 参数索引）：参数值类问答的首选，值原样引用。"""
+    def _get_param_tool(self, name: str) -> dict:
+        """参数精确查询工具（P1 参数索引）：参数值类问答的首选，值原样引用。
+
+        不带工况过滤：同名参数在多个工况表里各有一行时全部返回，由模型按
+        `section` 挑。曾带 condition 硬过滤，词序/空格差一点就返回空，工具却
+        回 ok=true、note 写「手册中没有该参数名」——模型照念，参数名明明对。
+        """
         name = (name or "").strip()
         if not name:
             return {"ok": False, "note": "name 为空：给参数名，如 Cp_FA"}
-        rows = self.kb.get_param(name, condition=condition)
+        rows = self.kb.get_param(name)
+        secs = {r["section"] for r in rows}
+        partial = any(r["match"] == "partial" for r in rows)
+        if not rows:
+            note = ("手册表格中没有该参数名：确认拼写与手册一致（如 Cp_FA），"
+                    "或用 search_manual 检索手册内容")
+        elif len(secs) > 1:
+            # 多工况同参数各自取值不同：让模型看清有几处，别默认取第一条
+            note = (f"该参数出现在 {len(secs)} 个工况/章节，取值可能不同："
+                    "按用户说的工况选，没指明就把各工况的值一并列出，不要默认取第一条")
+        elif partial:
+            note = "精确名未命中，以下是子串近似匹配（match=partial）：引用前确认是同一个参数"
+        else:
+            note = ""
         return {
             "ok": True,
             "transient": True,
-            "note": "" if rows else "手册表格中没有该参数名；"
-                    "确认参数名拼写与手册一致，或用 search_manual 语义检索",
+            "note": note,
             "results": [{"param": r["param"], "fields": r["fields"],
-                         "section": r["section"]} for r in rows],
+                         "section": r["section"], "match": r["match"]}
+                        for r in rows],
         }
 
     def _list_files_tool(self, chat, file_index) -> dict:

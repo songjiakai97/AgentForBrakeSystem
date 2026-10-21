@@ -251,14 +251,24 @@ def test_get_param_exact_and_normalized(tmp_path):
     assert kb.get_param("CP--FA")[0]["param"] == "Cp_FA"
 
 
-def test_get_param_condition_disambiguation(tmp_path):
-    """同名参数存在于多个工况：不过滤返回全部并带归属；过滤只留指定工况。"""
+def test_get_param_returns_all_conditions(tmp_path):
+    """同名参数存在于多个工况：全部返回并各自带 section，由模型按工况挑。
+
+    早先有 condition 硬过滤：模型填的工况词词序/空格差一点就返回空列表，
+    工具却回 ok=true，note 写「手册中没有该参数名」——参数名是对的，
+    用户被回了一句假话。过滤撤掉后，多工况由 section 字段自解释。
+    """
     kb = _kb_with_param_table(tmp_path)
     all_rows = kb.get_param("Opt_Instabil_Lambda_HA")
     assert {r["section"] for r in all_rows} >= {"干沥青100km/h全力制动工况",
                                                 "洒水玄武岩60km/h全力制动工况"}
-    scoped = kb.get_param("Opt_Instabil_Lambda_HA", condition="洒水玄武岩")
-    assert len(scoped) == 1 and scoped[0]["fields"]["当前值"] == "0.05"
+    # 两行同参数、不同值，且都标 exact：模型靠 section 区分，不靠过滤
+    assert len(all_rows) == 2
+    assert {r["fields"]["当前值"] for r in all_rows} == {"0.06", "0.05"}
+    assert all(r["match"] == "exact" for r in all_rows)
+    # 签名不再接受 condition：传了也不该改变结果（防回归到硬过滤）
+    with pytest.raises(TypeError):
+        kb.get_param("Opt_Instabil_Lambda_HA", condition="洒水玄武岩")
 
 
 def test_get_param_unknown_returns_empty(tmp_path):

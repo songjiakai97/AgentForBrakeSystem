@@ -52,6 +52,10 @@ SNIPPET_MIN_CHARS = 240
 # payload 撞外层硬闸、多丢一条命中。
 CUT_NOTE_MAX_CHARS = 40
 
+# 参数精确命中的返回上限。同一参数名在多个工况表里各有一行是常态，所以不按
+# top_k=5 截断；但也不能无界——整份 payload 还受 TOOL_PAYLOAD_CLIP_CHARS 约束。
+PARAM_EXACT_MAX_ROWS = 20
+
 
 class KnowledgeBase:
     def __init__(self, kb_dir: str = "knowledge"):
@@ -781,34 +785,33 @@ class KnowledgeBase:
         """单元格清洗：剥 ** 加粗与首尾空白，其余（±/·/U+2011/方括号）原样保留。"""
         return (c or "").strip().strip("*").strip()
 
-    def get_param(self, name: str, condition: Optional[str] = None,
-                  top_k: int = 5) -> List[dict]:
+    def get_param(self, name: str, top_k: int = 5) -> List[dict]:
         """参数精确/归一化查询（P1 参数索引）。
 
         name 传参数名（如 Cp_FA、Opt_Instabil_Lambda_HA），归一化后精确匹配；
         精确无命中时降级**子串匹配**（双向：模型记不全参数名也能接住，命中标注
-        `match: partial`）。condition 传工况词时按 breadcrumb（节标题/文档标题）
-        过滤，防同名参数表跨工况串扰。
+        `match: partial`）。
+
+        不按工况过滤：同名参数在多个工况表里各有一行时**全部返回**，每条带
+        `section`，由调用方按用户说的工况自行挑。早先有 condition 硬过滤，
+        词序/空格/大小写任一不符就返回空列表，而工具层照样回 ok=true，模型
+        于是断言「手册里没有这个参数」——参数名明明是对的。假阴性比多给几行
+        坏得多：条件还可以凭 section 反推，空结果没有任何补救余地。
+
         返回 [{param, fields, section, section_id, doc_title, match}]。
         """
         key = self._norm_param(name)
         if not key:
             return []
 
-        def _cond_ok(r):
-            if not condition:
-                return True
-            return condition in r["title"] or condition in r["doc_title"]
-
         exact, partial = [], []
         for r in self._param_rows:
-            if not _cond_ok(r):
-                continue
             if r["key"] == key:
                 exact.append(r)
             elif key in r["key"] or (len(key) >= 3 and r["key"] in key):
                 partial.append(r)
-        rows = [(r, "exact") for r in exact[:top_k]] or                [(r, "partial") for r in partial[:top_k]]
+        # 精确命中按工况数返回（上限只防病态重复），部分匹配才受 top_k 约束
+        rows = [(r, "exact") for r in exact[:PARAM_EXACT_MAX_ROWS]] or                [(r, "partial") for r in partial[:top_k]]
         return [{
             "param": r["cells"][0] if r["cells"] else name,
             "fields": dict(zip(r["headers"], r["cells"])),

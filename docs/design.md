@@ -491,9 +491,13 @@ LLM 可选/降级。`AnalysisResult` 一次生成，Web 各视图共用。
 - `search_manual(query, condition?, top_k?)`：手册知识检索（§11.4 混合检索）。知识性问答
   的数据来源；`condition` 传工况词做硬过滤（查询明确针对某工况时必填，防同名表跨工况
   串扰）。无命中必须如实说明，不得编造手册内容。结果标 `transient`。
-- `get_param(name, condition?)`：按参数名精确查询手册表格行（归一化匹配；无命中降级
+- `get_param(name)`：按参数名精确查询手册表格行（归一化匹配；无命中降级
   子串匹配并标 `match: partial`），初始值/当前值/单位分字段返回——参数值类问答首选，
-  值必须原样引用。结果标 `transient`。
+  值必须原样引用。**不按工况过滤**：同名参数在多个工况表里各有一行是常态，全部返回并
+  各带 `section`，由模型按用户说的工况挑（note 会点明「出现在 N 个工况，不要默认取第一
+  条」）。曾带 `condition` 硬过滤，模型填的词词序/空格/大小写差一点就返回空列表，工具却
+  照样回 `ok=true`、note 写「手册中没有该参数名」——参数名是对的，用户被回了一句假话。
+  结果标 `transient`。
 - `list_files(file_index?)`：会话文件清单（编号/名称/大小/是否本轮默认范围）；
   带 `file_index` 才加载该文件信号并返回通道名（加载前发心跳事件）。结果标 `transient`。
 
@@ -1715,8 +1719,10 @@ learnings: <text>
   1 条进模型（`test_search_manual_keeps_all_hits_when_sections_are_long` 锁住）。
   回收后仍装不下、或均分后低于 `SNIPPET_MIN_CHARS`，才丢最弱一条重算：
   宁可少一条完整命中，不给五条半截 JSON。
-- 参数查询：`kb.get_param(name, condition)` 归一化精确匹配，无命中降级子串匹配
-  （`match: partial`）；对话路径由 `get_param` 工具暴露，参数值必须原样引用。
+- 参数查询：`kb.get_param(name)` 归一化精确匹配，无命中降级子串匹配
+  （`match: partial`）；精确命中不按 `top_k` 截断（上限 `PARAM_EXACT_MAX_ROWS`
+  只防病态重复），否则多工况同参数会被静默截掉几条；对话路径由 `get_param` 工具
+  暴露，参数值必须原样引用。
 - 对话路径：`search_manual` 工具（§6.9）让 LLM 知识性问答直接检索手册，无命中必须如实说明。
 
 ### 11.5 治理
@@ -2110,7 +2116,7 @@ curl -s -X POST localhost:8000/api/mcp/call/mcp__matlab__detect_matlab_toolboxes
 **检索升级（§11.4）**
 - 知识检索从整节粒度升级为 **#### 分块 + 语义/关键词 RRF 混合**：真实标定手册
   （参数表+评价标准+结果分析混在一节）按块命中，参数名精确查询走关键词通道。
-- **P1 参数索引**：表格行结构化抽取（内存态，`kb.get_param(name, condition)`），
+- **P1 参数索引**：表格行结构化抽取（内存态，`kb.get_param(name)`），
   参数值类问答走精确/归一化匹配，初始值/当前值分字段返回，不走向量；
   新增 `get_param` 工具（`search_manual` 增加 `condition` 参数做工况硬过滤）。
 - **P2 工况硬过滤**：`kb.search(condition=...)` 按节标题/文档标题过滤块，防同名

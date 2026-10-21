@@ -183,6 +183,54 @@ def test_search_manual_payload_survives_json_roundtrip(tmp_path):
         assert r["snippet"], "预算降级丢命中，不交空串"
 
 
+# ---------------- get_param ----------------
+
+def _kb_with_shared_param(tmp_path):
+    """同一参数名出现在两个工况表里（真实手册的常态）。"""
+    mdir = tmp_path / "manual"
+    mdir.mkdir()
+    (mdir / "abs.md").write_text(
+        "# ABS 标定手册\n\n"
+        "### abs.s1 — 干沥青 100kph 全力制动\n\n"
+        "| 序号 | 参数 | 初始值 |\n|---|---|---|\n"
+        "| 1 | Cp_FA | 26.87 |\n| 2 | Cp_RA | 12.5 |\n\n"
+        "### abs.s2 — 洒水玄武岩 60kph 全力制动\n\n"
+        "| 序号 | 参数 | 初始值 |\n|---|---|---|\n| 1 | Cp_FA | 18.2 |\n",
+        encoding="utf-8")
+    return str(tmp_path)
+
+
+def test_get_param_tool_returns_all_conditions_with_hint(tmp_path):
+    """不再按工况过滤：同名参数的每一行都返回，note 点明有几处、别默认取第一条。"""
+    eng = _engine(_kb_with_shared_param(tmp_path))
+    payload = eng._get_param_tool("Cp_FA")
+    assert payload["ok"] is True and payload["transient"] is True
+    assert len(payload["results"]) == 2
+    assert {r["section"] for r in payload["results"]} == {
+        "干沥青 100kph 全力制动", "洒水玄武岩 60kph 全力制动"}
+    assert {r["match"] for r in payload["results"]} == {"exact"}
+    assert "2 个工况" in payload["note"] and "不要默认取第一条" in payload["note"]
+    # 大小写/下划线/连字符写法差异照旧命中（归一化不受影响）
+    assert len(eng._get_param_tool("cp-fa")["results"]) == 2
+    # 步骤标签点出工况数，别让「命中 2 条」被读成两个不同参数
+    label, detail, status = eng._tool_step_label("get_param", payload)
+    assert label == "get_param → 命中 2 条" and status == "ok"
+    assert "Cp_FA" in detail and "2 个工况" in detail
+
+
+def test_get_param_tool_single_and_missing(tmp_path):
+    eng = _engine(_kb_with_shared_param(tmp_path))
+    # 只在一个工况表里出现：note 不该再提「多工况」
+    one = eng._get_param_tool("Cp_RA")
+    assert len(one["results"]) == 1 and one["results"][0]["match"] == "exact"
+    assert one["note"] == ""
+    miss = eng._get_param_tool("Not_A_Param")
+    assert miss["results"] == [] and miss["ok"] is True
+    # 空结果的指引必须还在：模型据此换工具/换写法，而不是编一个值
+    assert "search_manual" in miss["note"]
+    assert eng._get_param_tool("   ")["ok"] is False
+
+
 def test_search_manual_tool_roundtrip_through_events(tmp_path):
     """工具调用全链路：LLM 发 search_manual → 结果回灌为 tool 应答。"""
     eng = ChatEngine(load_configs(CONFIG_DIR), ToolLlm([("search_manual", {"query": "横摆"})]),

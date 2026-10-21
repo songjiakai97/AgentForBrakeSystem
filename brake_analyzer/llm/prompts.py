@@ -226,15 +226,16 @@ def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> L
                 "description": (
                     "按参数名精确查询手册表格中的参数定义/初始值/当前值/单位。"
                     "「某参数是多少/当前值是什么」类问题首选本工具，值必须原样引用。"
-                    "参数名必须与手册一致（如 Cp_FA、Opt_Instabil_Lambda_HA）。"
+                    "参数名按手册写法给（如 Cp_FA、Opt_Instabil_Lambda_HA），"
+                    "只记得片段就传片段，结果会标 match=partial，引用前先确认。"
+                    "同一参数在多个工况下各有一行时全部返回并带 section——"
+                    "按用户说的工况挑，不明确就把各工况的值都列出来。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "参数名，与手册一致"},
-                        "condition": {"type": "string",
-                                      "description": "工况词；同名参数存在于多个工况时必填，"
-                                                     "否则会返回各工况的全部取值"},
+                        "name": {"type": "string",
+                                 "description": "参数名或其中的一段（如 Cp_FA、Lambda_HA）"},
                     },
                     "required": ["name"],
                 },
