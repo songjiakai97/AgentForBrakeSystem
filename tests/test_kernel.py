@@ -213,7 +213,7 @@ def test_condition_segmenter_override_is_used(cfg):
     """工况级 segmenter 覆盖功能默认模板，指标只在 ABS 激活区间内算。"""
     from brake_analyzer.pipeline import analyze_signals
 
-    cond = cfg.condition("abs_full_brake_pos_jump_50kph")
+    cond = cfg.condition("abs_full_brake_high_to_low")
     assert cond.segmenter == "seg_abs_active"
     t = np.arange(0.0, 6.0, 0.01)
     active = ((t >= 2.0) & (t <= 3.0)).astype(float)
@@ -239,7 +239,7 @@ def test_jump_missing_flag_channel_says_signal_absent(cfg):
     t = np.arange(0.0, 4.0, 0.01)
     signals = {"speed_vbox": _sig(t, np.clip(30 - 8 * t, 0, None)),
                "yaw_rate": _sig(t, np.zeros_like(t))}
-    res = analyze_signals(signals, "abs_full_brake_pos_jump_50kph", cfg)
+    res = analyze_signals(signals, "abs_full_brake_high_to_low", cfg)
     (m,) = res.samples[0].metrics
     assert m.status == "missing" and m.missing_reason == "signal_absent"
 
@@ -252,9 +252,20 @@ def test_jump_flag_never_high_says_no_valid_event(cfg):
     signals = {"speed_vbox": _sig(t, np.clip(30 - 8 * t, 0, None)),
                "ABS_Active": _sig(t, np.zeros_like(t)),
                "yaw_rate": _sig(t, np.zeros_like(t))}
-    res = analyze_signals(signals, "abs_full_brake_pos_jump_50kph", cfg)
+    res = analyze_signals(signals, "abs_full_brake_high_to_low", cfg)
     (m,) = res.samples[0].metrics
     assert m.status == "missing" and m.missing_reason == "no_valid_event"
+
+
+def test_jump_surface_codes_match_names(cfg):
+    """对接方向写进 surface_code，且与工况名一致：ABS/TCS 同一个 code 指同一个方向。"""
+    pairs = {"high_to_low": "高到低", "low_to_high": "低到高"}
+    seen = set()
+    for c in cfg.conditions.values():
+        if c.surface_code in pairs:
+            assert pairs[c.surface_code] in c.name, (c.id, c.surface_code, c.name)
+            seen.add((c.function, c.surface_code))
+    assert seen == {(f, s) for f in ("abs", "tcs") for s in pairs}
 
 
 def test_condition_segmenter_must_be_registered(tmp_path):

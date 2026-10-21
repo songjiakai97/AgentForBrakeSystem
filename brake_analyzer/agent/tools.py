@@ -53,11 +53,10 @@ _SURFACE_TERMS = {
     "wet_asphalt": ["湿沥青", "洒水沥青", "沥青湿", "wet asphalt"],
     "wet_basalt": ["玄武岩", "洒水", "湿", "low mu", "低附着", "wet"],
     "wet_tile": ["瓷砖", "洒瓷砖", "湿瓷砖", "wet"],
-    # 对开/对接两个方向在不同功能下 code 相反（ABS 对开=split），
-    # 关键词只放与方向无关的词，方向交给工况名匹配。
     "split": ["对开", "对开路面", "对开沥青", "分离路面", "split", "μ-split"],
-    "pos_jump": ["对接", "跳变", "jump"],
-    "neg_jump": ["对接", "跳变", "jump"],
+    # 对接（rolling-μ）直接按方向编码：ABS/TCS 两侧含义一致，也方便和试验记录对账。
+    "low_to_high": ["低到高", "低附到高附", "low to high", "对接", "跳变", "jump"],
+    "high_to_low": ["高到低", "高附到低附", "high to low", "对接", "跳变", "jump"],
 }
 _SPEED_RE = re.compile(r"(\d{2,3})\s*(?:kph|kmh|km/h|公里)", re.I)
 

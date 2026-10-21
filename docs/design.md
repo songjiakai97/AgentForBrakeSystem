@@ -337,7 +337,7 @@ phases: list[str]
 - 分段模板由功能通过 `segmenter` 绑定，模板本身在代码中实现并注册（`events/segment.py` 内
   `SEGMENTERS: dict[str, Segmenter]`），新增模板 = 新增一个注册函数，不进入 YAML 配置。
 - 工况可用 `segmenter:` 覆盖功能级模板（`ConditionConfig.segmenter`，空 = 沿用功能）。
-  用于「这个工况不能按速度区间切」的情况，目前只有对接路面（`pos_jump`/`neg_jump`）：
+  用于「这个工况不能按速度区间切」的情况，目前只有对接路面（`low_to_high`/`high_to_low`）：
   两端车速都不确定，只看对接点速度，故
   - ABS：`seg_abs_active`，窗口 = `ABS_Active` 高电平区间（±0.5 判为激活，间隙
     < 0.3 s 的调节脉冲合并，短于 0.2 s 的丢弃）；
