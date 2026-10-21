@@ -261,3 +261,79 @@ def test_title_not_duplicated_in_chunks(tail_kb):
     texts = [c["text"] for c in tail_kb._index_chunks() if c["section_id"] == "big.s1"]
     joined = "\n".join(texts)
     assert "车型基础参数表\n#### 车型基础参数表" not in joined
+
+
+# ---------------- 标识符通道：大小写/分隔符/Unicode + 不串参数 ----------------
+
+@pytest.fixture
+def ident_kb(tmp_path):
+    """两个相邻参数（Cp_FA / Cp_RA）分属不同节，外加一个 Word 导出形态的名字。"""
+    mdir = tmp_path / "manual"
+    mdir.mkdir()
+    (mdir / "abs.md").write_text(
+        "# ABS 标定手册\n\n"
+        "### abs.s1 — 干沥青 100kph 全力制动\n\n"
+        "| 序号 | 参数 | 初始值 |\n|---|---|---|\n"
+        "| 1 | Cp_FA | 26.87 |\n"
+        "| 2 | Opt\u2011Tbl2 | 1.0 |\n\n"
+        "标定方向：缩短初始夹紧力建立时间。\n\n"
+        "### abs.s2 — 洒水玄武岩 60kph 全力制动\n\n"
+        "| 序号 | 参数 | 初始值 |\n|---|---|---|\n"
+        "| 1 | Cp_RA | 12.5 |\n",
+        encoding="utf-8")
+    return KnowledgeBase(str(tmp_path))
+
+
+def test_identifier_variants_hit_same_section(ident_kb):
+    """大小写/下划线/连字符/空格/全角写法都是同一个名字（两侧共用 _fold_text）。"""
+    for q in ["Cp_FA", "cp_fa", "CP_FA", "cp-fa", "cp fa", "CPFA", "Ｃｐ＿ＦＡ"]:
+        hits = ident_kb.search(q, top_k=3)
+        assert [h["id"] for h in hits] == ["abs.s1"], q
+
+
+def test_identifier_query_does_not_leak_to_neighbour_param(ident_kb):
+    """Cp_FA 不能把含 Cp_RA 的节带进结果：旧实现靠 p_ 二元组串过来，是假阳性。
+
+    假阳性比搜不到更坏——模型看到两个参数表，可能引用另一个工况的值。
+    """
+    hits = ident_kb.search("Cp_FA", top_k=3)
+    assert "abs.s2" not in [h["id"] for h in hits]
+    assert ident_kb.search("cp_ra", top_k=3)[0]["id"] == "abs.s2"
+    assert all("Cp_RA" not in h["text"] for h in hits)
+
+
+def test_identifier_bigrams_are_not_used(ident_kb):
+    """标识符不产出二元组：关键词打分里不存在 0<p_> 这类碎片命中。"""
+    chunks = {c["chunk_id"]: c for c in ident_kb._index_chunks()}
+    scored = dict((cid, s) for s, cid in ident_kb._keyword_rank("cp_fa", chunks))
+    assert scored["abs.s1"] == 3.0        # 归一化全等
+    assert "abs.s2" not in scored          # 旧实现 0.25（p_）在，现在不该出现
+
+
+def test_identifier_unicode_dash_matches_ascii(ident_kb):
+    """U+2011（Word 导出）与 ASCII 连字符等价；_IDENT_RE 不能把它切成两段。"""
+    chunks = {c["chunk_id"]: c for c in ident_kb._index_chunks()}
+    # 手册里是 Opt‑Tbl2（U+2011），查 ASCII 写法也要整段命中
+    assert ident_kb._norm_param("Opt-Tbl2") in chunks["abs.s1"]["idents"]
+    for q in ["Opt-Tbl2", "Opt\u2011Tbl2", "opt tbl2", "OPT_TBL2"]:
+        assert ident_kb.search(q, top_k=1)[0]["id"] == "abs.s1", q
+
+
+def test_title_channel_uses_same_folding(tmp_path):
+    """标题通道与正文通道共用分词：标题里的参数名大小写不同也能命中。"""
+    mdir = tmp_path / "manual"
+    mdir.mkdir()
+    (mdir / "m.md").write_text(
+        "# 手册\n\n### m.s1 — Cp_FA 标定说明\n\n这一段没有参数名，只有叙述。\n",
+        encoding="utf-8")
+    kb = KnowledgeBase(str(tmp_path))
+    hits = kb.search("cp_fa", top_k=1)
+    assert hits and hits[0]["id"] == "m.s1"
+
+
+def test_chinese_retrieval_unchanged(ident_kb):
+    """中文仍走整词+二元组：标识符改造不改变原有召回。"""
+    assert ident_kb.search("标定方向", top_k=1)[0]["id"] == "abs.s1"
+    assert ident_kb.search("夹紧力建立时间", top_k=1)[0]["id"] == "abs.s1"
+    # 纯数字不是标识符：按普通词匹配，不会把整本手册的数值行都算命中
+    assert ident_kb.search("26.87", top_k=3)[0]["id"] == "abs.s1"

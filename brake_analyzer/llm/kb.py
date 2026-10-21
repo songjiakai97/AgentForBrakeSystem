@@ -58,6 +58,15 @@ CUT_NOTE_MAX_CHARS = 40
 PARAM_EXACT_MAX_ROWS = 20
 
 
+# 参数名/信号名这类标识符：字母数字段用 . _ - / 连接（Cp_FA、Opt-Instabil、
+# abs.s1、m_Vehicle）。只用来把「标识符」和自然语言词分开，不做通用分词。
+_IDENT_RE = re.compile(r"[A-Za-z0-9]+(?:[._\-/][A-Za-z0-9]+)*")
+
+# 破折号族（U+2010..U+2015、U+2212）：Word 导出的 U+2011 非断行连字符是常客，
+# NFKC 只把它折成 U+2010，仍需统一成 ASCII '-'，否则标识符会被切成两段
+_DASH_RE = re.compile(r"[\u2010-\u2015\u2212]")
+
+
 class KnowledgeBase:
     def __init__(self, kb_dir: str = "knowledge"):
         self.kb_dir = kb_dir
@@ -298,14 +307,31 @@ class KnowledgeBase:
                 pieces = [(sec.text, sec.text)]
             prefix = f"{sec.title}\n" if sec.title else ""
             if len(pieces) == 1:
-                chunks.append({"chunk_id": sid, "section_id": sid,
-                               "body": pieces[0][0], "text": prefix + pieces[0][1]})
+                chunks.append(self._decorate_chunk(
+                    {"chunk_id": sid, "section_id": sid,
+                     "body": pieces[0][0], "text": prefix + pieces[0][1]}))
                 continue
             for k, (body, piece) in enumerate(pieces, start=1):
                 cid = sid if k == 1 else f"{sid}#{k}"
-                chunks.append({"chunk_id": cid, "section_id": sid,
-                               "body": body, "text": prefix + piece})
+                chunks.append(self._decorate_chunk(
+                    {"chunk_id": cid, "section_id": sid,
+                     "body": body, "text": prefix + piece}))
         return chunks
+
+    @staticmethod
+    def _decorate_chunk(c: dict) -> dict:
+        """给块补检索用的派生字段：折叠文本 + 归一化标识符集合。
+
+        NFKC + casefold 的副本供关键词通道做大小写/全角无关的子串比较；
+        标识符集合供 _ident_score 精确比对。每次 search 都会重建 chunks
+        （手册只有几十块，重算是毫秒级），所以放在这里就够，查询侧不必
+        再逐块做 Unicode 折叠。
+        """
+        folded = KnowledgeBase._fold_text(c["text"])
+        c["text_fold"] = folded
+        c["idents"] = {KnowledgeBase._norm_param(t)
+                       for t in KnowledgeBase._iter_identifiers(folded)}
+        return c
 
     def _open_vec_store(self) -> bool:
         """打开/初始化 sqlite-vec 存储；扩展不可用时返回 False（语义通道关闭，走关键词兜底）。"""
@@ -384,23 +410,75 @@ class KnowledgeBase:
 
     @staticmethod
     def _keyword_rank(query: str, chunks: Dict[str, dict]) -> List:
-        """关键词通道：整词命中计 3 分，中文二元组覆盖率计分（无分词场景的兜底）。"""
-        terms = [t for t in re.split(r"[\s,，、;；]+", query) if t]
+        """关键词通道：整词命中计 3 分，中文二元组覆盖率计分（无分词场景的兜底）。
+
+        查询按「标识符 / 普通词」分开打分（_split_query），标识符走归一化比较、
+        不产出二元组。旧实现对 Cp_FA 切出 Cp/p_/_F/FA，其中 p_ 会把含 Cp_RA
+        的节一起拉进 top-k，于是「查一个参数」变成「两个参数都给你」——假阳性
+        比搜不到更坏，模型会引用错值。
+        """
+        idents, plain = KnowledgeBase._split_query(query)
+        if not idents and not plain:
+            return []
+        # 相邻短片段拼回一个标识符：用户/模型可能写成「cp fa」，那是同一个名字
+        merged = "".join(idents) if len(idents) > 1 else ""
         scored = []
         for cid, c in chunks.items():
-            hay = c["text"]
+            hay = c["text_fold"]
+            idset = c["idents"]
             score = 0.0
-            for t in terms:
-                if t in hay:
-                    score += 3.0
-                    continue
-                grams = [t[i:i + 2] for i in range(len(t) - 1)] if len(t) > 2 else [t]
-                if grams:
-                    score += sum(1.0 for g in grams if g in hay) / len(grams)
+            if merged and KnowledgeBase._ident_score(merged, idset) >= 3.0:
+                score += 3.0
+            else:
+                score += sum(KnowledgeBase._ident_score(t, idset) for t in idents)
+            for t in plain:
+                score += KnowledgeBase._plain_score(t, hay)
             if score > 0:
                 scored.append((score, cid))
         scored.sort(key=lambda x: -x[0])
         return scored
+
+    @staticmethod
+    def _split_query(query: str):
+        """查询分词：(标识符列表, 普通词列表)，标识符已归一化。
+
+        分类只在 NFKC+折叠后按形状判断，不猜语言：含 ASCII 字母、由字母数字与
+        . _ - / 组成的是标识符（Cp_FA、Opt-Instabil、abs.s1），其余按分隔符切。
+        """
+        idents, plain = [], []
+        for t in re.split(r"[\s,，、;；]+", KnowledgeBase._fold_text(query)):
+            if not t:
+                continue
+            if re.fullmatch(r"[a-z0-9._\-/]*[a-z][a-z0-9._\-/]*", t):
+                idents.append(KnowledgeBase._norm_param(t))
+            else:
+                plain.append(t)
+        return idents, plain
+
+    @staticmethod
+    def _ident_score(nq: str, idents: set) -> float:
+        """归一化标识符与块内标识符集合的匹配分：全等 3，包含 1.5。
+
+        包含匹配要求查询侧 ≥3 字符（与 get_param 的子串兜底同一门槛）：
+        「cp」「fa」这种碎片前缀会把所有 Cp_* 一网打尽，是噪声不是召回。
+        """
+        if not nq:
+            return 0.0
+        if nq in idents:
+            return 3.0
+        if len(nq) >= 3 and any(nq in i for i in idents):
+            return 1.5
+        return 0.0
+
+    @staticmethod
+    def _plain_score(term: str, hay: str) -> float:
+        """普通词（中文为主）：整词 3 分，否则二元组覆盖率；hay 已折叠大小写。"""
+        if term in hay:
+            return 3.0
+        grams = [term[i:i + 2] for i in range(len(term) - 1)] if len(term) > 2 else [term]
+        if not grams:
+            return 0.0
+        return sum(1.0 for g in grams if g in hay) / len(grams)
 
     @staticmethod
     def _piece_sort_key(chunk_id: str):
@@ -640,21 +718,23 @@ class KnowledgeBase:
         # 用户措辞与节标题常有微差（"对开路面" vs 节标题"对开工况"），整词匹配不上，
         # bigram 命中能把同一主题的多处内容一起抬进结果。
         title_rank: Dict[str, int] = {}
-        _tq = [t for t in re.split(r"[\s,，、;；]+", query) if t]
+        # 标题通道与关键词通道共用同一套分词：标识符按归一化全等/包含比，
+        # 中文按整词+二元组。旧实现这里 lower() 而正文通道不折叠，同一查询
+        # 在两条通道是两套「相同」的定义。
+        _t_idents, _t_plain = self._split_query(query)
 
         def _title_score(sec: ManualSection) -> float:
             # 只匹配节标题：doc_title 对所有节相同，计入只会把「无命中」
             # 误抬成「全体命中」，且不提供任何节间区分度
-            hay = (sec.title or "").lower()
+            hay = self._fold_text(sec.title)
+            if not hay:
+                return 0.0
+            idset = {self._norm_param(t) for t in self._iter_identifiers(hay)}
             sc = 0.0
-            for t in _tq:
-                tl = t.lower()
-                if tl in hay:
-                    sc += 3.0
-                    continue
-                grams = [tl[i:i + 2] for i in range(len(tl) - 1)] if len(tl) > 2 else [tl]
-                if grams:
-                    sc += sum(1.0 for g in grams if g in hay) / len(grams)
+            for t in _t_idents:
+                sc += self._ident_score(t, idset)
+            for t in _t_plain:
+                sc += self._plain_score(t, hay)
             return sc
 
         _tsc = []
@@ -718,6 +798,27 @@ class KnowledgeBase:
 
     # ---------------- 参数索引（表格行结构化抽取，§11.4） ----------------
     @staticmethod
+    def _fold_text(text: str) -> str:
+        """检索用折叠：NFKC + 破折号族归一到 ASCII '-' + casefold。
+
+        索引（块文本、标题）与查询两侧都走这一个函数，保证「同一个名字」只有
+        一种定义。NFKC 负责全角字母/下划线与 NBSP，但它只把 U+2011 折成 U+2010，
+        仍是独立字符，所以破折号还要显式统一。
+        """
+        return _DASH_RE.sub("-", unicodedata.normalize("NFKC", text or "")).casefold()
+
+    @staticmethod
+    def _iter_identifiers(text: str) -> List[str]:
+        """从文本里抠出标识符候选（需含字母，长度 ≥2）。
+
+        纯数字（26.87、100）不是标识符：它们做子串匹配会命中任何数值，
+        是噪声。中文不会被 _IDENT_RE 匹配，所以中文关键词仍走二元组通道。
+        """
+        folded = KnowledgeBase._fold_text(text)
+        return [t for t in _IDENT_RE.findall(folded)
+                if len(t) >= 2 and any(ch.isalpha() for ch in t)]
+
+    @staticmethod
     def _norm_param(name: str) -> str:
         """参数名归一化：大小写/下划线/连字符/空白统一，用于精确匹配。
 
@@ -727,9 +828,8 @@ class KnowledgeBase:
         所以连字符要按字符类一并吃掉，否则「手册里是 Opt‑Tbl2、用户打
         Opt-Tbl2」这种同名不同码的写法永远对不上。
         """
-        folded = unicodedata.normalize("NFKC", name or "").lower()
-        # ‐‒–—― 是 U+2010..U+2015；− 是 U+2212 数学减号
-        return re.sub(r"[\s_\-‐-―−]+", "", folded)
+        folded = KnowledgeBase._fold_text(name)
+        return re.sub(r"[\s_\-]+", "", folded)
 
     def _extract_param_rows(self) -> List[dict]:
         """从手册 md 表格逐行抽取结构化参数记录（§11.4 参数索引）。
