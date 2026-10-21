@@ -276,6 +276,53 @@ def test_get_param_unknown_returns_empty(tmp_path):
     assert kb.get_param("Not_A_Param") == []
 
 
+def test_get_param_unicode_variants_are_same_name(tmp_path):
+    """同名不同码：Unicode 连字符/全角/不换行空格都要归一到同一个 key。
+
+    真实手册经 Word 导出后参数名常带 U+2011（非断行连字符），而用户和模型
+    打出来的是 ASCII 连字符。旧正则只吃 ASCII `-`，两串归一化结果不同，
+    名字明明一样也查不到。NFKC 处理全角与 NBSP，破折号族靠字符类吃掉。
+    """
+    mdir = tmp_path / "manual"
+    mdir.mkdir()
+    # 手册侧：U+2011 连字符 + 全角字母（Word 导出的两种常见形态）
+    (mdir / "uni.md").write_text(
+        "# ABS 标定手册\n\n"
+        "### uni.s1 — 干沥青\n\n"
+        "| 序号 | 参数 | 初始值 |\n|---|---|---|\n"
+        "| 1 | Opt\u2011Tbl2 | 1.0 |\n"
+        "| 2 | \uff23\uff50\uff3f\uff26\uff21 | 26.87 |\n",
+        encoding="utf-8")
+    kb = KnowledgeBase(str(tmp_path))
+
+    for q in ["Opt\u2011Tbl2", "Opt-Tbl2", "opt_tbl2", "OPT TBL2", "Opt\u2010Tbl2"]:
+        rows = kb.get_param(q)
+        assert rows and rows[0]["match"] == "exact", q
+        assert kb._norm_param(rows[0]["param"]) == kb._norm_param("Opt_Tbl2")
+
+    # 全角 Ｃｐ＿ＦＡ（U+FF23 等）与半角写法等价
+    for q in ["\uff23\uff50\uff3f\uff26\uff21", "Cp_FA", "cp-fa"]:
+        rows = kb.get_param(q)
+        assert rows and rows[0]["match"] == "exact", q
+
+    # 显示值仍是手册原文，归一化只用于比较
+    assert kb.get_param("Opt-Tbl2")[0]["param"] == "Opt\u2011Tbl2"
+
+
+def test_norm_param_folds_unicode_lookalikes():
+    """归一化的等价类：空白族/下划线族/连字符族写法差异都归零。"""
+    norm = KnowledgeBase._norm_param
+    groups = [
+        ["Cp_FA", "cp_fa", "CP-FA", "cp fa", "Ｃｐ＿ＦＡ", "Cp\u00a0FA", "Cp\u3000FA"],
+        ["Opt_Tbl2", "Opt\u2010Tbl2", "Opt\u2011Tbl2", "Opt\u2013Tbl2",
+         "Opt\u2014Tbl2", "Opt\u2015Tbl2", "Opt\u2212Tbl2"],
+    ]
+    for g in groups:
+        assert len({norm(x) for x in g}) == 1, g
+    # 归一化不等于把一切抹平：不同参数名仍要区分
+    assert norm("Cp_FA") != norm("Cp_RA")
+
+
 def test_special_symbols_survive_ingest_and_search(tmp_path):
     """U+2011 连字符 / ± / · / 方括号数组必须逐字符保留（P3 符号保护）。"""
     kb = _kb_with_param_table(tmp_path)

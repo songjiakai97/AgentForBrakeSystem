@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import threading
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -718,8 +719,17 @@ class KnowledgeBase:
     # ---------------- 参数索引（表格行结构化抽取，§11.4） ----------------
     @staticmethod
     def _norm_param(name: str) -> str:
-        """参数名归一化：大小写/下划线/连字符/空白统一，用于精确匹配。"""
-        return re.sub(r"[\s_\-]+", "", (name or "").lower())
+        """参数名归一化：大小写/下划线/连字符/空白统一，用于精确匹配。
+
+        NFKC 先做兼容折叠：全角字母与下划线（Ｃｐ＿ＦＡ→cp_fa）、NBSP 与全角
+        空格（→普通空格）都能对齐。**但 NFKC 不处理破折号族**——U+2011（Word
+        导出的非断行连字符，真实手册常见）只折成 U+2010，仍是独立字符，
+        所以连字符要按字符类一并吃掉，否则「手册里是 Opt‑Tbl2、用户打
+        Opt-Tbl2」这种同名不同码的写法永远对不上。
+        """
+        folded = unicodedata.normalize("NFKC", name or "").lower()
+        # ‐‒–—― 是 U+2010..U+2015；− 是 U+2212 数学减号
+        return re.sub(r"[\s_\-‐-―−]+", "", folded)
 
     def _extract_param_rows(self) -> List[dict]:
         """从手册 md 表格逐行抽取结构化参数记录（§11.4 参数索引）。
@@ -766,9 +776,9 @@ class KnowledgeBase:
                     # 否则 Word 导出表格每行都丢第一列）
                     if h and h[0] in ("序号", "#", "No", "no") and c                             and re.fullmatch(r"\d+", c[0] or ""):
                         h, c = h[1:], c[1:]
-                    key_c = next((x for x in c
-                                  if re.search(r"[A-Za-z]", x)
-                                  and not re.fullmatch(r"[\d.\s\[\]\-]+", x)), "")
+                    # 识别「像标识符」的单元格：含字母、非纯数字/区间（判定在
+                    # _ident_like_cell 里先做 NFKC 折叠）
+                    key_c = next((x for x in c if self._ident_like_cell(x)), "")
                     if c and any(c) and self._norm_param(key_c):
                         # key 为空的行（纯数值/片段行）不进索引：空串是任何
                         # 查询的子串，会在 get_param 的部分匹配里污染全部结果
@@ -784,6 +794,17 @@ class KnowledgeBase:
     def _clean_cell(c: str) -> str:
         """单元格清洗：剥 ** 加粗与首尾空白，其余（±/·/U+2011/方括号）原样保留。"""
         return (c or "").strip().strip("*").strip()
+
+    @staticmethod
+    def _ident_like_cell(x: str) -> bool:
+        """这一格像不像参数标识符：含字母、且不是纯数字/区间。
+
+        判定前先 NFKC 折叠：Word 导出可能给出全角参数名（Ｃｐ＿ＦＡ），不折叠
+        时 [A-Za-z] 一个字母都匹配不到，整行进不了参数索引，get_param 永远
+        查不到它——而 _norm_param 早就能把它和半角写法对齐，是判定这一步漏了。
+        """
+        f = unicodedata.normalize("NFKC", x or "")
+        return bool(re.search(r"[A-Za-z]", f)) and not re.fullmatch(r"[\d.\s\[\]\-]+", f)
 
     def get_param(self, name: str, top_k: int = 5) -> List[dict]:
         """参数精确/归一化查询（P1 参数索引）。
