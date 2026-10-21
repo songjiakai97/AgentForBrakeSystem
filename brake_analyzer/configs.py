@@ -10,7 +10,12 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from .events.segment import SEGMENTERS, SEGMENTER_SIGNALS
+from .events.segment import (
+    SEGMENTERS,
+    SEGMENTER_SIGNALS,
+    SPEED_SPAN_METRICS,
+    SPEED_SPAN_SEGMENTERS,
+)
 from .schemas import ConditionConfig, FunctionConfig, MetricTemplate, RuleConfig
 
 SEVERITIES = {"info", "low", "high", "critical"}
@@ -422,6 +427,19 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             metrics = item.get("metrics") or []
             if not metrics:
                 raise ConfigError(f"工况 {cid} 未声明任何指标")
+            cond_seg = str(item.get("segmenter") or "")
+            if cond_seg and cond_seg not in SEGMENTERS:
+                raise ConfigError(
+                    f"工况 {cid} 的 segmenter '{cond_seg}' 未注册，可用: {sorted(SEGMENTERS)}")
+            eff_seg = cond_seg or fn.segmenter
+            if eff_seg not in SPEED_SPAN_SEGMENTERS:
+                # 窗口不再是整段速度区间，「窗口时长 = 加速时间」「窗口起止
+                # 距离差 = 制动距离」这两条物理含义不成立，宁可加载期报错。
+                bad = [e.get("key") for e in metrics if e.get("key") in SPEED_SPAN_METRICS]
+                if bad:
+                    raise ConfigError(
+                        f"工况 {cid} 使用分段器 {eff_seg}（窗口不是整段速度区间），"
+                        f"不能声明指标 {bad}：它们的物理含义依赖速度穿越切窗")
             seen_pairs = set()
             for entry in metrics:
                 mkey = entry.get("key")
@@ -449,6 +467,7 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
                 name=item.get("name", cid),
                 maneuver=item.get("maneuver", ""),
                 surface_code=item.get("surface_code", ""),
+                segmenter=cond_seg,
                 params=dict(item.get("params") or {}),
                 metrics=metrics,
                 metric_index=build_metric_index(metrics),
@@ -472,6 +491,18 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
                     "maneuver+surface_code+params 完全相同，结构化解析无法区分"
                 )
             seen_slot[slot] = cond.id
+
+    # 工况级分段器覆盖的通道同样是计算必需：对接路面用 ABS_Active 切窗，
+    # 缺这条通道就不是判定偏严，而是根本切不出窗口。
+    for cond in cfg.conditions.values():
+        if not cond.segmenter:
+            continue
+        for sig in SEGMENTER_SIGNALS.get(cond.segmenter, []):
+            if sig not in logical_names:
+                raise ConfigError(
+                    f"工况 {cond.id} 的分段器 {cond.segmenter} 读取未登记信号: {sig}")
+            if sig not in cfg.required_signals:
+                cfg.required_signals.append(sig)
 
     # ---- rules.yaml ----
     rules_raw = _load_yaml(os.path.join(config_dir, "rules.yaml"))

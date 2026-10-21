@@ -45,6 +45,8 @@ class ConditionConfig:
     name: str
     maneuver: str = ""
     surface_code: str = ""
+    # 覆盖功能级 segmenter；空 = 沿用 functions.yaml 的模板。
+    segmenter: str = ""
     params: Dict[str, Any] = field(default_factory=dict)
     metrics: List[Dict[str, Any]] = field(default_factory=list)
     # 加载期构建

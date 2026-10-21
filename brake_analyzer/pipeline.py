@@ -10,7 +10,7 @@ import uuid
 from typing import Dict, List, Optional
 
 from .configs import AppConfigs
-from .events.segment import SEGMENTERS, degenerate_window, is_valid
+from .events.segment import SEGMENTERS, SEGMENTER_SIGNALS, degenerate_window, is_valid
 from .loaders.base import Loader, SignalData
 from .metrics.engine import compute_metrics
 from .rules.engine import run_rules
@@ -33,15 +33,19 @@ def analyze_signals(
     if cond is None:
         raise NoDataError(f"未知道况: {condition_id}")
     fn = cfg.function(cond.function)
-    segmenter = SEGMENTERS.get(fn.segmenter)
+    seg_name = cond.segmenter or fn.segmenter
+    segmenter = SEGMENTERS.get(seg_name)
     if segmenter is None:
-        raise NoDataError(f"分段模板未注册: {fn.segmenter}")
+        raise NoDataError(f"分段模板未注册: {seg_name}")
 
     params = dict(cond.params)
     windows: List[EventWindow] = segmenter(signals, fn, cond, params)
     windows = [w for w in windows if is_valid(w)]
     if not windows:
-        windows = [degenerate_window("no_valid_event")]
+        # 切窗通道整条缺失 ≠ 试验没做出来：前者要查映射/补测通道，后者要重做工况。
+        missing = [s for s in SEGMENTER_SIGNALS.get(seg_name, [])
+                   if not signals.get(s) or len(signals[s].ts) == 0]
+        windows = [degenerate_window("signal_absent" if missing else "no_valid_event")]
 
     analysis_id = f"an_{uuid.uuid4().hex[:10]}"
     samples: List[RunSample] = []

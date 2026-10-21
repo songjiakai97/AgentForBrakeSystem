@@ -82,9 +82,15 @@ def test_required_signals_cover_metrics_and_segmenters(cfg):
     want = {i for m in cfg.metrics.values() for i in m.inputs}
     for fn in cfg.functions.values():
         want |= set(SEGMENTER_SIGNALS.get(fn.segmenter, []))
+    # 工况级覆盖的分段器（对接路面）读的通道也算必需
+    for c in cfg.conditions.values():
+        if c.segmenter:
+            want |= set(SEGMENTER_SIGNALS.get(c.segmenter, []))
     assert set(cfg.required_signals) == want
     # 踏板门控与车速是切事件窗口的命脉，必须在里面
     assert {"speed_vbox", "BrakePedalPos", "ThrottlePedalPos"} <= set(cfg.required_signals)
+    # 对接路面的 ABS 窗口靠状态位切，缺了切不出窗
+    assert "ABS_Active" in cfg.required_signals
     # Ax 只用于看图，不参与计算 → 允许某一种格式不带
     assert "Ax" not in cfg.required_signals
 
@@ -163,6 +169,109 @@ def test_gate_expands_lead():
     (a, b), = _gate_intervals(signals, "p", 80)
     assert a <= 1.0 and b >= 3.0
     assert a < 1.0  # 首端有放宽
+
+
+# ---------------------------------------------------------------- 信号区间切窗
+def test_high_intervals_merges_state_pulses():
+    """状态位按脉冲发布：间隙小于 merge_gap 的 0/1 跳动算同一段。"""
+    from brake_analyzer.events.segment import _high_intervals
+
+    signals = {"f": _sig([0, 1, 2, 3, 4], [0, 1, 0, 1, 0])}
+    (a, b), = _high_intervals(signals, "f", merge_gap=2.5)
+    assert (a, b) == (1.0, 3.0)
+    assert len(_high_intervals(signals, "f")) == 2       # 不合并就是两段
+    # 单个毛刺采样点（持续 0s）被 min_dur 丢弃
+    spike = {"f": _sig([0, 1, 2], [0, 1, 0])}
+    assert _high_intervals(spike, "f", min_dur=0.2) == []
+
+
+def test_abs_active_window_from_flag(cfg):
+    """对接路面 ABS：窗口 = ABS_Active 高电平区间，与车速无关。"""
+    from brake_analyzer.events.segment import seg_abs_active
+
+    t = np.arange(0.0, 6.0, 0.01)
+    flag = ((t >= 2.0) & (t <= 3.5)).astype(float)
+    (w,) = seg_abs_active({"ABS_Active": _sig(t, flag)}, None, None, {})
+    assert math.isclose(w.t_start, 2.0, abs_tol=0.02)
+    assert math.isclose(w.t_end, 3.5, abs_tol=0.02)
+    assert w.phases == ["abs_regulation"]
+
+
+def test_tcs_pedal_time_is_exact_throttle_span(cfg):
+    """对接路面 TCS：窗口 = 全油门时间，端点不外扩（否则时长就虚了）。"""
+    from brake_analyzer.events.segment import seg_tcs_pedal_time
+
+    t = np.arange(0.0, 5.0, 0.01)
+    ped = np.where((t >= 1.0) & (t <= 4.0), 100.0, 0.0)
+    (w,) = seg_tcs_pedal_time({"ThrottlePedalPos": _sig(t, ped)}, None, None,
+                              {"pedal_arm_pct": 95})
+    assert math.isclose(w.t_start, 1.0, abs_tol=0.02)
+    assert math.isclose(w.t_end, 4.0, abs_tol=0.02)
+
+
+def test_condition_segmenter_override_is_used(cfg):
+    """工况级 segmenter 覆盖功能默认模板，指标只在 ABS 激活区间内算。"""
+    from brake_analyzer.pipeline import analyze_signals
+
+    cond = cfg.condition("abs_full_brake_pos_jump_50kph")
+    assert cond.segmenter == "seg_abs_active"
+    t = np.arange(0.0, 6.0, 0.01)
+    active = ((t >= 2.0) & (t <= 3.0)).astype(float)
+    signals = {
+        "speed_vbox": _sig(t, np.clip(50 - 10 * t, 0, None)),
+        "distance_vbox": _sig(t, t * 10),
+        "ABS_Active": _sig(t, active),
+        # 窗外 20 度/秒的横摆不得计入：窗口起点若仍按车速穿越取，这里会露馅
+        "yaw_rate": _sig(t, np.where(active > 0, 3.0, 20.0)),
+    }
+    res = analyze_signals(signals, cond.id, cfg)
+    s = res.samples[0]
+    assert math.isclose(s.window.t_start, 2.0, abs_tol=0.02)
+    assert math.isclose(s.window.t_end, 3.0, abs_tol=0.02)
+    m = {x.key.rsplit(".", 1)[1]: x for x in s.metrics}
+    assert m["yaw_rate_max"].value == pytest.approx(3.0, abs=0.05)
+
+
+def test_jump_missing_flag_channel_says_signal_absent(cfg):
+    """缺 ABS_Active → missing 且成因是通道缺失，不是「试验没做出来」。"""
+    from brake_analyzer.pipeline import analyze_signals
+
+    t = np.arange(0.0, 4.0, 0.01)
+    signals = {"speed_vbox": _sig(t, np.clip(30 - 8 * t, 0, None)),
+               "yaw_rate": _sig(t, np.zeros_like(t))}
+    res = analyze_signals(signals, "abs_full_brake_pos_jump_50kph", cfg)
+    (m,) = res.samples[0].metrics
+    assert m.status == "missing" and m.missing_reason == "signal_absent"
+
+
+def test_jump_flag_never_high_says_no_valid_event(cfg):
+    """通道在但 ABS 从未激活 → 确实是没切出事件，不能报成缺信号。"""
+    from brake_analyzer.pipeline import analyze_signals
+
+    t = np.arange(0.0, 4.0, 0.01)
+    signals = {"speed_vbox": _sig(t, np.clip(30 - 8 * t, 0, None)),
+               "ABS_Active": _sig(t, np.zeros_like(t)),
+               "yaw_rate": _sig(t, np.zeros_like(t))}
+    res = analyze_signals(signals, "abs_full_brake_pos_jump_50kph", cfg)
+    (m,) = res.samples[0].metrics
+    assert m.status == "missing" and m.missing_reason == "no_valid_event"
+
+
+def test_condition_segmenter_must_be_registered(tmp_path):
+    d = _copy_configs(tmp_path)
+    _patch_yaml(d, "conditions.yaml",
+                lambda raw: raw["abs"][0].__setitem__("segmenter", "seg_nope"))
+    with pytest.raises(ConfigError, match="未注册"):
+        load_configs(d)
+
+
+def test_signal_window_rejects_speed_span_metrics(tmp_path):
+    """窗口不是整段速度区间时，「制动距离/加速时间」的物理含义不成立。"""
+    d = _copy_configs(tmp_path)
+    _patch_yaml(d, "conditions.yaml",
+                lambda raw: raw["abs"][0].__setitem__("segmenter", "seg_abs_active"))
+    with pytest.raises(ConfigError, match="不能声明指标"):
+        load_configs(d)
 
 
 # ---------------------------------------------------------------- pick

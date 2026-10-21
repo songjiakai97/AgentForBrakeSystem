@@ -336,6 +336,19 @@ phases: list[str]
 
 - 分段模板由功能通过 `segmenter` 绑定，模板本身在代码中实现并注册（`events/segment.py` 内
   `SEGMENTERS: dict[str, Segmenter]`），新增模板 = 新增一个注册函数，不进入 YAML 配置。
+- 工况可用 `segmenter:` 覆盖功能级模板（`ConditionConfig.segmenter`，空 = 沿用功能）。
+  用于「这个工况不能按速度区间切」的情况，目前只有对接路面（`pos_jump`/`neg_jump`）：
+  两端车速都不确定，只看对接点速度，故
+  - ABS：`seg_abs_active`，窗口 = `ABS_Active` 高电平区间（±0.5 判为激活，间隙
+    < 0.3 s 的调节脉冲合并，短于 0.2 s 的丢弃）；
+  - TCS：`seg_tcs_pedal_time`，窗口 = `ThrottlePedalPos >= pedal_arm_pct` 的整段，
+    即「全油门时间」（端点取真实边沿，不做 `_gate_intervals` 那样的首端放宽，
+    否则时长会虚）。
+- 代价与约束：窗口不再是整段速度区间，`brake_distance`（窗口起止距离差）与
+  `acc_time`（窗口时长）的物理含义随之失效，配置层直接拒绝这类组合
+  （`SPEED_SPAN_SEGMENTERS` / `SPEED_SPAN_METRICS`）。
+- 切窗用的通道缺失时，退化窗口的成因记为 `signal_absent`（要查映射/补测通道），
+  与「通道在但没切出事件」的 `no_valid_event`（要重做工况）区分开，见 §10.1。
 - 无有效事件时返回空窗口，相关指标置 missing。
 - 一个文件可含多条同工况事件，每条为一个 run-sample。
 - 一次分析 = 一个文件 + 一个工况，但可含多条事件。
@@ -1187,6 +1200,7 @@ functions:
     name: <工况名>
     maneuver: <maneuver>
     surface_code: <surface_code>       # 仅元数据，供展示与 LLM 参考
+    segmenter: <segmenter_key>         # 可选：覆盖功能级切窗模板（§6.3）
     params:
       <param_key>: <value>
     metrics:
@@ -1235,6 +1249,9 @@ functions:
 | `ok_range` | 否 | `[lo, hi]`，`null` 表示该侧无界；省略表示无硬性规定 |
 | `profile` | 否 | 档位标签；省略表示通用条目 |
 | `params` | 否 | 传给指标工具的参数 |
+
+工况级还可选 `segmenter`（覆盖 `functions.yaml` 的切窗模板，见 §6.3）。窗口不是整段
+速度区间时，`brake_distance` / `acc_time` 会被加载期拒绝——它们的物理含义依赖车速穿越切窗。
 
 说明：
 
@@ -1429,8 +1446,8 @@ ok | abnormal | missing | info
 
 | reason | 判据（顺序即优先级） | 该怎么办 |
 | --- | --- | --- |
-| `no_valid_event` | 事件窗口退化（`t_start`/`t_end` 缺失或 NaN，或 `t_end <= t_start`） | 补做该工况试验 / 换工况，**不是查信号映射** |
-| `signal_absent` | 窗口正常，但指标 `tmpl.inputs` 里某通道为空 | 补测或检查映射 |
+| `no_valid_event` | 事件窗口退化（`t_start`/`t_end` 缺失或 NaN，或 `t_end <= t_start`），且切窗通道有数据 | 补做该工况试验 / 换工况，**不是查信号映射** |
+| `signal_absent` | 窗口正常但指标 `tmpl.inputs` 里某通道为空；**或**退化窗口且分段器读取的通道为空（`window.phases[0]` 由 pipeline 标为 `signal_absent`） | 补测或检查映射 |
 | `not_computable` | 窗口与通道都在，值算不出（插值端点越界等） | 查算法/数据质量 |
 | `no_matching_entry` | 所选档位下没有该指标的判定条目 | 先选对档位 |
 

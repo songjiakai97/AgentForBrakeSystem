@@ -81,6 +81,7 @@ abs:
       - {key: yaw_rate_max, ok_range: [null, 7]}
       - {key: decel_avg,    ok_range: [3.0, null]}
   - id: abs_full_brake_pos_jump_50kph
+    segmenter: seg_abs_active
     name: ABS 高到低对接 50kph 全力制动
     maneuver: full_brake
     surface_code: pos_jump
@@ -91,6 +92,7 @@ abs:
     metrics:
       - {key: yaw_rate_max, ok_range: [null, 5]}
   - id: abs_full_brake_neg_jump_50kph
+    segmenter: seg_abs_active
     name: ABS 低到高对接 50kph 全力制动
     maneuver: full_brake
     surface_code: neg_jump
@@ -153,6 +155,7 @@ tcs:
       - {key: slip_max,     ok_range: [null, 36],  profile: DTCS}
       - {key: slip_max,     ok_range: [null, 54],  profile: TCS}
   - id: tcs_full_throttle_neg_jump_10kph
+    segmenter: seg_tcs_pedal_time
     name: TCS 高到低对接 对接点10kph 全油门加速
     maneuver: full_throttle
     surface_code: neg_jump
@@ -165,6 +168,7 @@ tcs:
       - {key: slip_max,     ok_range: [null, 54],  profile: DTCS}
       - {key: slip_max,     ok_range: [null, 72],  profile: TCS}
   - id: tcs_full_throttle_pos_jump_10kph
+    segmenter: seg_tcs_pedal_time
     name: TCS 低到高对接 对接点10kph 全油门加速
     maneuver: full_throttle
     surface_code: pos_jump

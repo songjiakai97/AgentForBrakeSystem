@@ -21,6 +21,9 @@ def _classify(value, entry: dict) -> str:
     return "ok" if ok else "abnormal"
 
 
+_WINDOW_REASONS = {"no_valid_event", "signal_absent"}
+
+
 def _missing_reason(signals: dict, window, tmpl) -> str:
     """missing 的成因。三种不能混为一谈，否则给用户的话就错了：
 
@@ -31,7 +34,10 @@ def _missing_reason(signals: dict, window, tmpl) -> str:
     """
     t0, t1 = getattr(window, "t_start", None), getattr(window, "t_end", None)
     if (t0 is None or t1 is None or np.isnan(t0) or np.isnan(t1) or t1 <= t0):
-        return "no_valid_event"
+        # 退化窗口由 pipeline 标注成因：切窗通道缺失( signal_absent ) 与
+        # 试验没做出事件( no_valid_event ) 给人的建议相反，不能一律归为后者。
+        reason = (getattr(window, "phases", None) or ["no_valid_event"])[0]
+        return reason if reason in _WINDOW_REASONS else "no_valid_event"
     for name in tmpl.inputs or []:
         sig = signals.get(name)
         if sig is None or len(sig.ts) == 0:

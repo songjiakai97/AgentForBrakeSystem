@@ -1,13 +1,20 @@
 """事件分段与时间窗（design.md §6.3 / demo_conditions_metrics.md §5）。
 
-分段模板在代码中实现并注册于 SEGMENTERS，不进入 YAML。
+分段模板在代码中实现并注册于 SEGMENTERS，不进入 YAML；按功能选一个，
+工况可以覆盖（如对接路面不看速度区间，改看 ABS 激活区间/全油门时长）。
 所有速度交叉点在本层用线性插值定位，指标工具只在窗口内做纯计算。
 
-事件有效性由踏板信号门控（pedal_arm_pct），最终窗口端点由速度交叉点裁剪：
+车速穿越模板（窗口 = 整段考核过程，可支撑「制动距离/加速时间」）：
 - seg_abs_full_brake:      BrakePedalPos >= arm 区间内，speed_vbox 下降穿越 v0_kph
                            → 下降穿越 v_stop_kph 的配对。
 - seg_tcs_full_throttle:   ThrottlePedalPos >= arm 区间内，speed_vbox 上升穿越 v_start_kph
                            → 上升穿越 v_target_kph 的配对。
+
+信号区间模板（窗口 = 某个状态位/踏板的持续区间，与车速无关；对接路面两端
+车速都不确定，速度穿越切不出可靠的窗）：
+- seg_abs_active:          ABS_Active 高电平区间（相邻脉冲间隙小于
+                           ABS_ACTIVE_MERGE_GAP_S 视为同一段调节）。
+- seg_tcs_pedal_time:      ThrottlePedalPos >= arm 的整段，即「全油门时间」。
 
 交叉点任一找不到 → 不产出该 EventWindow；全部无窗口时由 pipeline 补一个
 退化窗口，使指标判 missing、规则命中 data_quality。
@@ -84,6 +91,43 @@ def _gate_intervals(signals: dict, name: str, arm: float) -> List[Tuple[float, f
         else:
             merged.append((a, b))
     return merged
+
+
+def _high_intervals(
+    signals: dict,
+    name: str,
+    level: float = 0.5,
+    merge_gap: float = 0.0,
+    min_dur: float = 0.0,
+) -> List[Tuple[float, float]]:
+    """信号值 >= level 的连续区间，端点取真实边沿（不外扩）。
+
+    merge_gap：间隙小于该值的相邻区间合并——状态位（如 ABS_Active）按压力
+    调节脉冲发布，0/1 会来回跳，不合并会把一段调节切成一堆毫秒级窗口。
+    min_dur：合并后仍短于该值的丢弃，防单个毛刺采样点变成一个事件。
+    """
+    ts, vals = _series(signals, name)
+    if len(ts) == 0:
+        return []
+    mask = vals >= level
+    raw: List[Tuple[float, float]] = []
+    start = None
+    for i, m in enumerate(mask):
+        if m and start is None:
+            start = float(ts[i])
+        elif not m and start is not None:
+            raw.append((start, float(ts[i - 1])))
+            start = None
+    if start is not None:
+        raw.append((start, float(ts[-1])))
+
+    merged: List[Tuple[float, float]] = []
+    for a, b in raw:
+        if merged and a - merged[-1][1] <= merge_gap:
+            merged[-1] = (merged[-1][0], b)
+        else:
+            merged.append((a, b))
+    return [(a, b) for a, b in merged if b - a >= min_dur]
 
 
 def _pair_windows(
@@ -165,10 +209,62 @@ def seg_tcs_full_throttle(
     return windows
 
 
-SEGMENTERS: Dict[str, Segmenter] = {
+SEGMENTERS: Dict[str, Segmenter] = {}
+
+# 信号区间模板的判据常量。写死在代码里而不是塞进 conditions.yaml 的 params：
+# params 是工况唯一键的一部分（maneuver+surface_code+params），加进去会改变
+# 工况身份，也让「这些数是什么」暴露给模型和用户。
+ABS_ACTIVE_LEVEL = 0.5
+ABS_ACTIVE_MERGE_GAP_S = 0.3   # 压力调节脉冲间隙，小于它的 0/1 跳动算同一段
+ABS_ACTIVE_MIN_DUR_S = 0.2
+
+
+def seg_abs_active(
+    signals: dict,
+    function_cfg: FunctionConfig,
+    condition_cfg: ConditionConfig,
+    params: dict,
+) -> List[EventWindow]:
+    """窗口 = ABS 激活区间（对接路面两端车速不确定，不能按速度穿越切）。"""
+    windows: List[EventWindow] = []
+    for t0, t1 in _high_intervals(
+        signals, "ABS_Active",
+        level=ABS_ACTIVE_LEVEL,
+        merge_gap=ABS_ACTIVE_MERGE_GAP_S,
+        min_dur=ABS_ACTIVE_MIN_DUR_S,
+    ):
+        windows.append(EventWindow(t_start=t0, t_end=t1, anchor=t0,
+                                   phases=["abs_regulation"]))
+    return windows
+
+
+def seg_tcs_pedal_time(
+    signals: dict,
+    function_cfg: FunctionConfig,
+    condition_cfg: ConditionConfig,
+    params: dict,
+) -> List[EventWindow]:
+    """窗口 = 全油门时间（ThrottlePedalPos >= arm 的整段），不设目标车速。"""
+    arm = float(params.get("pedal_arm_pct", 95.0))
+    windows: List[EventWindow] = []
+    for t0, t1 in _high_intervals(signals, "ThrottlePedalPos", level=arm):
+        windows.append(EventWindow(t_start=t0, t_end=t1, anchor=t0,
+                                   phases=["full_throttle"]))
+    return windows
+
+
+SEGMENTERS.update({
     "seg_abs_full_brake": seg_abs_full_brake,
     "seg_tcs_full_throttle": seg_tcs_full_throttle,
-}
+    "seg_abs_active": seg_abs_active,
+    "seg_tcs_pedal_time": seg_tcs_pedal_time,
+})
+
+# 窗口 = 整段车速区间的模板。只有它们切出的窗才能支撑「窗口时长即加速时间」
+# 「窗口起止距离差即制动距离」这两类指标；换了模板这两个指标的物理含义就不成立，
+# 由配置层拦下（§9.4）。
+SPEED_SPAN_SEGMENTERS = {"seg_abs_full_brake", "seg_tcs_full_throttle"}
+SPEED_SPAN_METRICS = {"brake_distance", "acc_time"}
 
 # 分段器实际读取的通道。配置层据此算出「参与计算的信号集」（§9.6）：
 # 这些通道任何数据格式都必须提供，缺了就不是判定偏严，而是根本切不出事件窗口。
@@ -176,6 +272,8 @@ SEGMENTERS: Dict[str, Segmenter] = {
 SEGMENTER_SIGNALS: Dict[str, List[str]] = {
     "seg_abs_full_brake": ["speed_vbox", "BrakePedalPos"],
     "seg_tcs_full_throttle": ["speed_vbox", "ThrottlePedalPos"],
+    "seg_abs_active": ["ABS_Active"],
+    "seg_tcs_pedal_time": ["ThrottlePedalPos"],
 }
 
 
