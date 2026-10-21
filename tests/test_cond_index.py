@@ -110,7 +110,7 @@ def test_fabricated_surface_dropped_to_panel(cfg):
                             surface_code="dry_asphalt", query="2WD TCS",
                             evidence="2WD TCS")
     assert out["hop"] == "condition"
-    assert len(out["candidates"]) == 3          # 三条 TCS 工况都进面板
+    assert len(out["candidates"]) == 7          # 七条 TCS 工况都进面板
     assert "路面" in out["hint"]
 
 

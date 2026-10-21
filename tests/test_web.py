@@ -62,7 +62,7 @@ def test_functions_conditions_kb(client):
     tcs = [f for f in fns if f["key"] == "tcs"][0]
     assert tcs["profile_dims"] == [["4WD", "2WD"], ["DTCS", "TCS"]]
     conds = client.get("/api/conditions", params={"function_key": "abs"}).json()
-    assert len(conds) == 3
+    assert len(conds) == 9
     kb = client.get("/api/kb").json()
     # 手册内容随用户上传变化（demo 占位手册已删），只断言结构与案例存在
     assert isinstance(kb["manual"], list) and kb["cases"]
@@ -121,7 +121,7 @@ def test_condition_panel_then_select_profile(client):
     r = client.post(f"/api/chats/{cid}/select",
                     json={"target_type": "function", "target_key": "tcs"}).json()
     m = r["messages"][0]
-    assert m["data"]["hop"] == "condition" and len(m["data"]["candidates"]) == 3
+    assert m["data"]["hop"] == "condition" and len(m["data"]["candidates"]) == 7
 
     # 选工况但不给档位 → 返回 profile 面板
     key = "tcs_full_throttle_wet_basalt_0to60kph"

@@ -31,7 +31,7 @@ def _sig(ts, vals, unit=""):
 # ---------------------------------------------------------------- 配置
 def test_config_loads(cfg):
     assert set(cfg.functions) == {"abs", "tcs"}
-    assert len(cfg.conditions) == 6
+    assert len(cfg.conditions) == 16
     assert len(cfg.rules) == 12
     assert cfg.functions["tcs"].profiles == ["4WD", "2WD", "DTCS", "TCS"]
     assert cfg.functions["tcs"].profile_dims == [["4WD", "2WD"], ["DTCS", "TCS"]]

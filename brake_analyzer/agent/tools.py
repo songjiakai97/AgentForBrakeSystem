@@ -50,8 +50,14 @@ _MANEUVER_TERMS = {
 }
 _SURFACE_TERMS = {
     "dry_asphalt": ["干沥青", "干地", "沥青", "high mu", "高附着", "dry"],
+    "wet_asphalt": ["湿沥青", "洒水沥青", "沥青湿", "wet asphalt"],
     "wet_basalt": ["玄武岩", "洒水", "湿", "low mu", "低附着", "wet"],
     "wet_tile": ["瓷砖", "洒瓷砖", "湿瓷砖", "wet"],
+    # 对开/对接两个方向在不同功能下 code 相反（ABS 对开=split），
+    # 关键词只放与方向无关的词，方向交给工况名匹配。
+    "split": ["对开", "对开路面", "对开沥青", "分离路面", "split", "μ-split"],
+    "pos_jump": ["对接", "跳变", "jump"],
+    "neg_jump": ["对接", "跳变", "jump"],
 }
 _SPEED_RE = re.compile(r"(\d{2,3})\s*(?:kph|kmh|km/h|公里)", re.I)
 

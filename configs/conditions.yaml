@@ -14,7 +14,17 @@ abs:
     metrics:
       - {key: yaw_rate_max,   ok_range: [null, 5]}
       - {key: brake_distance, ok_range: [null, 40]}
-
+  - id: abs_full_brake_wet_asphalt_60kph
+    name: ABS 湿沥青 60kph 全力制动
+    maneuver: full_brake
+    surface_code: wet_asphalt
+    params:
+      v0_kph: 60
+      v_stop_kph: 0.8
+      pedal_arm_pct: 80
+    metrics:
+      - {key: yaw_rate_max,   ok_range: [null, 5]}
+      - {key: decel_avg, ok_range: [8.5, null]}
   - id: abs_full_brake_wet_basalt_60kph
     name: ABS 洒水玄武岩 60kph 全力制动
     maneuver: full_brake
@@ -26,7 +36,17 @@ abs:
     metrics:
       - {key: yaw_rate_max, ok_range: [null, 5]}
       - {key: decel_avg,    ok_range: [1.5, null]}
-
+  - id: abs_full_brake_wet_basalt_30kph
+    name: ABS 洒水玄武岩 30kph 全力制动
+    maneuver: full_brake
+    surface_code: wet_basalt
+    params:
+      v0_kph: 30
+      v_stop_kph: 0.8
+      pedal_arm_pct: 80
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: decel_avg,    ok_range: [1.8, null]}
   - id: abs_full_brake_wet_tile_50kph
     name: ABS 洒水瓷砖 50kph 全力制动
     maneuver: full_brake
@@ -38,6 +58,48 @@ abs:
     metrics:
       - {key: yaw_rate_max, ok_range: [null, 5]}
       - {key: decel_avg,    ok_range: [0.8, null]}
+  - id: abs_full_brake_wet_tile_30kph
+    name: ABS 洒水瓷砖 30kph 全力制动
+    maneuver: full_brake
+    surface_code: wet_tile
+    params:
+      v0_kph: 30
+      v_stop_kph: 0.8
+      pedal_arm_pct: 80
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: decel_avg,    ok_range: [1.0, null]}
+  - id: abs_full_brake_split_80kph
+    name: ABS 对开路面 80kph 全力制动
+    maneuver: full_brake
+    surface_code: split
+    params:
+      v0_kph: 80
+      v_stop_kph: 0.8
+      pedal_arm_pct: 80
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 7]}
+      - {key: decel_avg,    ok_range: [3.0, null]}
+  - id: abs_full_brake_pos_jump_50kph
+    name: ABS 高到低对接 50kph 全力制动
+    maneuver: full_brake
+    surface_code: pos_jump
+    params:
+      v0_kph: 50
+      v_stop_kph: 0.8
+      pedal_arm_pct: 80
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+  - id: abs_full_brake_neg_jump_50kph
+    name: ABS 低到高对接 50kph 全力制动
+    maneuver: full_brake
+    surface_code: neg_jump
+    params:
+      v0_kph: 50
+      v_stop_kph: 0.8
+      pedal_arm_pct: 80
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
 
 tcs:
   - id: tcs_full_throttle_dry_asphalt_0to100kph
@@ -51,7 +113,16 @@ tcs:
     metrics:
       - {key: yaw_rate_max, ok_range: [null, 5]}
       - {key: acc_time,     ok_range: [null, 10]}
-
+  - id: tcs_full_throttle_wet_asphalt_0to100kph
+    name: TCS 湿沥青 0→100kph 全油门加速
+    maneuver: full_throttle
+    surface_code: wet_asphalt
+    params:
+      v_start_kph: 0.8
+      v_target_kph: 100
+      pedal_arm_pct: 95
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
   - id: tcs_full_throttle_wet_basalt_0to60kph
     name: TCS 洒水玄武岩 0→60kph 全油门加速
     maneuver: full_throttle
@@ -81,3 +152,39 @@ tcs:
       - {key: acc_avg,      ok_range: [0.4, null], profile: 2WD}
       - {key: slip_max,     ok_range: [null, 36],  profile: DTCS}
       - {key: slip_max,     ok_range: [null, 54],  profile: TCS}
+  - id: tcs_full_throttle_neg_jump_10kph
+    name: TCS 高到低对接 对接点10kph 全油门加速
+    maneuver: full_throttle
+    surface_code: neg_jump
+    params:
+      v_start_kph: 0.8
+      v_target_kph: 10
+      pedal_arm_pct: 95
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: slip_max,     ok_range: [null, 54],  profile: DTCS}
+      - {key: slip_max,     ok_range: [null, 72],  profile: TCS}
+  - id: tcs_full_throttle_pos_jump_10kph
+    name: TCS 低到高对接 对接点10kph 全油门加速
+    maneuver: full_throttle
+    surface_code: pos_jump
+    params:
+      v_start_kph: 0.8
+      v_target_kph: 10
+      pedal_arm_pct: 95
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+  - id: tcs_full_throttle_split_0to30kph
+    name: TCS 对开路面 0→30kph 全油门加速
+    maneuver: full_throttle
+    surface_code: split
+    params:
+      v_start_kph: 0.8
+      v_target_kph: 30
+      pedal_arm_pct: 95
+    metrics:
+      - {key: yaw_rate_max, ok_range: [null, 5]}
+      - {key: acc_avg,      ok_range: [2.5, null], profile: 4WD}
+      - {key: acc_avg,      ok_range: [1.5, null], profile: 2WD}
+      - {key: slip_max,     ok_range: [null, 54],  profile: DTCS}
+      - {key: slip_max,     ok_range: [null, 72],  profile: TCS}

@@ -50,16 +50,16 @@ def test_find_condition_exact_partial_none(cfg):
     hits2 = cfg.find_condition("abs", "full_brake", "dry_asphalt", {"v0_kph": 100.0})
     assert [c.id for c in hits2] == ["abs_full_brake_dry_asphalt_100kph"]
     # 键不全 → 多条命中，由调用方出面板
-    assert len(cfg.find_condition("abs", "full_brake", None, {})) == 3
+    assert len(cfg.find_condition("abs", "full_brake", None, {})) == 9
     # 不给功能 → 跨功能命中
-    assert len(cfg.find_condition(None, "full_brake", "wet_basalt", {})) == 1
+    assert len(cfg.find_condition(None, "full_brake", "wet_basalt", {})) == 2
     assert cfg.find_condition("abs", "full_throttle", None, {}) == []
 
 
 def test_find_condition_metric_only_params_are_subset(cfg):
     """params 用子集匹配：只报出 v0 也能定位，不必复述全部参数。"""
-    hits = cfg.find_condition("abs", None, None, {"v0_kph": 50})
-    assert [c.id for c in hits] == ["abs_full_brake_wet_tile_50kph"]
+    hits = cfg.find_condition("abs", None, None, {"v0_kph": 80})
+    assert [c.id for c in hits] == ["abs_full_brake_split_80kph"]
 
 
 def test_config_rejects_ambiguous_slot(tmp_path):
@@ -116,7 +116,7 @@ def test_resolve_condition_only_resolves_on_exact_hit(cfg):
 
     amb = resolve_condition(cfg, "abs", "full_brake", None, {})
     assert amb["hop"] == "condition" and amb["transient"] is True
-    assert len(amb["candidates"]) == 3 and "唯一键" in amb["hint"]
+    assert len(amb["candidates"]) == 9 and "唯一键" in amb["hint"]
 
     miss = resolve_condition(cfg, "abs", "full_brake", "wet_basalt", {"v0_kph": 999})
     assert miss["hop"] == "condition" and miss["candidates"]
@@ -722,7 +722,7 @@ def test_engine_catalog_does_not_open_panel():
                                           "surface_code": "wet_tile", "params": {"v0_kph": 50}})])
     eng = _engine(llm)
     chat = eng.store.create_chat()
-    for _ in eng.events(chat, "瓷砖那个工况"):
+    for _ in eng.events(chat, "瓷砖 50kph 那个工况"):
         pass
     assert "target_options" not in _kinds(chat)
     labels = [it["label"] for m in chat.messages if m.kind == "steps"
