@@ -106,9 +106,15 @@ class TestIdentify:
         frames += [(t, 1, 0x200, 200 + i) for i, (t, ch, aid, v)
                    in enumerate([f for f in frames if f[1] == 0])]
         blf = _write_blf(tmp_path / "gw.blf", frames)
-        data = BLFLoader(_cfg(*dbcs)).load(blf)
+        loader = BLFLoader(_cfg(*dbcs))
+        data = loader.load(blf)
         assert data["a_val"].values[:20].tolist() == list(range(1, 21))
         assert data["b_val"].values[:20].tolist() == [200 + i for i in range(20)]
+        # 同一 ID 跨通道是「只提示」级：解码键带通道号，结论照常可用，
+        # 不该被算进 load_errors（那会在界面上显示成「部分文件分析失败」）
+        assert loader.load_errors == [], loader.load_errors
+        assert any("0x200" in w and "多个通道" in w for w in loader.load_warnings), \
+            loader.load_warnings
 
     def test_report_evidence(self, dbcs, tmp_path):
         from brake_analyzer.loaders.blf_channels import identify
@@ -122,7 +128,9 @@ class TestIdentify:
         # EC 的所有候选 ID 两条通道都有（0x200）：单看 EC 分不出，但 BODY 的
         # 0x201 唯一指向 ch1，互换会掉分 → 归属仍然确定
         assert by_bus["EC"].status == "matched"
-        assert any("0x200" in w and "多个通道" in w for w in report.warnings)
+        # 同一 ID 跨通道只进 notes（提示级），不进 warnings（会影响结论的那一级）
+        assert any("0x200" in w and "多个通道" in w for w in report.notes)
+        assert not any("多个通道" in w for w in report.warnings)
 
     def test_not_observed_bus_is_reported(self, dbcs, tmp_path):
         from brake_analyzer.loaders.blf_channels import identify

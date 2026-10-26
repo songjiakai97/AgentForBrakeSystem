@@ -40,6 +40,9 @@ class BLFLoader(Loader):
         # 解析中断告警：BLF 中途坏帧/IO 失败会让剩余帧全部丢失。半截数据出结论
         # 比报错更危险，所以保留部分数据但必须把中断事实暴露给调用方
         self.load_errors: list = []
+        # 只提示、不改变结论的事实（同一 ID 出现在多个通道、回退全量重扫）。
+        # 与 load_errors 分开：那些会让用户以为「分析失败」，而这里结果照常可用。
+        self.load_warnings: list = []
 
         # DBC 在构造期解析：坏库/路径错在启动时就暴露，而不是等第一次分析。
         # 按别名建索引（候选写的是别名）；同一路径被两个别名引用时只解析一次
@@ -54,18 +57,23 @@ class BLFLoader(Loader):
 
         # 识别结果按「文件 stat + 路径」缓存：引擎会复用同一个 loader 实例，
         # 同一文件常常要被连算两次（分析 + 出图）
-        self._channels_cache: Dict[tuple, Tuple[Dict[str, int], List[str]]] = {}
+        self._channels_cache: Dict[tuple, Tuple[Dict[str, int], List[str], List[str]]] = {}
 
     # ------------------------------------------------------------ 通道识别
     def _stat_key(self, path: str) -> tuple:
         st = os.stat(path)
         return (path, st.st_size, st.st_mtime_ns)
 
-    def _bus_channels(self, path: str, errors: List[str]) -> Dict[str, int]:
+    def _bus_channels(self, path: str, errors: List[str],
+                      warns: List[str]) -> Dict[str, int]:
         """返回 {总线: 通道号}；没认出来的总线不在结果里（其信号按缺失处理）。
 
         `channels` 可以只写一部分：写死的总线和通道不参与自动识别，其余总线照
         常扫描推断。全部写死时连文件都不扫。
+
+        识别告警按影响分两级进调用方的两个列表：证据不足/通道没报文 → errors
+        （结果可能不完整，必须显眼）；同一 ID 跨通道、回退全量重扫 → warns
+        （只是告知，解码键带通道号，结论不受影响）。
         """
         pinned = {bus: ch for ch, bus in (self.cfg.channels or {}).items()}
         if pinned and len(pinned) == len(self.buses):
@@ -75,10 +83,11 @@ class BLFLoader(Loader):
         if cached is None:
             report = identify(path, self.buses, self.signal_maps,
                               self.cfg.channel_detect, pinned=pinned)
-            cached = (report.bus_channels(), report.warnings)
+            cached = (report.bus_channels(), report.warnings, report.notes)
             self._channels_cache[key] = cached
-        channels, warnings = cached
+        channels, warnings, notes = cached
         errors.extend(warnings)
+        warns.extend(notes)
         return channels
 
     # ------------------------------------------------------------ 解析
@@ -114,9 +123,10 @@ class BLFLoader(Loader):
     def load(self, file_path: str) -> Dict[str, SignalData]:
         result: Dict[str, SignalData] = {}
         self.load_errors = []
+        self.load_warnings = []
 
         # 1. 通道识别 → 候选解析（总线未识别或 DBC 里找不到的候选逐条回退）
-        bus_ch = self._bus_channels(file_path, self.load_errors)
+        bus_ch = self._bus_channels(file_path, self.load_errors, self.load_warnings)
         for bus in bus_ch:
             missing = self.buses.get(bus, {}).get("unavailable") or []
             if missing:      # 识别成功但本机没有库：说清楚是「解不了」而不是「没数据」

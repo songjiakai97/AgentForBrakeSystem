@@ -61,7 +61,11 @@ class BusEvidence:
 class ChannelReport:
     assignment: Dict[int, str]              # 通道 → 总线
     evidence: List[BusEvidence]
+    # warnings：会影响结论可用性（通道没报文、证据不足/歧义、扫描中断）
+    # notes：只提示不决策（同一 ID 出现在多个通道、回退全量重扫）——解码键带通道号，
+    # 这类事实不改变结果，界面不该按「分析失败」呈现
     warnings: List[str] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
     scanned_frames: int = 0
     scanned_seconds: float = 0.0
 
@@ -72,6 +76,7 @@ class ChannelReport:
         return {"assignment": dict(self.assignment),
                 "evidence": [e.as_dict() for e in self.evidence],
                 "warnings": list(self.warnings),
+                "notes": list(self.notes),
                 "scanned_frames": self.scanned_frames,
                 "scanned_seconds": round(self.scanned_seconds, 3)}
 
@@ -268,9 +273,9 @@ def score_channels(stats: Dict[int, ChannelStats], buses: Dict[str, Dict[str, An
 
     report = ChannelReport(assignment=assignment, evidence=evidence,
                            scanned_frames=scanned[0], scanned_seconds=scanned[1])
-    report.warnings.extend(_conflict_warnings(present))
     report.warnings.extend(_pinned_warnings(pinned, stats))
     report.warnings.extend(_evidence_warnings(evidence, detect))
+    report.notes.extend(_conflict_warnings(present))
     return report
 
 
@@ -354,7 +359,7 @@ def identify(path: str, buses: Dict[str, Dict[str, Any]],
     if truncated and (weak or missing_pinned):
         stats2, frames2, span2, _t, err2 = scan(path, float("inf"), float("inf"))
         full = score_channels(stats2, buses, signal_maps, detect, (frames2, span2), pinned)
-        full.warnings.insert(0, "采样窗口内识别证据不足，已回退全量重扫")
+        full.notes.append("采样窗口内识别证据不足，已回退全量重扫")
         if err2:
             full.warnings.insert(0, err2)
         report = full

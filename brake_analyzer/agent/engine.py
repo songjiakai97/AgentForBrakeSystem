@@ -643,6 +643,7 @@ class ChatEngine:
 
         results: List[AnalysisResult] = []
         errors: List[str] = []
+        warns: List[str] = []
         stopped_early = False
         for i, f in enumerate(targets):
             # 工具阶段是整轮最慢的一段，且期间没有 delta 可供上层检查停止：
@@ -660,12 +661,17 @@ class ChatEngine:
                 "run")
             try:
                 if sess.signals is None:
-                    sess.signals = self._loader_for(f.path).load(f.path)
+                    loader = self._loader_for(f.path)
+                    sess.signals = loader.load(f.path)
                     self.store.note_signals_loaded(f.file_id)
                     # loader 解析中断（坏帧/IO）不抛异常，但事实必须进 errors：
                     # 用户会在结果卡片上看到"结果基于不完整数据"，而不是被骗
-                    for err in getattr(self._loader_for(f.path), "load_errors", None) or []:
+                    for err in getattr(loader, "load_errors", None) or []:
                         errors.append(f"{f.name}: {err}")
+                    # 只提示不改变结论的事实（同一 ID 跨通道等）进 warns，
+                    # 走步骤行的 warn 状态——它们不是"分析失败"，结果照常可用
+                    for w in getattr(loader, "load_warnings", None) or []:
+                        warns.append(f"{f.name}: {w}")
                 res = analyze_signals(
                     sess.signals, cond.id, self.cfg,
                     file_id=f.file_id, file_name=f.name, profile=profile,
@@ -680,11 +686,19 @@ class ChatEngine:
                 errors.append(f"{f.name}: 分析异常 {e}")
 
         valid = sum(1 for r in results for s in r.samples if s.window is not None)
+        detail = f"样本窗口 {valid} 个 · 失败 {len(errors)} 份"
+        if warns:
+            detail += f" · 提示 {len(warns)} 条"
         step2 = self._step_on(chat, [
-            (f"分段+指标：{len(results)} 份数据", f"样本窗口 {valid} 个 · 失败 {len(errors)} 份",
+            (f"分段+指标：{len(results)} 份数据", detail,
              "ok" if not errors else "warn")])
         if step2 is not step_msg:
             added.append(step2)
+        if warns:
+            # 与「部分文件分析失败」分开：这些事实不改变结论（解码键带通道号），
+            # 混进错误气泡会让用户以为这一轮白跑
+            added.append(self._step_on(chat, [
+                ("识别提示（不影响结果）", "；".join(warns)[:400], "warn")]))
         digests: List[dict] = []
         for res in results:
             added.append(self._analysis_msg(chat, res))
@@ -1013,8 +1027,12 @@ class ChatEngine:
             sess.signals = self._loader_for(f.path).load(f.path)
             self.store.note_signals_loaded(f.file_id)
         rows[i] = row(i, f, sorted(sess.signals.keys()))
-        load_errors = getattr(self._loader_for(f.path), "load_errors", None) or []
-        note = "；".join(load_errors) if load_errors else ""
+        loader = self._loader_for(f.path)
+        # 这里给模型看的是「这个文件读得怎么样」，两级都带上：
+        # 中断/没 DBC 是真问题，同一 ID 跨通道只是提示
+        facts = [*(getattr(loader, "load_errors", None) or []),
+                 *(getattr(loader, "load_warnings", None) or [])]
+        note = "；".join(facts)
         return {"ok": True, "transient": True, "files": rows, **({"note": note} if note else {})}
 
     @staticmethod

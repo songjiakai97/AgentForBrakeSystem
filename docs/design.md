@@ -1481,9 +1481,17 @@ score(c,b)  = recall(c,b) × (0.5 + 0.5 × pure(c,b))
   或某总线有证据但通道被更强的总线占用 → `ambiguous`；`hits` 不足、`score` 不够 →
   `low_confidence`。`min_hits` 与 `Obs` 取小，避免「这条总线本来就只配了 1 个信号」
   被永远判低置信。
-- 报告：同一 ID 出现在多个通道时输出一条告警（网关转发还是 ID 复用交给人看），
-  只提示不决策。识别结论写日志；告警经 `BLFLoader.load_errors` 进入分析错误列表，
-  用户能看到「通道归属不确定」。
+- 报告分两级，字段与展示口径都不同：
+  - `ChannelReport.warnings` → `BLFLoader.load_errors`：**会影响结论可用性**的事实
+    （某总线证据不足/歧义、写死的通道里没报文、识别扫描中断）。引擎把它们并进
+    本轮 `errors`，结果卡片上明确显示「部分文件分析失败」。
+  - `ChannelReport.notes` → `BLFLoader.load_warnings`：**只提示不决策**的事实
+    （同一 ID 出现在多个通道——网关转发还是 ID 复用交给人看；采样窗口不够、
+    已回退全量重扫）。解码键 `(frame_id, is_extended, channel)` 带通道号，这类
+    事实不改变任何指标值，因此引擎把它们写成一条 `warn` 状态的步骤项
+    「识别提示（不影响结果）」，**不产生 error 气泡**——之前它们被塞进
+    `load_errors`，实测出现「结果完整输出、界面同时报分析失败」的矛盾观感。
+  识别结论同时写日志。
 - 失败形态：没有任何候选报文的总线 → `not_observed`，其信号按缺失处理，与「识别失败」
   （`ambiguous`/`low_confidence`）区分开。
 

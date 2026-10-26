@@ -494,6 +494,34 @@ class TestLoaderSelection:
               for s in res.data["samples"] for x in s["metrics"]}
         assert st["brake_distance"] == "abnormal"
 
+    def test_engine_channel_note_is_not_a_failure(self, blf_cfg, tmp_path, monkeypatch):
+        """识别提示（同一 ID 跨通道）：结果照常出，不许冒「部分文件分析失败」。
+
+        埋过的实际困扰：`_bus_channels` 把通道识别的全部告警塞进 load_errors，
+        于是网关转发/ID 复用这种「只提示」的事实被引擎当成失败上报，
+        界面一边出完整结果一边报错误。
+        """
+        eng, store = self._engine(blf_cfg, tmp_path)
+        chat = store.create_chat()
+        with open(_require("abs_dry100_dist_abn.blf"), "rb") as f:
+            store.add_file(chat, "abs_dry100_dist_abn.blf", f.read())
+        loader = eng._loader_for("x.blf")
+        real_load = loader.load
+
+        def load(path):
+            data = real_load(path)
+            loader.load_warnings.append(
+                "有报文 ID 同时出现在多个通道（网关转发或 ID 复用）：0x200@[0, 1]")
+            return data
+
+        monkeypatch.setattr(loader, "load", load)
+        added, digests = eng._analyze(chat, "abs_full_brake_dry_asphalt_100kph", None)
+        assert digests, "提示级事实不该让这一轮没有结果"
+        assert not [m for m in added if m.kind == "error"], [m.content for m in added]
+        items = [it for m in chat.messages if m.kind == "steps"
+                 for it in (m.data or {}).get("items", [])]
+        assert any(i["label"] == "识别提示（不影响结果）" for i in items), items
+
     def test_engine_without_blf_cfg_reports_error(self, tmp_path):
         """没配 BLF 时不崩：按文件报错并汇总，不产出分析结果。"""
         eng, store = self._engine(None, tmp_path)
