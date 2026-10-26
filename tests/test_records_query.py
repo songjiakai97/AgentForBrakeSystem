@@ -196,9 +196,70 @@ def test_tool_specs_expose_record_tools(cfg):
     q = specs["query_records"]["function"]["parameters"]["properties"]
     assert "file_id" in q and "condition_id" in q and "keyword" in q
     assert q["condition_id"]["enum"] == cfg.scope_conditions("abs")
+    r = specs["read_record"]["function"]["parameters"]
+    assert "record_id" in r["properties"] and r["required"] == ["record_id"]
     c = specs["compare_records"]["function"]["parameters"]["properties"]
     assert "vehicles" in c and "metric" in c
     assert set(c["metric"]["enum"]) == set(cfg.metrics)
+
+
+def test_read_record_card_from_cache(cfg, db):
+    """已分析的记录：卡片直接由库里的行拼，不重跑流水线。"""
+    svc = _svc(cfg, db)
+    rid = db["rows"]["4.1.1_20260801.blf"]["record_id"]
+    status, card = svc.read(rid)
+    assert status == "cached"
+    assert card["source"] == "record" and card["record_id"] == rid
+    assert card["vehicle"] == "carA" and card["condition_name"]
+    sample = card["samples"][0]
+    assert sample["run_index"] == 1
+    assert sample["window"]["t_start"] == 1.0 and sample["window"]["t_end"] == 4.0
+    distance = next(m for m in sample["metrics"] if m["name"] == "制动距离")
+    assert distance["value"] == 40.1 and distance["ok_range"]
+    missing = next(m for m in sample["metrics"] if m["status"] == "missing")
+    assert missing["missing_reason"] == "signal_absent"
+
+
+def test_read_payload_is_compact(cfg, db):
+    from brake_analyzer.records.query import read_payload
+
+    svc = _svc(cfg, db)
+    rid = db["rows"]["4.1.1_20260802.blf"]["record_id"]
+    status, card = svc.read(rid)
+    payload = read_payload(card, status)
+    assert payload["ok"] and payload["record_id"] == rid
+    metric = next(m for m in payload["samples"][0]["metrics"] if m["value"] is not None)
+    assert metric["value"] == 42.3 and metric["status"] == "abnormal"
+    # 回灌给模型的是数值摘要，不是原始序列
+    assert "series" not in payload and "chart_option" not in payload
+
+
+def test_read_record_tool_emits_card_and_caps_reads(cfg, db, tmp_path):
+    from web.store import Store
+
+    store_ = Store(upload_dir=str(tmp_path / "up"))
+    chat = store_.create_chat()
+    engine = ChatEngine.__new__(ChatEngine)
+    engine.cfg = cfg
+    engine.records = _svc(cfg, db)
+    engine.store = store_
+
+    rid = db["rows"]["4.1.1_20260801.blf"]["record_id"]
+    budget = {"n": 0}
+    msgs, payload = engine._read_record_tool(chat, {"record_id": rid}, budget)
+    assert payload["ok"] and payload["record_id"] == rid
+    assert len(msgs) == 1 and msgs[0].kind == "analysis_result"
+    assert msgs[0].data["source"] == "record"
+    assert "record_id" in msgs[0].data and "制动距离" in msgs[0].content
+
+    # 未知记录：返回说明而不是抛异常
+    _, bad = engine._read_record_tool(chat, {"record_id": "rec_nope"}, budget)
+    assert bad["ok"] is False and "失败" in bad["hint"]
+
+    # 每轮上限：budget 用尽后直接拒绝，不再解析
+    budget["n"] = ChatEngine.MAX_READS_PER_TURN
+    msgs, over = engine._read_record_tool(chat, {"record_id": rid}, budget)
+    assert msgs == [] and over["ok"] is False and "本轮已读取" in over["hint"]
 
 
 def test_step_label_and_hits(cfg, db):
@@ -215,3 +276,54 @@ def test_step_label_and_hits(cfg, db):
     label, detail, _ = ChatEngine._tool_step_label("compare_records", cmp_res)
     assert "2 条记录" in label and "1 个工况" in detail
     assert len(ChatEngine._step_hits("compare_records", cmp_res)) == 2
+
+
+class _RecordLlm:
+    """脚本化的两轮：先 query_records，再 read_record，最后给文本结论。"""
+
+    def __init__(self, record_id):
+        self.available = True
+        self.record_id = record_id
+        self.calls = 0
+
+    def chat_stream(self, messages, tools=None, **kw):
+        from brake_analyzer.llm.client import LlmReply
+
+        self.calls += 1
+        if self.calls == 1:
+            yield {"type": "finish", "reply": LlmReply(tool_calls=[
+                {"id": "c1", "name": "query_records", "arguments": {"file_id": "4.1.3"}}])}
+        elif self.calls == 2:
+            yield {"type": "finish", "reply": LlmReply(tool_calls=[
+                {"id": "c2", "name": "read_record",
+                 "arguments": {"record_id": self.record_id}}])}
+        else:
+            yield {"type": "finish", "reply": LlmReply(content="曲线已展示，实测值见卡片。")}
+
+    def complete_json(self, system, user, **kw):
+        return None
+
+
+def test_engine_loop_displays_record_card(cfg, db, tmp_path):
+    """模型自己串两步：查记录 → 读记录，对话里出现 analysis_result 卡片。"""
+    from brake_analyzer.llm.kb import KnowledgeBase
+    from web.store import Store
+
+    rid = db["rows"]["4.1.3.1_20260801.blf"]["record_id"]
+    store_ = Store(upload_dir=str(tmp_path / "up"))
+    engine = ChatEngine(cfg, _RecordLlm(rid),
+                        KnowledgeBase(os.path.join(ROOT, "knowledge")), store_,
+                        records=_svc(cfg, db))
+    chat = store_.create_chat()
+    state = {"claimed": False, "failed": False}
+    list(engine._run_llm_stream(chat, "查一下 4.1.3 并展示", state))
+
+    cards = [m for m in chat.messages if m.kind == "analysis_result"]
+    assert len(cards) == 1
+    card = cards[0]
+    assert card.data["source"] == "record" and card.data["record_id"] == rid
+    assert card.data["samples"] and card.data["samples"][0]["window"]
+    assert state["claimed"] and not state["failed"]
+    # 卡片只带数值与窗口，原始序列不进卡片也不进上下文
+    assert "chart_option" not in card.data
+    assert not any("series" in (m.meta or {}) for m in chat.messages)

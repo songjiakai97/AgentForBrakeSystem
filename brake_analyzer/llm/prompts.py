@@ -43,6 +43,10 @@ SYSTEM_CHAT = """你是制动系统测试数据分析与标定指导助手，服
   query_records / compare_records 查记录库（只读，不会顺带重算）。结果里的数值
   可直接引用；每条记录带 record_id，前端会据此出「整段曲线 + 窗口高亮」，你不要
   用文字描述曲线。条件不明确时先问编号/车型/工况，不要跨工况拼对比；
+- 用户要看某条记录的数据/曲线（「查一下 4.1.1 并展示」）时，先用 query_records
+  拿到 record_id，再对命中那条调用 read_record 读取并展示曲线。一次只读一条；
+  命中多条时不要一次性全读（每轮最多 read_record 3 次），先列出来问用户看哪条；
+  同工况多车型横向对比用 compare_records，不要用多张 read_record 代替；
 - 回答使用简体中文，简洁、面向工程师。"""
 
 
@@ -297,6 +301,32 @@ def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> L
                         "function_key": {"type": "string", "enum": fn_keys},
                         "limit": {"type": "integer", "description": "最多返回条数，1~50"},
                     },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_record",
+                "description": (
+                    "读取一条试验记录的原始数据并展示曲线（整段过程 + 事件窗口高亮）："
+                    "未分析的记录会先惰性分析。返回窗口、指标实测值与规则结论。"
+                    "用户要看某条记录的数据/曲线时用；record_id 必须先用 query_records "
+                    "查到。一次只读一条，看多条时分别调用（同一轮最多 3 条）。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "record_id": {
+                            "type": "string",
+                            "description": "记录 id（rec_ 开头），来自 query_records 的结果",
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "强制重算（用户要求重新解析时置 true）；默认用缓存",
+                        },
+                    },
+                    "required": ["record_id"],
                 },
             },
         },

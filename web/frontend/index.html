@@ -1146,9 +1146,16 @@ createApp({
     scroll(){ const el=this.$refs.msgs; if(el) el.scrollTop=el.scrollHeight; },
     toggle(key){ this.opened[key]=!this.opened[key]; },
     // ------------------------------------------------ 图表：多 grid 共享 x 轴
-    async showChart(s){
-      this.chartTitle=`${s.file_name} · run ${s.run_index}`;
-      const r=await fetch(`/api/analyses/${s.sample_id}/timeseries`);
+    async showChart(s, m){
+      // 记录库卡片与上传文件的分析卡片共用这套覆盖层，数据源不同：
+      // 记录看「整段 + 窗口高亮」，上传文件看「裁剪到窗口」
+      const rec = (m && m.data && m.data.source==='record') ? m.data : null;
+      this.chartTitle = rec
+        ? `${rec.vehicle ? rec.vehicle+' · ' : ''}${rec.file_name}`
+        : `${s.file_name} · run ${s.run_index}`;
+      const url = rec ? `/api/records/${rec.record_id}/timeseries`
+                      : `/api/analyses/${s.sample_id}/timeseries`;
+      const r=await fetch(url);
       if(!r.ok){ alert((await r.json()).detail||'无法获取时序'); return; }
       const data = await r.json();
       this.chartData=Vue.markRaw(data);

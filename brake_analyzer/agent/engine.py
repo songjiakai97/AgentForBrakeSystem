@@ -38,7 +38,7 @@ from ..llm.prompts import (
 )
 from ..mcp_bridge import NO_HUB
 from ..pipeline import NoDataError, analyze_signals
-from ..records.query import records_compare, records_query
+from ..records.query import read_payload, records_compare, records_query
 from ..schemas import AnalysisResult
 
 log = logging.getLogger(__name__)
@@ -274,6 +274,9 @@ class ChatEngine:
         messages, step = self._fit_context(chat, raw)
         if step is not None:
             yield self._mevent(step)
+        # 本轮 read_record 次数上限：每读一条都是一次全量解码，不能让一句话
+        # 触发十几个文件并发解析；计数按轮次作用域，不跨会话共享
+        read_budget = {"n": 0}
         exec_tools = {
             # 结构化槽位解析（§13）：命中与否由配置唯一键决定，不靠工况名相似度
             "resolve_condition": lambda args: resolve_condition(
@@ -303,9 +306,10 @@ class ChatEngine:
                 chat, args.get("condition_id"), args.get("profile"), stop_event,
                 file_indexes=args.get("file_indexes"),
             ),
-            # 记录库只读工具（§17.5）：不做隐式重算，避免一次对话顺带解析十几个文件
+            # 记录库工具（§17.5）：query/compare 只读；read 才会惰性解析并出曲线卡片
             "query_records": lambda args: self._record_tool(
                 records_query, args, chat.selected_function),
+            "read_record": lambda args: self._read_record_tool(chat, args, read_budget),
             "compare_records": lambda args: self._record_tool(
                 records_compare, args, chat.selected_function),
         }
@@ -469,6 +473,22 @@ class ChatEngine:
                             yield self._mevent(self._step_on(chat, [
                                 (f"{name} 完成", f"生成 {len(msgs)} 条消息 · {len(digests)} 份结果",
                                  "ok" if digests else "warn")]))
+                        elif name == "read_record":
+                            msgs, payload = (result if isinstance(result, tuple)
+                                             else ([], result))
+                            for m in msgs:
+                                state["claimed"] = True
+                                yield self._mevent(m)
+                            ok = bool(payload.get("ok"))
+                            detail = (
+                                f"{payload.get('vehicle') or ''} · {payload.get('file_id') or ''}"
+                                f" · {payload.get('condition_name') or ''}"
+                                if ok else (payload.get("hint") or "读取失败"))
+                            if ok:
+                                detail += f" · {len(payload.get('samples') or [])} 个样本"
+                            yield self._mevent(self._step_on(chat, [(
+                                f"{name} 读取记录并展示曲线", detail[:300],
+                                "ok" if ok else "warn")]))
                         else:
                             payload = result
                             res = result if isinstance(result, dict) else {}
@@ -932,6 +952,33 @@ class ChatEngine:
             log.exception("记录库查询失败")
             return {"ok": False, "hint": f"记录库查询失败: {type(e).__name__}: {e}"}
 
+    MAX_READS_PER_TURN = 3
+
+    def _read_record_tool(self, chat, args: dict, budget: dict):
+        """读一条记录并在对话里展示曲线（§17.5）。
+
+        返回 (消息列表, 给模型的精简载荷)。卡片复用 `analysis_result`——记录的
+        分析结果与上传文件同构，区别只是 `data.source=record`，前端据此改走
+        `/api/records/{id}/timeseries`（整段曲线 + 窗口高亮，不裁剪到窗口）。
+        """
+        if self.records is None:
+            return [], {"ok": False, "hint": "记录库未启用（未配置 RECORDS_DB）"}
+        rid = str(args.get("record_id") or "").strip()
+        if not rid:
+            return [], {"ok": False,
+                        "hint": "缺少 record_id：先用 query_records 查到记录再读取"}
+        if budget["n"] >= self.MAX_READS_PER_TURN:
+            return [], {"ok": False,
+                        "hint": f"本轮已读取 {self.MAX_READS_PER_TURN} 条记录；"
+                                "要看更多请先让用户选一条，或下一轮再读"}
+        budget["n"] += 1
+        try:
+            status, card = self.records.read(rid, force=bool(args.get("force")))
+        except Exception as e:      # 单条读取失败不该带崩整轮
+            log.warning("读取记录失败 %s: %s", rid, e)
+            return [], {"ok": False, "hint": f"读取失败：{type(e).__name__}: {e}"}
+        return [self._card_msg(chat, card)], read_payload(card, status)
+
     def _list_files_tool(self, chat, file_index) -> dict:
         """文件清单工具：不带参数纯清单（不加载信号）；带 file_index 加载后给通道名。"""
         latest = {f.file_id for f in chat.latest_batch()}
@@ -1130,17 +1177,33 @@ class ChatEngine:
         )
 
     def _analysis_msg(self, chat, res: AnalysisResult):
-        d = res.to_dict()
-        n_bad = sum(1 for s in res.samples for m in s.metrics if m.status in ("abnormal", "missing"))
+        return self._card_msg(chat, res.to_dict())
+
+    def _card_msg(self, chat, d: dict):
+        """analysis_result 卡片：上传文件的分析与记录库的读取共用同一种卡片。
+
+        两种来源的形状一致（`AnalysisResult.to_dict()`），区别只在 `data.source`：
+        记录库的曲线走 `/api/records/{record_id}/timeseries`（整段 + 窗口高亮），
+        上传文件的走 `/api/analyses/{sample_id}/timeseries`（裁剪到窗口）。
+        """
+        samples = d.get("samples") or []
+        n_bad = sum(1 for s in samples for m in s.get("metrics") or []
+                    if m.get("status") in ("abnormal", "missing"))
         # 「没切出事件」必须在卡片标题就说明：否则卡片读起来像「1 个样本，指标全缺失」，
         # 用户和模型都会把它当成通道没采到，而真实原因是这趟试验没做出来（§10.1）。
-        no_event = sum(1 for s in res.samples
-                       if any(m.missing_reason == "no_valid_event" for m in s.metrics))
+        no_event = sum(1 for s in samples
+                       if any(m.get("missing_reason") == "no_valid_event"
+                              for m in s.get("metrics") or []))
+        lead = (f"记录「{d.get('file_name')}」· 工况「{d.get('condition_name') or d.get('condition_id')}」："
+                if d.get("source") == "record" else
+                f"工况「{d.get('condition_name') or d.get('condition_id')}」分析完成：")
         head = (
-            f"工况「{res.condition_name}」分析完成：{len(res.samples)} 个事件样本"
+            lead
+            + f"{len(samples)} 个事件样本"
             + (f"，{n_bad} 项异常/缺失" if n_bad else "，全部达标")
             + (f"；其中 {no_event} 份未切出有效事件窗口（非信号缺失）" if no_event else "")
-            + ("（LLM 建议不可用，仅规则结论）" if res.degraded else "")
+            + ("（LLM 建议不可用，仅规则结论）" if d.get("degraded") else "")
+            + (f"；{d['note']}" if d.get("note") else "")
         )
         # 正文带上数值+判定：卡片 kind 不是 text，默认不回灌 prompt，
         # 后续轮次追问"实测多少"时模型只能看到这一行（is_injected 放行 analysis_result）

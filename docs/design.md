@@ -2360,12 +2360,21 @@ import_batch(batch_id PK, started_at, root, config_fingerprint, 各计数, note)
 | 工具 | 用途 | 关键口径 |
 | --- | --- | --- |
 | `query_records` | 按编号/关键词/工况/车型列记录 | 只读；未分析的记录只标状态，不触发解析 |
+| `read_record` | 读一条记录并在对话里出曲线卡片 | 未分析才惰性解析；每轮最多 3 条 |
 | `compare_records` | 同一工况下按车型横向对比 | 只比已分析记录；未分析的列进 `not_analyzed` |
 
 编号、车型、关键词都按「包含」匹配（SQL `LIKE '%kw%'`，`%`/`_` 转义为字面量）：
 用户只记得片段（「4.1」「carB」）时也应命中，而不是回一句「没有这条记录」。
 `keyword` 跨 编号/车型/文件名/相对路径 做 OR，用于记不清归类时的模糊搜索。
 `condition_id` 仍要求精确（它来自配置，模糊匹配会让对比跨工况）。
+
+「查询并展示」由模型两步完成：`query_records` 拿 `record_id` → `read_record` 读取。
+`read_record` 复用 `analysis_result` 卡片（记录的分析结果与上传文件同构），
+只在 `data` 上多带 `source=record` + `record_id`；前端据此把曲线请求从
+`/api/analyses/{sample_id}/timeseries` 改到 `/api/records/{id}/timeseries`
+——记录看**整段过程 + 窗口高亮**，上传文件仍裁剪到窗口。
+每读一条都是一次全量解码，所以引擎按轮次限 3 条（`MAX_READS_PER_TURN`），
+超出直接拒绝并让用户先选；模型拿到的仍只是数值摘要，原始序列不进上下文。
 
 返回里每条记录都带 `record_id`，前端据此出「整段曲线 + 窗口高亮」；模型只引用数值，
 不描述曲线。指标汇总口径：同一文件多个事件样本取均值，同时给 `min/max/n`；

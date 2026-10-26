@@ -113,12 +113,51 @@ def records_query(
             "db_stats": store.status_counts(conn),
         }
         if not items:
-            result["hint"] = "库里没有符合条件的记录；可先确认编号/车型/工况是否已导入"
+            result["hint"] = ("库里没有匹配的记录；编号/车型可以只写片段，"
+                              "也可以换关键词（文件名片段也行）")
             result["vehicles"] = store.distinct(conn, "vehicle")
             result["file_ids"] = store.distinct(conn, "file_id")
         return result
     finally:
         conn.close()
+
+
+def read_payload(card: dict, status: str) -> dict:
+    """把卡片数据压成给模型看的一小份（实测值 + 规则结论）。
+
+    曲线本身只给前端：模型拿不到也画不出，回灌原始序列只会把上下文撑爆。
+    """
+    samples = []
+    for s in card.get("samples") or []:
+        metrics = []
+        for m in s.get("metrics") or []:
+            item = {"name": m.get("name"), "value": m.get("value"),
+                    "unit": m.get("unit"), "status": m.get("status"),
+                    "ok_range": m.get("ok_range")}
+            if m.get("missing_reason"):
+                item["missing_reason"] = m["missing_reason"]
+            metrics.append(item)
+        samples.append({
+            "run_index": s.get("run_index"),
+            "window": s.get("window"),
+            "metrics": metrics,
+            "verdicts": [v.get("message") for v in s.get("verdicts") or []][:5],
+        })
+    payload = {
+        "ok": status in ("cached", "analyzed"),
+        "status": status,
+        "record_id": card.get("record_id"),
+        "vehicle": card.get("vehicle"),
+        "file_id": card.get("file_id"),
+        "file_name": card.get("file_name"),
+        "condition_id": card.get("condition_id"),
+        "condition_name": card.get("condition_name"),
+        "samples": samples,
+        "note": "曲线已展示给用户；回答实测值直接引用 samples，不要让用户自己找图。",
+    }
+    if not payload["ok"]:
+        payload["hint"] = card.get("note") or "这条记录没有可用的分析结果（解析失败或文件缺失）"
+    return payload
 
 
 def records_compare(
