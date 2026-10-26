@@ -802,8 +802,10 @@ def api_analysis_timeseries(analysis_id: str, signal: Optional[str] = Query(None
     window = None
     if is_valid(sample.window):
         window = (sample.window.t_start, sample.window.t_end)
-    names = [signal] if signal else None
-    layout = CFG.chart_layout if not names else None
+    # 默认只画该功能关心的通道（ABS 不画 TCS_Active），分组仍按 signals.yaml
+    fn = CFG.function(res.function_key)
+    names = [signal] if signal else (list(fn.signals) if fn and fn.signals else None)
+    layout = CFG.chart_layout
     payload = timeseries_payload(sess.signals, window=window, series_names=names, layout=layout)
     payload["file_name"] = sample.file_name
     payload["chart_option"] = build_chart_option(

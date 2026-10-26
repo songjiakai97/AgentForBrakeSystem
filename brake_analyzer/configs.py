@@ -16,6 +16,7 @@ from .events.segment import (
     SPEED_SPAN_METRICS,
     SPEED_SPAN_SEGMENTERS,
 )
+from .records.naming import FileIdIndex, build_index, is_valid_file_id
 from .schemas import ConditionConfig, FunctionConfig, MetricTemplate, RuleConfig
 
 SEVERITIES = {"info", "low", "high", "critical"}
@@ -188,6 +189,8 @@ class AppConfigs:
     required_signals: List[str] = field(default_factory=list)
     # 逻辑信号登记表（signals.yaml）：名称 → {description, unit}
     signal_registry: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # 试验编号索引（conditions.yaml 的 file_ids → condition_id），文件名匹配见 §17
+    file_ids: Optional[FileIdIndex] = None
 
     # ---- 查询辅助 ----
     def function(self, key: str) -> Optional[FunctionConfig]:
@@ -195,6 +198,17 @@ class AppConfigs:
 
     def condition(self, cid: str) -> Optional[ConditionConfig]:
         return self.conditions.get(cid)
+
+    def condition_by_file_id(self, file_id: str) -> Optional[ConditionConfig]:
+        """编号 → 工况；`4-1-1` 与 `4.1.1` 等价。"""
+        if self.file_ids is None:
+            return None
+        cid = self.file_ids.condition_id(file_id)
+        return self.conditions.get(cid) if cid else None
+
+    def match_file_id(self, filename: str) -> Optional[str]:
+        """按文件名前缀取编号；不认编号的文件返回 None（导入时跳过）。"""
+        return self.file_ids.match(filename) if self.file_ids is not None else None
 
     def conditions_of(self, function_key: str) -> List[ConditionConfig]:
         return [self.conditions[c] for c in self.conditions_by_function.get(function_key, [])]
@@ -356,6 +370,12 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             parts = [t.strip() for t in str(p).split("|") if t.strip()]
             dims.append(parts)
             profiles.extend(t for t in parts if t not in profiles)
+        sig_list = [str(s) for s in (item.get("signals") or [])]
+        if len(set(sig_list)) != len(sig_list):
+            raise ConfigError(f"功能 {key} 的 signals 有重复项: {sig_list}")
+        unknown_sig = [s for s in sig_list if s not in logical_names]
+        if unknown_sig:
+            raise ConfigError(f"功能 {key} 的 signals 引用未登记信号: {unknown_sig}")
         cfg.functions[key] = FunctionConfig(
             key=key,
             name=item.get("name", key),
@@ -365,6 +385,7 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             description=item.get("description", ""),
             profiles=profiles,
             profile_dims=dims,
+            signals=sig_list,
         )
     fn_keys = set(cfg.functions)
 
@@ -374,6 +395,9 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             if sig not in logical_names:
                 raise ConfigError(
                     f"功能 {fn.key} 的分段器 {fn.segmenter} 读取未登记信号: {sig}")
+            if fn.signals and sig not in fn.signals:
+                raise ConfigError(
+                    f"功能 {fn.key} 的分段器 {fn.segmenter} 读取 {sig}，但它不在该功能的 signals 里")
             if sig not in cfg.required_signals:
                 cfg.required_signals.append(sig)
 
@@ -412,6 +436,7 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
     cond_raw = _load_yaml(os.path.join(config_dir, "conditions.yaml"))
     if not isinstance(cond_raw, dict):
         raise ConfigError("conditions.yaml 顶层必须是 {function_key: [condition, ...]}")
+    seen_file_ids: Dict[str, str] = {}
     for fkey, items in cond_raw.items():
         if fkey not in fn_keys:
             raise ConfigError(f"conditions.yaml 顶层键 '{fkey}' 不在 functions.yaml 中")
@@ -431,6 +456,18 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             if cond_seg and cond_seg not in SEGMENTERS:
                 raise ConfigError(
                     f"工况 {cid} 的 segmenter '{cond_seg}' 未注册，可用: {sorted(SEGMENTERS)}")
+            file_ids = item.get("file_ids") or []
+            if isinstance(file_ids, str):
+                raise ConfigError(f"工况 {cid} 的 file_ids 必须是列表，不能写成字符串")
+            file_ids = [str(x).strip() for x in file_ids]
+            for fid in file_ids:
+                if not is_valid_file_id(fid):
+                    raise ConfigError(
+                        f"工况 {cid} 的 file_id '{fid}' 格式非法：只允许数字和点，如 4.1.1")
+                if fid in seen_file_ids:
+                    raise ConfigError(
+                        f"file_id '{fid}' 同时挂在工况 {seen_file_ids[fid]} 和 {cid} 上")
+                seen_file_ids[fid] = cid
             eff_seg = cond_seg or fn.segmenter
             if eff_seg not in SPEED_SPAN_SEGMENTERS:
                 # 窗口不再是整段速度区间，「窗口时长 = 加速时间」「窗口起止
@@ -468,6 +505,7 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
                 maneuver=item.get("maneuver", ""),
                 surface_code=item.get("surface_code", ""),
                 segmenter=cond_seg,
+                file_ids=file_ids,
                 params=dict(item.get("params") or {}),
                 metrics=metrics,
                 metric_index=build_metric_index(metrics),
@@ -495,14 +533,34 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
     # 工况级分段器覆盖的通道同样是计算必需：对接路面用 ABS_Active 切窗，
     # 缺这条通道就不是判定偏严，而是根本切不出窗口。
     for cond in cfg.conditions.values():
+        fn = cfg.functions[cond.function]
+        # 指标要用的通道也必须在功能 signals 里：漏写会让图能画、指标却算不出
+        if fn.signals:
+            for entry in cond.metrics:
+                tmpl = cfg.metrics.get(entry.get("key"))
+                if tmpl is None:
+                    continue
+                outside = [i for i in tmpl.inputs if i not in fn.signals]
+                if outside:
+                    raise ConfigError(
+                        f"工况 {cond.id} 的指标 {tmpl.key} 需要 {outside}，"
+                        f"但它们不在功能 {fn.key} 的 signals 里")
         if not cond.segmenter:
             continue
         for sig in SEGMENTER_SIGNALS.get(cond.segmenter, []):
             if sig not in logical_names:
                 raise ConfigError(
                     f"工况 {cond.id} 的分段器 {cond.segmenter} 读取未登记信号: {sig}")
+            if fn.signals and sig not in fn.signals:
+                raise ConfigError(
+                    f"工况 {cond.id} 的分段器 {cond.segmenter} 读取 {sig}，"
+                    f"但它不在功能 {fn.key} 的 signals 里")
             if sig not in cfg.required_signals:
                 cfg.required_signals.append(sig)
+
+    # 编号索引：文件 → 编号 → 工况（§17）。重复编号在解析条件时已拦下。
+    cfg.file_ids = build_index(
+        (fid, cid) for cid, cond in cfg.conditions.items() for fid in cond.file_ids)
 
     # ---- rules.yaml ----
     rules_raw = _load_yaml(os.path.join(config_dir, "rules.yaml"))

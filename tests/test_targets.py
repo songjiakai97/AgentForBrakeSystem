@@ -72,6 +72,7 @@ def test_config_rejects_ambiguous_slot(tmp_path):
     data = yaml.safe_load(p.read_text(encoding="utf-8"))
     dup = json.loads(json.dumps(data["abs"][0], default=str))
     dup["id"] = "abs_duplicate_slot"
+    dup.pop("file_ids", None)        # 编号不参与本用例
     data["abs"].append(dup)
     p.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
     with pytest.raises(ConfigError) as e:
@@ -88,6 +89,7 @@ def test_config_rejects_missing_slot_fields(tmp_path):
     data = yaml.safe_load(p.read_text(encoding="utf-8"))
     bad = json.loads(json.dumps(data["abs"][0], default=str))
     bad["id"] = "abs_no_surface"
+    bad.pop("file_ids", None)        # 编号不参与本用例
     bad["surface_code"] = ""
     data["abs"].append(bad)
     p.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")

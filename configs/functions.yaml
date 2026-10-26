@@ -3,6 +3,10 @@
 #   - 平铺标签列表：[4WD, 2WD]
 #   - 维度串（同维度用 | 分隔）：["4WD|2WD", "DTCS|TCS"]
 #     维度串仅用于前端按维度渲染下拉；校验与索引使用展平后的标签。
+#
+# signals：本功能要看的逻辑信号（有序）。用于图表只画相关通道（ABS 不画
+# TCS_Active，TCS 不画 BrakePedalPos），并校验该功能指标的 inputs 与切窗
+# 通道都在其中——漏写会让图能画但算不出值。
 functions:
   - key: abs
     name: ABS 全力制动
@@ -10,6 +14,9 @@ functions:
     segmenter: seg_abs_full_brake
     kb_section: abs_manual
     description: 高/低附着路面的初速全力制动，评价横摆稳定性、制动距离与减速度能力
+    signals: [speed_vbox, distance_vbox, wheelSpeed_FL, wheelSpeed_FR,
+              wheelSpeed_RL, wheelSpeed_RR, yaw_rate, Ax,
+              BrakePedalPos, ABS_Active]
 
   - key: tcs
     name: TCS 全油门加速
@@ -18,3 +25,5 @@ functions:
     profiles: ["4WD|2WD", "DTCS|TCS"]
     kb_section: tcs_manual
     description: 低附路面起步全油门加速，评价横摆稳定性、加速能力与驱动轮打滑量
+    signals: [speed_vbox, wheelSpeed_FL, wheelSpeed_FR, wheelSpeed_RL,
+              wheelSpeed_RR, yaw_rate, Ax, ThrottlePedalPos, TCS_Active]

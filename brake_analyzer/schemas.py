@@ -36,6 +36,8 @@ class FunctionConfig:
     description: str = ""
     profiles: List[str] = field(default_factory=list)        # 展平后的全部单维标签
     profile_dims: List[List[str]] = field(default_factory=list)  # 维度串，如 [[4WD,2WD],[DTCS,TCS]]
+    # 本功能要看的逻辑信号（有序）：图表只画这些，指标 inputs 与切窗通道必须在其内
+    signals: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -47,6 +49,8 @@ class ConditionConfig:
     surface_code: str = ""
     # 覆盖功能级 segmenter；空 = 沿用 functions.yaml 的模板。
     segmenter: str = ""
+    # 试验大纲编号（4.1.1 这类）；一个工况可有多个（对开路面左右各一）
+    file_ids: List[str] = field(default_factory=list)
     params: Dict[str, Any] = field(default_factory=dict)
     metrics: List[Dict[str, Any]] = field(default_factory=list)
     # 加载期构建
