@@ -685,8 +685,8 @@ class BlfConfigs:
     """signals_blf.yaml 的校验结果；dbc 已解析为绝对路径，可直接喂 BLFLoader。
 
     channels 为 None 表示自动识别（`channels: auto`）；否则是显式的
-    {通道号: 总线名}。buses[name]["unavailable"] 记录因 ${ENV} 未设置而跳过的
-    DBC 原始写法，只用于日志，不参与解析。
+    {通道号: 总线名}。buses[name]["dbcs"] 是 {DBC 别名: 绝对路径}，
+    ["unavailable"] 是因 ${ENV} 未设置而跳过的别名（识别照常，解码不了）。
     """
     buses: Dict[str, Dict[str, Any]]
     signal_maps: Dict[str, Dict[str, Any]]
@@ -724,40 +724,64 @@ def _expand_env(path: str) -> Optional[str]:
 
 
 def _parse_buses(raw: Any, config_dir: str) -> Dict[str, Dict[str, Any]]:
+    """buses: {总线: {label, dbcs: {DBC 别名: 路径}}}。
+
+    别名是 DBC 的身份（信号名属于某份 DBC，不属于总线），候选三元组写别名；
+    一条总线可以持有多个别名。别名必须全局唯一，否则「这个别名属于哪条总线」
+    就没有答案，通道识别也就无从谈起。
+    """
     if not isinstance(raw, dict) or not raw:
         raise ConfigError("signals_blf.yaml 缺少非空 buses 段")
     buses: Dict[str, Dict[str, Any]] = {}
+    owner: Dict[str, str] = {}
     for name, info in raw.items():
         if not isinstance(info, dict):
-            raise ConfigError(f"buses.{name} 必须是映射（label + dbc）")
-        extra = set(info) - {"label", "dbc"}
+            raise ConfigError(f"buses.{name} 必须是映射（label + dbcs）")
+        extra = set(info) - {"label", "dbcs"}
         if extra:
             raise ConfigError(f"buses.{name} 不支持字段 {sorted(extra)}")
-        dbcs = info.get("dbc")
-        if dbcs is None:
-            dbcs = []
-        elif isinstance(dbcs, str):
-            dbcs = [dbcs]
-        elif not isinstance(dbcs, list):
-            raise ConfigError(f"buses.{name}.dbc 必须是路径或路径列表")
-        paths: List[str] = []
+        raw_dbcs = info.get("dbcs")
+        if raw_dbcs is None:
+            raw_dbcs = {}
+        if not isinstance(raw_dbcs, dict):
+            raise ConfigError(
+                f"buses.{name}.dbcs 必须是 {{DBC 别名: 路径}} 映射，实际: {raw_dbcs!r}")
+        dbcs: Dict[str, str] = {}
         unavailable: List[str] = []
-        for item in dbcs:
+        for alias, item in raw_dbcs.items():
+            if not isinstance(alias, str) or not alias.strip():
+                raise ConfigError(f"buses.{name}.dbcs 的别名必须是非空字符串: {alias!r}")
+            alias = alias.strip()
+            if alias in owner:
+                raise ConfigError(
+                    f"DBC 别名 {alias} 重复（buses.{owner[alias]} 与 buses.{name}）"
+                    "：一个别名只能属于一条总线")
+            owner[alias] = name
             if not isinstance(item, str) or not item.strip():
-                raise ConfigError(f"buses.{name}.dbc 的条目必须是非空路径: {item!r}")
+                raise ConfigError(f"buses.{name}.dbcs.{alias} 必须是非空路径")
             item = item.strip()
             expanded = _expand_env(item)
             if expanded is None:
-                unavailable.append(item)
+                unavailable.append(alias)
                 continue
             real = _resolve_config_path(expanded, config_dir)
             if not os.path.exists(real):
-                raise ConfigError(f"buses.{name} 的 DBC 文件不存在: {item}")
-            if real not in paths:
-                paths.append(real)      # 同一份库写两遍不重复加载
+                raise ConfigError(f"DBC {alias} 的文件不存在: {item}")
+            dbcs[alias] = real
         buses[name] = {"label": str(info.get("label") or name),
-                       "dbcs": paths, "unavailable": unavailable}
+                       "dbcs": dbcs, "unavailable": unavailable}
     return buses
+
+
+def dbc_alias_bus(buses: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+    """DBC 别名 → 所属总线；包含因 ${ENV} 未设置而没加载的别名。"""
+    out: Dict[str, str] = {}
+    for bus, info in buses.items():
+        for alias in info.get("dbcs", {}):
+            out[alias] = bus
+        for alias in info.get("unavailable", []):
+            out.setdefault(alias, bus)
+    return out
 
 
 def _parse_channels(raw: Any, buses: Dict[str, Any]) -> Optional[Dict[int, str]]:
@@ -836,6 +860,8 @@ def load_blf_config(config_dir: str = "configs",
     channels = _parse_channels(raw.get("channels"), buses)
     detect = _parse_detect(raw.get("channel_detect"))
 
+    alias_bus = dbc_alias_bus(buses)
+
     signal_maps = raw.get("signal_maps")
     if not isinstance(signal_maps, dict) or not signal_maps:
         raise ConfigError("signals_blf.yaml 缺少非空 signal_maps 段")
@@ -847,10 +873,12 @@ def load_blf_config(config_dir: str = "configs",
         for cand in spec["candidates"]:
             if not isinstance(cand, (list, tuple)) or len(cand) != 3:
                 raise ConfigError(
-                    f"信号 {name} 的候选必须是 [bus, msg_id, signal_name] 三元组: {cand}")
-            bus, msg_id, _sig = cand
-            if bus not in buses:
-                raise ConfigError(f"信号 {name} 的候选 bus 不在 buses: {bus}")
+                    f"信号 {name} 的候选必须是 [dbc_alias, msg_id, signal_name] 三元组: {cand}")
+            dbc, msg_id, _sig = cand
+            if dbc not in alias_bus:
+                raise ConfigError(
+                    f"信号 {name} 的候选 DBC 别名不在 buses.*.dbcs: {dbc}"
+                    f"（已声明: {sorted(alias_bus)}）")
             if isinstance(msg_id, bool) or not isinstance(msg_id, (str, int)):
                 raise ConfigError(f"信号 {name} 的 msg_id 必须是字符串或 int: {msg_id!r}")
             if isinstance(msg_id, str) and not _MSG_ID_RE.match(msg_id.strip()):
@@ -858,8 +886,9 @@ def load_blf_config(config_dir: str = "configs",
                     f"信号 {name} 的 msg_id 非法: {msg_id!r}（约定 \"0x123\" 标准帧、"
                     "\"0x123x\" 扩展帧）")
 
-    # 显式绑定只允许落在有候选的总线上：绑了却没人引用，多半是改名后漏改
-    used_buses = {c[0] for spec in signal_maps.values() for c in spec["candidates"]}
+    # 每条总线至少要有一个候选引用它的某个 DBC：没有候选就既识别不了也解不了码
+    used_buses = {alias_bus[c[0]] for spec in signal_maps.values()
+                  for c in spec["candidates"]}
     orphan = sorted(set(buses) - used_buses)
     if orphan:
         raise ConfigError(

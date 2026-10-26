@@ -16,6 +16,7 @@ import can
 import cantools
 import numpy as np
 
+from ..configs import dbc_alias_bus
 from .base import Loader, SignalData, _parse_msg_id
 from .blf_channels import identify
 
@@ -40,13 +41,16 @@ class BLFLoader(Loader):
         # 比报错更危险，所以保留部分数据但必须把中断事实暴露给调用方
         self.load_errors: list = []
 
-        # DBC 在构造期解析：坏库/路径错在启动时就暴露，而不是等第一次分析；
-        # 同一份库被多条总线引用时只解析一次
-        self._db_by_path: Dict[str, Any] = {}
+        # DBC 在构造期解析：坏库/路径错在启动时就暴露，而不是等第一次分析。
+        # 按别名建索引（候选写的是别名）；同一路径被两个别名引用时只解析一次
+        self._db_by_alias: Dict[str, Any] = {}
+        by_path: Dict[str, Any] = {}
         for info in self.buses.values():
-            for path in info.get("dbcs", []):
-                if path not in self._db_by_path:
-                    self._db_by_path[path] = cantools.database.load_file(path)
+            for alias, path in info.get("dbcs", {}).items():
+                if path not in by_path:
+                    by_path[path] = cantools.database.load_file(path)
+                self._db_by_alias[alias] = by_path[path]
+        self._alias_bus = dbc_alias_bus(self.buses)
 
         # 识别结果按「文件 stat + 路径」缓存：引擎会复用同一个 loader 实例，
         # 同一文件常常要被连算两次（分析 + 出图）
@@ -64,7 +68,7 @@ class BLFLoader(Loader):
         key = self._stat_key(path)
         cached = self._channels_cache.get(key)
         if cached is None:
-            report = identify(path, list(self.buses), self.signal_maps,
+            report = identify(path, self.buses, self.signal_maps,
                               self.cfg.channel_detect)
             cached = (report.bus_channels(), report.warnings)
             self._channels_cache[key] = cached
@@ -76,33 +80,30 @@ class BLFLoader(Loader):
     def _resolve(self, bus_ch: Dict[str, int]) -> Dict[str, tuple]:
         """候选 → (bus, channel, msg_def, signal_name, signal_def)。
 
-        候选顺序优先，其次 DBC 声明顺序：一个逻辑信号只对应一个 (msg_def, signal)，
+        候选按书写顺序尝试，首个「别名所属总线已识别出通道，且该 DBC 里同时有
+        该帧与该信号」的候选胜出；一个逻辑信号只对应一个 (msg_def, signal)，
         不会因为两份 DBC 都定义了同一帧而重复出点。
         """
         resolved: Dict[str, tuple] = {}
         for logical_name, spec in self.signal_maps.items():
             for cand in spec.get("candidates", []):
-                bus, msg_id, sig_name = cand[0], cand[1], cand[2]
-                ch = bus_ch.get(bus)
-                if ch is None:
+                alias, msg_id, sig_name = cand[0], cand[1], cand[2]
+                bus = self._alias_bus.get(alias)
+                ch = bus_ch.get(bus) if bus is not None else None
+                db = self._db_by_alias.get(alias)
+                if ch is None or db is None:
                     continue
                 frame_id, is_ext = _parse_msg_id(msg_id)
-                for dbc_path in self.buses.get(bus, {}).get("dbcs", []):
-                    db = self._db_by_path.get(dbc_path)
-                    if db is None:
-                        continue
-                    try:
-                        msg_def = db.get_message_by_frame_id(
-                            frame_id, force_extended_id=is_ext)
-                    except KeyError:
-                        continue
-                    sig_def = next((s for s in msg_def.signals if s.name == sig_name), None)
-                    if sig_def is None:
-                        continue
-                    resolved[logical_name] = (bus, ch, msg_def, sig_name, sig_def)
-                    break
-                if logical_name in resolved:
-                    break
+                try:
+                    msg_def = db.get_message_by_frame_id(
+                        frame_id, force_extended_id=is_ext)
+                except KeyError:
+                    continue
+                sig_def = next((s for s in msg_def.signals if s.name == sig_name), None)
+                if sig_def is None:
+                    continue
+                resolved[logical_name] = (bus, ch, msg_def, sig_name, sig_def)
+                break
         return resolved
 
     def load(self, file_path: str) -> Dict[str, SignalData]:

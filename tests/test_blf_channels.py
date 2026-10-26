@@ -15,6 +15,7 @@ cantools = pytest.importorskip("cantools")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = os.path.join(ROOT, "configs")
+DEMO_DBC = os.path.join(CONFIG_DIR, "dbc", "brake_demo.dbc")
 
 DBC_A = """VERSION "test"
 
@@ -32,9 +33,9 @@ BO_ 513 MSG_B2: 8 ECU_B
 """
 
 MAPS = {
-    "a_val": {"candidates": [["EC", "0x200", "A_val"]]},
-    "b_val": {"candidates": [["BODY", "0x200", "B_val"]]},
-    "b_other": {"candidates": [["BODY", "0x201", "B_other"]]},
+    "a_val": {"candidates": [["A_DBC", "0x200", "A_val"]]},
+    "b_val": {"candidates": [["B_DBC", "0x200", "B_val"]]},
+    "b_other": {"candidates": [["B_DBC", "0x201", "B_other"]]},
 }
 
 
@@ -61,13 +62,16 @@ def _write_blf(path, frames):
     return str(path)
 
 
+def _buses(dbc_a, dbc_b):
+    return {
+        "EC": {"label": "EC", "dbcs": {"A_DBC": dbc_a}, "unavailable": []},
+        "BODY": {"label": "BODY", "dbcs": {"B_DBC": dbc_b}, "unavailable": []},
+    }
+
+
 def _cfg(dbc_a, dbc_b, maps=None, **kw):
-    return BlfConfigs(
-        buses={"EC": {"label": "EC", "dbcs": [dbc_a], "unavailable": []},
-               "BODY": {"label": "BODY", "dbcs": [dbc_b], "unavailable": []}},
-        signal_maps=MAPS if maps is None else maps,
-        **kw,
-    )
+    return BlfConfigs(buses=_buses(dbc_a, dbc_b),
+                      signal_maps=MAPS if maps is None else maps, **kw)
 
 
 def _two_bus_frames(n=20):
@@ -88,8 +92,7 @@ class TestIdentify:
         from brake_analyzer.loaders import BLFLoader
 
         blf = _write_blf(tmp_path / "run.blf", _two_bus_frames())
-        cfg = _cfg(*dbcs)
-        data = BLFLoader(cfg).load(blf)
+        data = BLFLoader(_cfg(*dbcs)).load(blf)
         # 0x200 在两个通道都存在：A_val 只能来自 ch0，B_val 只能来自 ch1
         assert data["a_val"].values.tolist() == list(range(1, 21))
         assert data["b_val"].values.tolist() == [200 + i for i in range(20)]
@@ -111,7 +114,7 @@ class TestIdentify:
         from brake_analyzer.loaders.blf_channels import identify
 
         blf = _write_blf(tmp_path / "run.blf", _two_bus_frames())
-        report = identify(blf, ["EC", "BODY"], MAPS, ChannelDetect())
+        report = identify(blf, _buses(*dbcs), MAPS, ChannelDetect())
         assert report.bus_channels() == {"EC": 0, "BODY": 1}
         by_bus = {e.bus: e for e in report.evidence}
         assert by_bus["BODY"].hits == 2 and by_bus["BODY"].observed == 2
@@ -128,19 +131,11 @@ class TestIdentify:
         maps = {"a_val": MAPS["a_val"], "b_other": MAPS["b_other"]}
         frames = [(100.0 + i * 0.01, 0, 0x200, i) for i in range(10)]
         blf = _write_blf(tmp_path / "only_a.blf", frames)
-        report = identify(blf, ["EC", "BODY"], maps, ChannelDetect())
+        report = identify(blf, _buses(*dbcs), maps, ChannelDetect())
         status = {e.bus: e.status for e in report.evidence}
         assert status == {"EC": "matched", "BODY": "not_observed"}
         assert report.assignment == {0: "EC"}
         assert any("没有出现" in w for w in report.warnings)
-
-    def test_explicit_channels_skip_identification(self, dbcs, tmp_path):
-        from brake_analyzer.loaders.blf_channels import identify
-
-        # 显式绑定在 loader 层生效；identify 只负责 auto 分支
-        blf = _write_blf(tmp_path / "run.blf", _two_bus_frames())
-        report = identify(blf, ["EC", "BODY"], MAPS, ChannelDetect())
-        assert report.assignment[0] == "EC"
 
     def test_sampling_stops_early(self, dbcs, tmp_path):
         from brake_analyzer.loaders.blf_channels import scan
@@ -176,70 +171,91 @@ class TestBusesConfig:
         d = self._mini(tmp_path, f"""
 buses:
   CHASSIS:
-    dbc: {os.path.join(CONFIG_DIR, 'dbc', 'brake_demo.dbc')}
+    dbcs:
+      CHASSIS_MAIN: {DEMO_DBC}
   VBOX:
-    dbc: ${{NO_SUCH_DBC_VAR}}
+    dbcs:
+      VBOX_MAIN: ${{NO_SUCH_DBC_VAR}}
 channels: auto
 signal_maps:
   speed_vbox:
     candidates:
-      - [CHASSIS, "0x102", speed_vbox]
-      - [VBOX, "0x18FEF100x", speed]
+      - [CHASSIS_MAIN, "0x102", speed_vbox]
+      - [VBOX_MAIN, "0x18FEF100x", speed]
 """)
         cfg = load_blf_config(d)
-        assert cfg.buses["VBOX"]["dbcs"] == []
-        assert cfg.buses["VBOX"]["unavailable"] == ["${NO_SUCH_DBC_VAR}"]
-        assert cfg.buses["CHASSIS"]["dbcs"]
+        assert cfg.buses["VBOX"]["dbcs"] == {}
+        assert cfg.buses["VBOX"]["unavailable"] == ["VBOX_MAIN"]
+        assert cfg.buses["CHASSIS"]["dbcs"] == {"CHASSIS_MAIN": DEMO_DBC}
 
     def test_env_var_set_resolves(self, tmp_path, monkeypatch):
         from brake_analyzer.configs import load_blf_config
 
-        dbc = os.path.join(CONFIG_DIR, "dbc", "brake_demo.dbc")
-        monkeypatch.setenv("TEST_DBC_PATH", dbc)
+        monkeypatch.setenv("TEST_DBC_PATH", DEMO_DBC)
         d = self._mini(tmp_path, """
 buses:
   CHASSIS:
-    dbc: ${TEST_DBC_PATH}
+    dbcs:
+      CHASSIS_MAIN: ${TEST_DBC_PATH}
 signal_maps:
   speed_vbox:
     candidates:
-      - [CHASSIS, "0x102", speed_vbox]
+      - [CHASSIS_MAIN, "0x102", speed_vbox]
 """)
         cfg = load_blf_config(d)
-        assert cfg.buses["CHASSIS"]["dbcs"] == [dbc]
+        assert cfg.buses["CHASSIS"]["dbcs"] == {"CHASSIS_MAIN": DEMO_DBC}
 
-    def test_multiple_dbcs_keep_declared_order_and_dedupe(self, tmp_path):
+    def test_multiple_dbcs_per_bus_keep_order(self, tmp_path):
         from brake_analyzer.configs import load_blf_config
 
-        dbc = os.path.join(CONFIG_DIR, "dbc", "brake_demo.dbc")
         d = self._mini(tmp_path, f"""
 buses:
   CHASSIS:
-    dbc:
-      - {dbc}
-      - {dbc}
+    dbcs:
+      CHASSIS_MAIN: {DEMO_DBC}
+      CHASSIS_PRIV: {DEMO_DBC}
 signal_maps:
   speed_vbox:
     candidates:
-      - [CHASSIS, "0x102", speed_vbox]
+      - [CHASSIS_MAIN, "0x102", speed_vbox]
+      - [CHASSIS_PRIV, "0x102", speed_vbox]
 """)
         cfg = load_blf_config(d)
-        assert cfg.buses["CHASSIS"]["dbcs"] == [dbc]
+        assert list(cfg.buses["CHASSIS"]["dbcs"]) == ["CHASSIS_MAIN", "CHASSIS_PRIV"]
+
+    def test_duplicate_alias_across_buses_rejected(self, tmp_path):
+        from brake_analyzer.configs import ConfigError, load_blf_config
+
+        d = self._mini(tmp_path, f"""
+buses:
+  CHASSIS:
+    dbcs:
+      MAIN: {DEMO_DBC}
+  VBOX:
+    dbcs:
+      MAIN: {DEMO_DBC}
+signal_maps:
+  speed_vbox:
+    candidates:
+      - [MAIN, "0x102", speed_vbox]
+""")
+        with pytest.raises(ConfigError, match="重复"):
+            load_blf_config(d)
 
     def test_channels_override_parsed(self, tmp_path):
         from brake_analyzer.configs import load_blf_config
 
-        dbc = os.path.join(CONFIG_DIR, "dbc", "brake_demo.dbc")
         d = self._mini(tmp_path, f"""
 buses:
   CHASSIS:
-    dbc: {dbc}
+    dbcs:
+      CHASSIS_MAIN: {DEMO_DBC}
 channels:
   1: CHASSIS
 signal_maps:
   speed_vbox:
     candidates:
-      - [CHASSIS, "0x102", speed_vbox]
+      - [CHASSIS_MAIN, "0x102", speed_vbox]
 """)
         cfg = load_blf_config(d)
         assert cfg.channels == {1: "CHASSIS"}
@@ -247,17 +263,17 @@ signal_maps:
     def test_channel_detect_validated(self, tmp_path):
         from brake_analyzer.configs import ConfigError, load_blf_config
 
-        dbc = os.path.join(CONFIG_DIR, "dbc", "brake_demo.dbc")
         d = self._mini(tmp_path, f"""
 buses:
   CHASSIS:
-    dbc: {dbc}
+    dbcs:
+      CHASSIS_MAIN: {DEMO_DBC}
 channel_detect:
   min_score: 2
 signal_maps:
   speed_vbox:
     candidates:
-      - [CHASSIS, "0x102", speed_vbox]
+      - [CHASSIS_MAIN, "0x102", speed_vbox]
 """)
         with pytest.raises(ConfigError, match="min_score"):
             load_blf_config(d)
@@ -265,26 +281,43 @@ signal_maps:
     def test_unused_bus_rejected(self, tmp_path):
         from brake_analyzer.configs import ConfigError, load_blf_config
 
-        dbc = os.path.join(CONFIG_DIR, "dbc", "brake_demo.dbc")
         d = self._mini(tmp_path, f"""
 buses:
   CHASSIS:
-    dbc: {dbc}
+    dbcs:
+      CHASSIS_MAIN: {DEMO_DBC}
   VBOX:
-    dbc: {dbc}
+    dbcs:
+      VBOX_MAIN: {DEMO_DBC}
 signal_maps:
   speed_vbox:
     candidates:
-      - [CHASSIS, "0x102", speed_vbox]
+      - [CHASSIS_MAIN, "0x102", speed_vbox]
 """)
         with pytest.raises(ConfigError, match="没有被任何候选引用"):
+            load_blf_config(d)
+
+    def test_unknown_alias_rejected(self, tmp_path):
+        from brake_analyzer.configs import ConfigError, load_blf_config
+
+        d = self._mini(tmp_path, f"""
+buses:
+  CHASSIS:
+    dbcs:
+      CHASSIS_MAIN: {DEMO_DBC}
+signal_maps:
+  speed_vbox:
+    candidates:
+      - [NOPE, "0x102", speed_vbox]
+""")
+        with pytest.raises(ConfigError, match="DBC 别名"):
             load_blf_config(d)
 
 
 # ---------------------------------------------------------------- 多 DBC
 
-def test_multiple_dbcs_first_match_wins(dbcs, tmp_path):
-    """一个总线挂多份库：按声明顺序找，先命中者胜，不会重复出点。"""
+def test_candidate_order_across_dbcs(dbcs, tmp_path):
+    """一条总线挂两份库：候选按书写顺序尝试，首个能解析的胜出，不重复出点。"""
     from brake_analyzer.loaders import BLFLoader
 
     empty = tmp_path / "empty.dbc"
@@ -293,8 +326,11 @@ def test_multiple_dbcs_first_match_wins(dbcs, tmp_path):
     frames = [(100.0 + i * 0.01, 0, 0x200, i) for i in range(10)]
     blf = _write_blf(tmp_path / "run.blf", frames)
     cfg = BlfConfigs(
-        buses={"EC": {"label": "EC", "dbcs": [str(empty), dbcs[0]], "unavailable": []}},
-        signal_maps={"a_val": MAPS["a_val"]},
+        buses={"EC": {"label": "EC",
+                      "dbcs": {"EMPTY": str(empty), "A_DBC": dbcs[0]},
+                      "unavailable": []}},
+        signal_maps={"a_val": {"candidates": [
+            ["EMPTY", "0x200", "A_val"], ["A_DBC", "0x200", "A_val"]]}},
     )
     data = BLFLoader(cfg).load(blf)
     assert data["a_val"].values.tolist() == list(range(10))
@@ -307,10 +343,10 @@ def test_identified_bus_without_dbc_warns(dbcs, tmp_path):
     frames = [(100.0 + i * 0.01, 0, 0x200, i) for i in range(5)]
     blf = _write_blf(tmp_path / "run.blf", frames)
     cfg = BlfConfigs(
-        buses={"EC": {"label": "EC", "dbcs": [dbcs[0]], "unavailable": []},
-               "VBOX": {"label": "VBOX", "dbcs": [], "unavailable": ["${VBOX_DBC}"]}},
+        buses={"EC": {"label": "EC", "dbcs": {"A_DBC": dbcs[0]}, "unavailable": []},
+               "VBOX": {"label": "VBOX", "dbcs": {}, "unavailable": ["VBOX_MAIN"]}},
         signal_maps={"a_val": MAPS["a_val"],
-                     "vbox_speed": {"candidates": [["VBOX", "0x300", "speed"]]}},
+                     "vbox_speed": {"candidates": [["VBOX_MAIN", "0x300", "speed"]]}},
         channels={0: "VBOX"},          # 显式绑定，避免 VBOX 因文件里没有 0x300 未识别
     )
     loader = BLFLoader(cfg)

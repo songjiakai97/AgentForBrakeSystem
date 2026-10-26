@@ -117,7 +117,7 @@ def check_layout(db: Database, config_dir: str = None) -> None:
     覆盖度按 BLF 侧自己声明的信号集校验，不要求等于 MF4 侧：demo 里两侧恰好相同，
     但真实 BLF 只有 CAN 上发布的信号，MF4 的额外观测量本来就不该出现在这里。
     """
-    from brake_analyzer.configs import load_configs
+    from brake_analyzer.configs import dbc_alias_bus, load_configs
     from brake_analyzer.loaders.base import _parse_msg_id     # 只依赖 numpy
 
     cfg = load_configs(config_dir or os.path.join(ROOT, "configs"))
@@ -148,9 +148,9 @@ def check_layout(db: Database, config_dir: str = None) -> None:
 
     # yaml 侧候选三元组必须能在 DBC 里解析到（通道由 channels: auto 识别，不写死）
     for name, spec in blf_cfg.signal_maps.items():
-        bus, msg_id, sig_name = spec["candidates"][0]
-        assert bus in blf_cfg.buses, f"{name}: 候选总线 {bus} 未在 buses 里声明"
-        assert blf_cfg.buses[bus]["dbcs"], f"{name}: 总线 {bus} 没有配置 DBC"
+        alias, msg_id, sig_name = spec["candidates"][0]
+        assert alias in dbc_alias_bus(blf_cfg.buses), (
+            f"{name}: 候选 DBC 别名 {alias} 未在 buses.*.dbcs 里声明")
         frame_id, is_ext = _parse_msg_id(msg_id)
         msg = db.get_message_by_frame_id(frame_id)
         assert msg is not None, f"{name}: DBC 里没有帧 {msg_id}"

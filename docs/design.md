@@ -232,16 +232,17 @@ brake-agent/
 `signals_blf.yaml` 由同文件的 `load_blf_config(config_dir, required_signals=None, registry=None)`
 加载校验（与 `load_configs` 分开，因为 BLF 是可选能力，内核启动不强依赖它）：
 
-- `buses` 必须非空；每个总线可挂 0~N 份 DBC（`dbc` 写单条或列表），
-  `path` 解析成绝对路径后必须存在（相对路径先按 `config_dir` 解析，再按仓库根解析，
+- `buses` 必须非空；每条总线用 `dbcs` 声明自己持有的 DBC（`{别名: 路径}`，别名全局唯一），
+  路径解析成绝对路径后必须存在（相对路径先按 `config_dir` 解析，再按仓库根解析，
   故 yaml 里可写 `configs/dbc/brake_demo.dbc`，进程从任意 cwd 启动都能找到）。
-  `dbc` 里可写 `${ENV_VAR}` 指向客户现场才有的库：变量未设置视为「本机没有这份库」，
+  路径里可写 `${ENV_VAR}` 指向客户现场才有的库：变量未设置视为「本机没有这份库」，
   不阻塞启动（识别不读 DBC，只是该总线的信号无法解码）。
 - `channels` 省略或写 `auto` 即自动识别；写成 `{通道号: 总线名}` 则显式绑定并跳过识别。
 - `channel_detect` 只接受 `scan_seconds`/`scan_frames`/`min_frames`/`min_hits`/`min_score`/`min_margin`，
   取值为负或超出 0~1 的分数直接报错（参数含义见 §9.6）。
-- 每条候选必须是 `[bus, msg_id, signal_name]` 三元组，bus 在 `buses` 内，
-  `msg_id` 符合 `"0x123"` / `"0x123x"` / int 约定；声明了却没有任何候选引用的总线报错。
+- 每条候选必须是 `[dbc_alias, msg_id, signal_name]` 三元组，别名出现在某条总线的
+  `dbcs` 里（信号名属于 DBC，不属于总线），`msg_id` 符合 `"0x123"` / `"0x123x"` / int 约定；
+  声明了却没有任何候选引用它的 DBC 的总线报错。
 - 传入 `registry`（`signals.yaml` 的 `logical_signals`）时，BLF 侧出现未登记的逻辑名即报错
   —— 这就是「相同的信号，逻辑名必须一致」的执行方式；`required_signals` 同时给出时，
   只要求参与计算的信号一个不缺，纯观测量允许缺席（§9.6 覆盖度约定）。
@@ -294,7 +295,7 @@ class SignalData:
 Loader 实现：
 
 - `MF4Loader(signal_maps)`：基于 asammdf，按 `candidates` 顺序用 `mdf.whereis` 解析首个命中通道；`raw=False` 取物理值，文本采样再以 `raw=True` 回取编码值构造 `choices`。
-- `BLFLoader(blf_cfg)`：基于 python-can `BLFReader` + cantools 解码。`candidates` 为三元组 `[bus, msg_id, signal_name]`；`msg_id` 字符串约定：`"0x123"` 标准帧、`"0x123x"` 扩展帧、裸 int 按标准帧兼容处理。先按 `signals_blf.yaml` 里的 msg_id 识别「通道 ↔ 总线」（`loaders/blf_channels.py`，§9.6），再按 (frame_id, is_extended, 识别出的通道) 建帧索引，单次遍历逐帧解码。
+- `BLFLoader(blf_cfg)`：基于 python-can `BLFReader` + cantools 解码。`candidates` 为三元组 `[dbc_alias, msg_id, signal_name]`（别名 → 所属总线由 `dbc_alias_bus` 给出）；`msg_id` 字符串约定：`"0x123"` 标准帧、`"0x123x"` 扩展帧、裸 int 按标准帧兼容处理。先按 `signals_blf.yaml` 里的 msg_id 识别「通道 ↔ 总线」（`loaders/blf_channels.py`，§9.6），再按 (frame_id, is_extended, 识别出的通道) 建帧索引，单次遍历逐帧解码。
 - `make_loader(path, cfg, blf_cfg=None)`（`pipeline.py`）：按扩展名选 Loader，`.blf` → `BLFLoader`，其余 → `MF4Loader`；未给 `blf_cfg` 时分析 `.blf` 直接报"未启用 BLF"。
   `ChatEngine` 按扩展名缓存 Loader 实例（`_loaders`），`BLFLoader` 的 DBC 解析在会话生命周期内只做一次；
   通道识别结果按 (路径, 大小, mtime) 逐文件缓存，同一文件重复加载不重复扫描。
@@ -1402,7 +1403,9 @@ signal_maps:
 buses:
   <总线名>:
     label: <显示名，可省>
-    dbc: <路径>              # 或路径列表；可写 ${ENV_VAR}
+    dbcs:
+      <DBC 别名>: <路径>      # 别名全局唯一；路径可写 ${ENV_VAR}
+      <DBC 别名2>: <路径>
 
 channels: auto               # 或 {0: <总线名>, 1: <总线名>}
 
@@ -1421,12 +1424,14 @@ signal_maps:
 ```
 
 - 顶层只允许 `buses` / `channels` / `channel_detect` / `signal_maps`；信号条目只允许 `candidates`。
-- `buses`：总线清单。一条总线可挂多份 DBC（`dbc` 写单条或列表，按声明顺序查找，
-  先命中者胜；同一路径自动去重）。`dbc` 可写 `${ENV_VAR}`，变量未设置即「本机没有这份库」。
+- `buses`：总线清单，每条总线用 `dbcs` 声明自己持有的 DBC（`{别名: 路径}`，可多条）。
+  **别名是 DBC 的身份**：信号名属于某份 DBC，候选三元组因此写别名而不是总线名；
+  同一别名只能属于一条总线（否则「它属于哪条网」就没有答案，识别也无从谈起）。
+  路径可写 `${ENV_VAR}`，变量未设置即「本机没有这份库」。
 - `channels`：`auto` 表示逐文件识别；显式映射优先且完全跳过识别扫描。实车日志的通道号
   常从 1 开始，写死 `0` 是典型踩坑点，所以默认不写死。
-- `candidates` 每条为三元组 `[总线名, msg_id, signal_name]`，按顺序解析：先看该总线是否
-  识别到通道，再按 DBC 声明顺序找「同时含该帧和该信号」的库，首个命中即采用。
+- `candidates` 每条为三元组 `[DBC 别名, msg_id, signal_name]`，按书写顺序解析：别名所属
+  总线已识别出通道、且该 DBC 里同时含该帧和该信号时命中，首个命中即采用。
 - `msg_id` 约定：字符串 `"0x123"` 标准帧、`"0x123x"`（十六进制 + `x` 后缀）扩展帧、
   裸 int 按标准帧兼容处理。
 - 全部候选失败返回空 `ts`/`values`，不报错。
@@ -1442,7 +1447,7 @@ DBC 的总线（客户现场的 VBOX）同样能识别，DBC 只在识别完成�
 **投票单位是逻辑信号**（不是报文 ID）：
 
 ```text
-M(S,b)      = { msg_id | (b, msg_id, *) ∈ candidates(S) }
+M(S,b)      = { msg_id | (a, msg_id, *) ∈ candidates(S), alias a 属于总线 b }
 Ids(c)      = { msg_id | 通道 c 上帧数 ≥ min_frames }
 Hit(c,b)    = { S | M(S,b) ∩ Ids(c) ≠ ∅ }        # 一信号一票，候选再多也只算 1
 Obs(b)      = { S | M(S,b) ∩ Ids(·) ≠ ∅ }        # 本文件里该总线可能看得见的信号
@@ -1475,8 +1480,8 @@ config 的子集，拿 DBC 全集当分母会惩罚只在 config 里引用少数
 
 demo 约定（`configs/signals_blf.yaml` + `configs/dbc/brake_demo.dbc`）：
 
-- **一份 DBC 管全部 12 个逻辑信号**，总线名 = `BRAKE`，`channels: auto`；所有 BLF 帧都发在
-  通道 0，识别阶段从 candidates 里的 msg_id 反推出「通道 0 = BRAKE」。
+- **一份 DBC 管全部 12 个逻辑信号**，总线名 = `BRAKE`、别名 = `BRAKE_MAIN`，`channels: auto`；
+  所有 BLF 帧都发在通道 0，识别阶段从 candidates 里的 msg_id 反推出「通道 0 = BRAKE」。
 - DBC 由 `scripts/generate_demo_blf.py` 用 cantools 定义后 `dump_file` 生成，**入库**（4 KB，
   是数据契约的一部分）；BLF 输出到 `tests/data/blf/`，与 MF4 一样不入库、可再生。
 - 实车信号名 = 逻辑名（不做重命名），状态位 1 bit 带 `INACTIVE/ACTIVE` 枚举表，

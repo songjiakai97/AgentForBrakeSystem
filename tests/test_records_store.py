@@ -228,7 +228,7 @@ def test_config_fingerprint_tracks_missing_env_dbc(tmp_path, monkeypatch):
     shutil.copytree(CONFIG_DIR, cfg_dir)
     yml = cfg_dir / "signals_blf.yaml"
     yml.write_text(yml.read_text(encoding="utf-8").replace(
-        "dbc: configs/dbc/brake_demo.dbc", "dbc: ${LATE_DBC}"), encoding="utf-8")
+        "BRAKE_MAIN: configs/dbc/brake_demo.dbc", "BRAKE_MAIN: ${LATE_DBC}"), encoding="utf-8")
 
     monkeypatch.delenv("LATE_DBC", raising=False)
     before = store.config_fingerprint(str(cfg_dir))

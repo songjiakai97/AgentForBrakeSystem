@@ -172,18 +172,19 @@ def _dbc_refs(config_dir: str) -> List[tuple]:
     for info in buses.values():
         if not isinstance(info, dict):
             continue
-        dbc = info.get("dbc")
-        items = [dbc] if isinstance(dbc, str) else (dbc if isinstance(dbc, list) else [])
-        for item in items:
+        dbcs = info.get("dbcs")
+        if not isinstance(dbcs, dict):
+            continue
+        for alias, item in dbcs.items():
             if not isinstance(item, str) or not item.strip():
                 continue
             item = item.strip()
             expanded = _expand_env(item)
             if expanded is None:
-                out.append(("absent", item))
+                out.append(("absent", f"{alias}={item}"))
                 continue
             real = _resolve_config_path(expanded, config_dir)
-            out.append(("file", real) if os.path.exists(real) else ("absent", item))
+            out.append(("file", real) if os.path.exists(real) else ("absent", f"{alias}={item}"))
     return out
 
 

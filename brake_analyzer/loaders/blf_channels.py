@@ -19,7 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import can
 
-from ..configs import ChannelDetect
+from ..configs import ChannelDetect, dbc_alias_bus
 from .base import _parse_msg_id
 
 log = logging.getLogger(__name__)
@@ -120,12 +120,21 @@ def scan(path: str, scan_seconds: float = 15.0,
 
 # ---------------------------------------------------------------- 打分
 
-def candidate_index(signal_maps: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Set[IdKey]]]:
-    """bus → 逻辑信号 → 该总线上的候选 ID 集合。"""
+def candidate_index(alias_bus: Dict[str, str],
+                    signal_maps: Dict[str, Dict[str, Any]]
+                    ) -> Dict[str, Dict[str, Set[IdKey]]]:
+    """bus → 逻辑信号 → 该总线上的候选 ID 集合。
+
+    候选写的是 DBC 别名，这里先换成所属总线：同一个逻辑信号在两条总线上各有一
+    个别名时，两票各自归位，不会互相抵赖。
+    """
     index: Dict[str, Dict[str, Set[IdKey]]] = {}
     for logical, spec in signal_maps.items():
         for cand in spec.get("candidates", []):
-            bus, msg_id = cand[0], cand[1]
+            alias, msg_id = cand[0], cand[1]
+            bus = alias_bus.get(alias)
+            if bus is None:         # 配置校验已保证不会发生，防御性跳过
+                continue
             index.setdefault(bus, {}).setdefault(logical, set()).add(_parse_msg_id(msg_id))
     return index
 
@@ -156,14 +165,15 @@ def _cells(present: Dict[int, Set[IdKey]], bus_names: Iterable[str],
     return cells, observable
 
 
-def score_channels(stats: Dict[int, ChannelStats], bus_names: List[str],
+def score_channels(stats: Dict[int, ChannelStats], buses: Dict[str, Dict[str, Any]],
                    signal_maps: Dict[str, Dict[str, Any]],
                    detect: Optional[ChannelDetect] = None,
                    scanned: Tuple[int, float] = (0, 0.0)) -> ChannelReport:
     """由通道统计得出 assignment 与逐总线证据（不读文件，便于单测）。"""
     detect = detect or ChannelDetect()
+    bus_names = list(buses)
     present = {ch: st.present(detect.min_frames) for ch, st in stats.items()}
-    index = candidate_index(signal_maps)
+    index = candidate_index(dbc_alias_bus(buses), signal_maps)
     cells, observable = _cells(present, bus_names, index)
 
     # 全局指派：边按分数降序贪心，通道与总线各用一次（总线数很少，够用且确定）
@@ -284,7 +294,8 @@ def _evidence_warnings(evidence: List[BusEvidence], detect: ChannelDetect) -> Li
 
 # ---------------------------------------------------------------- 入口
 
-def identify(path: str, bus_names: List[str], signal_maps: Dict[str, Dict[str, Any]],
+def identify(path: str, buses: Dict[str, Dict[str, Any]],
+             signal_maps: Dict[str, Dict[str, Any]],
              detect: Optional[ChannelDetect] = None) -> ChannelReport:
     """识别一个 BLF 文件的通道归属。
 
@@ -295,14 +306,14 @@ def identify(path: str, bus_names: List[str], signal_maps: Dict[str, Dict[str, A
     detect = detect or ChannelDetect()
     stats, frames, span, truncated, err = scan(
         path, detect.scan_seconds, detect.scan_frames)
-    report = score_channels(stats, bus_names, signal_maps, detect, (frames, span))
+    report = score_channels(stats, buses, signal_maps, detect, (frames, span))
     if err:
         report.warnings.insert(0, err)
 
     weak = any(e.status in ("low_confidence", "ambiguous") for e in report.evidence)
     if truncated and weak:
         stats2, frames2, span2, _t, err2 = scan(path, float("inf"), float("inf"))
-        full = score_channels(stats2, bus_names, signal_maps, detect, (frames2, span2))
+        full = score_channels(stats2, buses, signal_maps, detect, (frames2, span2))
         full.warnings.insert(0, "采样窗口内识别证据不足，已回退全量重扫")
         if err2:
             full.warnings.insert(0, err2)

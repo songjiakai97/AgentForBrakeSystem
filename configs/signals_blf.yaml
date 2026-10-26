@@ -6,7 +6,7 @@
 # 通道号不写死：`channels: auto` 时由 BLFLoader 按下面 candidates 里出现的
 # msg_id 自动识别「哪个 CAN 通道是哪条总线」（loaders/blf_channels.py）。
 #   - 识别不读 DBC，只比对报文 ID → 没有 DBC 的总线同样能被识别；
-#   - 一个总线可挂多份 DBC，按书写顺序查找，先命中者胜；
+#   - 一条总线可挂多份 DBC（各自一个别名），候选写别名，按候选顺序查找；
 #   - 识别有把握时不打扰人，把握不足会在分析的告警里说明，可用
 #     `channels: {0: BRAKE}` 显式指定（显式优先且跳过识别扫描）。
 #
@@ -21,8 +21,9 @@
 #   0x103 PEDAL_STATUS_1 BrakePedalPos/ThrottlePedalPos 8bit × 0.5 %，ABS/TCS 各 1bit
 #   0x104 VEH_DYN_2      yaw_rate 16bit 有符号 × 0.01 deg/s（单独一帧，便于造「缺通道」）
 #
-# 接入真实数据时：把真实 DBC 追加到对应总线的 dbc 列表，并在信号的 candidates
-# 前面插入 [总线, "0x123", 真实信号名]；扩展帧 id 写作 "0x123x"。
+# 接入真实数据时：在对应总线的 dbcs 里加一条「别名: 路径」，并在信号的 candidates
+# 前面插入 [别名, "0x123", 真实信号名]；扩展帧 id 写作 "0x123x"。
+# 别名是 DBC 的身份（信号名属于某份库），必须全局唯一。
 # 客户现场才有的库写 ${ENV_VAR}：变量未设置时视为「本机没有这份库」，不影响启动。
 #
 # 覆盖度：BLF 只有总线上发布的信号，允许比 MF4 少带纯观测量（如 Ax、状态位）；
@@ -32,7 +33,8 @@
 buses:
   BRAKE:
     label: 制动 demo
-    dbc: configs/dbc/brake_demo.dbc
+    dbcs:
+      BRAKE_MAIN: configs/dbc/brake_demo.dbc
 
 channels: auto
 
@@ -47,37 +49,37 @@ channel_detect:
 signal_maps:
   speed_vbox:
     candidates:
-      - [BRAKE, "0x102", speed_vbox]
+      - [BRAKE_MAIN, "0x102", speed_vbox]
   distance_vbox:
     candidates:
-      - [BRAKE, "0x102", distance_vbox]
+      - [BRAKE_MAIN, "0x102", distance_vbox]
   wheelSpeed_FL:
     candidates:
-      - [BRAKE, "0x100", wheelSpeed_FL]
+      - [BRAKE_MAIN, "0x100", wheelSpeed_FL]
   wheelSpeed_FR:
     candidates:
-      - [BRAKE, "0x100", wheelSpeed_FR]
+      - [BRAKE_MAIN, "0x100", wheelSpeed_FR]
   wheelSpeed_RL:
     candidates:
-      - [BRAKE, "0x101", wheelSpeed_RL]
+      - [BRAKE_MAIN, "0x101", wheelSpeed_RL]
   wheelSpeed_RR:
     candidates:
-      - [BRAKE, "0x101", wheelSpeed_RR]
+      - [BRAKE_MAIN, "0x101", wheelSpeed_RR]
   yaw_rate:
     candidates:
-      - [BRAKE, "0x104", yaw_rate]
+      - [BRAKE_MAIN, "0x104", yaw_rate]
   Ax:
     candidates:
-      - [BRAKE, "0x102", Ax]
+      - [BRAKE_MAIN, "0x102", Ax]
   ABS_Active:
     candidates:
-      - [BRAKE, "0x103", ABS_Active]
+      - [BRAKE_MAIN, "0x103", ABS_Active]
   TCS_Active:
     candidates:
-      - [BRAKE, "0x103", TCS_Active]
+      - [BRAKE_MAIN, "0x103", TCS_Active]
   BrakePedalPos:
     candidates:
-      - [BRAKE, "0x103", BrakePedalPos]
+      - [BRAKE_MAIN, "0x103", BrakePedalPos]
   ThrottlePedalPos:
     candidates:
-      - [BRAKE, "0x103", ThrottlePedalPos]
+      - [BRAKE_MAIN, "0x103", ThrottlePedalPos]

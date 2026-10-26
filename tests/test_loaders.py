@@ -130,15 +130,16 @@ def blf_files(tmp_path):
 
 
 BLF_MAPS = {
-    # 首候选 alias 不对 → 回退第二候选
+    # 首候选的库查不到该信号 → 回退第二候选
     "wheel_speed": {
         "description": "轮速", "unit": "km/h",
-        "candidates": [["BODY", "0x123", "WheelSpeedFL"], ["EC", "0x123", "WheelSpeedFL"]],
+        "candidates": [["BODY_DBC", "0x123", "WheelSpeedFL"],
+                       ["EC_DBC", "0x123", "WheelSpeedFL"]],
     },
-    "fail_state": {"candidates": [["EC", "0x123", "ActFailSt"]]},
+    "fail_state": {"candidates": [["EC_DBC", "0x123", "ActFailSt"]]},
     # 扩展帧：0x 十六进制 + x 后缀
-    "amb_temp": {"unit": "degC", "candidates": [["BODY", "0x1234x", "AmbTemp"]]},
-    "not_found": {"candidates": [["EC", "0x999", "X"], ["NOPE", "0x123", "Y"]]},
+    "amb_temp": {"unit": "degC", "candidates": [["BODY_DBC", "0x1234x", "AmbTemp"]]},
+    "not_found": {"candidates": [["EC_DBC", "0x999", "X"]]},
 }
 
 
@@ -148,8 +149,9 @@ class TestBLFLoader:
         from brake_analyzer.configs import BlfConfigs
 
         cfg = BlfConfigs(
-            buses={"EC": {"label": "EC", "dbcs": [p_ec], "unavailable": []},
-                   "BODY": {"label": "BODY", "dbcs": [p_body], "unavailable": []}},
+            buses={"EC": {"label": "EC", "dbcs": {"EC_DBC": p_ec}, "unavailable": []},
+                   "BODY": {"label": "BODY", "dbcs": {"BODY_DBC": p_body},
+                            "unavailable": []}},
             signal_maps=BLF_MAPS,
         )
         return BLFLoader(cfg), blf_files[2]
@@ -190,7 +192,7 @@ class TestBLFLoader:
 
         p_ec, _p_body, blf_path = blf_files
         cfg = BlfConfigs(
-            buses={"EC": {"label": "EC", "dbcs": [p_ec], "unavailable": []}},
+            buses={"EC": {"label": "EC", "dbcs": {"EC_DBC": p_ec}, "unavailable": []}},
             signal_maps={"wheel_speed": BLF_MAPS["wheel_speed"]},
             channels={3: "EC"},
         )
