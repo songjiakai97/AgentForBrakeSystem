@@ -88,8 +88,12 @@ def build_chart_option(
     highlight_status: Optional[str] = None,
     title: str = "",
     layout=None,
+    highlight: Optional[tuple] = None,
 ) -> dict:
     """window: (t_start, t_end) 用于截取范围与 markArea；None 画全程。
+
+    highlight: 只画高亮不裁曲线（记录库要「整段曲线 + 窗口高亮」）；
+    省略时高亮区等于 window，保持既有调用方的裁剪+高亮行为。
 
     layout: AppConfigs.chart_layout（List[ChartGroup]）；给出时按配置分行，
     否则按 unit 自动分行。返回的 option 为多 grid（多行一列、共享 x 轴）。
@@ -126,8 +130,9 @@ def build_chart_option(
 
     color = STATUS_COLORS.get(highlight_status or "ok", STATUS_COLORS["ok"])
     mark_area = None
-    if window:
-        t0, t1 = window
+    mark = highlight if highlight is not None else window
+    if mark:
+        t0, t1 = mark
         if t0 is not None and t1 is not None and not np.isnan(t0) and not np.isnan(t1):
             mark_area = {
                 "silent": True,

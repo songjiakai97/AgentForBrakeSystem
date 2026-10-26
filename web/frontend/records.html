@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>试验记录库</title>
+<script src="./vendor/vue.global.prod.js"></script>
+<script src="./vendor/echarts.min.js"></script>
+<style>
+:root{--bg:#0b1220;--panel:#111a2b;--line:#1e293b;--text:#e2e8f0;--muted:#94a3b8;
+      --ok:#22c55e;--abn:#ef4444;--warn:#f59e0b;--accent:#38bdf8}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:16px;margin:0;font-weight:600}
+header a{color:var(--muted);font-size:12px;text-decoration:none}
+header a:hover{color:var(--text)}
+main{padding:16px 20px 60px;max-width:1500px;margin:0 auto}
+.filters{display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-bottom:12px}
+label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+select,input{background:#0f172a;color:var(--text);border:1px solid var(--line);border-radius:7px;padding:6px 8px;font-size:13px;min-width:150px}
+button{background:#1d4ed8;color:#fff;border:0;border-radius:7px;padding:7px 14px;font-size:13px;cursor:pointer}
+button.ghost{background:#1e293b;color:var(--text)}
+button:disabled{opacity:.5;cursor:default}
+.meta{color:var(--muted);font-size:12px;margin:6px 0 14px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:16px}
+section h2{font-size:14px;margin:0 0 10px;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:500;font-size:12px;white-space:nowrap}
+tr:hover td{background:#0f1a2c}
+.link{color:var(--accent);cursor:pointer}
+.link:hover{text-decoration:underline}
+.badge{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;border:1px solid}
+.b-ok{color:var(--ok);border-color:#166534;background:#052e16}
+.b-abn{color:var(--abn);border-color:#7f1d1d;background:#2a0a0a}
+.b-miss{color:var(--muted);border-color:#334155;background:#0f172a}
+.b-warn{color:var(--warn);border-color:#78350f;background:#2a1a05}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin:10px 0}
+.card{background:#0f172a;border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+.card .nm{font-size:12px;color:var(--muted)}
+.card .val{font-size:19px;margin-top:2px}
+.card .lim{font-size:11px;color:var(--muted);margin-top:2px}
+#chart{height:520px;width:100%}
+.empty{color:var(--muted);padding:10px 0}
+.hint{color:var(--warn);font-size:12px;margin-top:6px}
+.tag{font-size:11px;color:var(--muted);margin-left:6px}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>试验记录库</h1>
+    <a href="/">← 回到对话</a>
+    <span class="tag" v-if="db">{{db}}</span>
+  </header>
+  <main>
+    <div class="filters">
+      <label>车型
+        <select v-model="filter.vehicle">
+          <option value="">全部</option>
+          <option v-for="v in meta.vehicles" :key="v" :value="v">{{v}}</option>
+        </select>
+      </label>
+      <label>功能
+        <select v-model="filter.function_key">
+          <option value="">全部</option>
+          <option v-for="f in meta.functions" :key="f.key" :value="f.key">{{f.name}}</option>
+        </select>
+      </label>
+      <label>工况
+        <select v-model="filter.condition_id">
+          <option value="">全部</option>
+          <option v-for="c in scopedConditions" :key="c.id" :value="c.id">{{c.name}}（{{c.file_ids.join('/')}}）</option>
+        </select>
+      </label>
+      <label>编号
+        <input v-model.trim="filter.file_id" placeholder="如 4.1.1">
+      </label>
+      <button @click="loadRecords" :disabled="loading">查询</button>
+      <button class="ghost" @click="loadCompare" :disabled="loading">横向对比</button>
+    </div>
+    <div class="meta">
+      共 {{records.length}} 条<span v-if="statusText"> · {{statusText}}</span>
+      <span v-if="hint" class="hint"> · {{hint}}</span>
+    </div>
+
+    <section>
+      <h2>记录清单</h2>
+      <div class="empty" v-if="!records.length">库里没有符合条件的记录。先用 scripts/import_records.py 导入。</div>
+      <table v-else>
+        <thead><tr>
+          <th>车型</th><th>编号</th><th>工况</th><th>文件</th><th>试验日期</th><th>状态</th><th></th>
+        </tr></thead>
+        <tbody>
+          <tr v-for="r in records" :key="r.record_id">
+            <td>{{r.vehicle}}</td>
+            <td>{{r.file_id}}</td>
+            <td>{{r.condition_name}}<span class="tag">{{r.function}}</span></td>
+            <td>{{r.file_name}}</td>
+            <td>{{r.recorded_at || '—'}}</td>
+            <td><span class="badge" :class="statusClass(r.analysis_status)">{{statusTextOf(r.analysis_status)}}</span></td>
+            <td><span class="link" @click="openRecord(r.record_id)">查看 / 曲线</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section v-if="compare">
+      <h2>横向对比<span class="tag" v-if="compare.metric">仅 {{metricName(compare.metric)}}</span></h2>
+      <div class="empty" v-if="!compare.groups || !compare.groups.length">{{compare.hint || '没有可对比的记录'}}</div>
+      <div v-for="g in compare.groups" :key="g.condition_id" style="margin-bottom:18px">
+        <div style="margin-bottom:6px"><b>{{g.condition_name}}</b>
+          <span class="tag">{{g.condition_id}} · 编号 {{g.file_ids.join('/')}}</span></div>
+        <table>
+          <thead><tr>
+            <th>车型</th><th>编号</th><th>试验日期</th>
+            <th v-for="m in groupMetrics(g)" :key="m">{{metricName(m)}}</th>
+            <th></th>
+          </tr></thead>
+          <tbody>
+            <tr v-for="r in g.records" :key="r.record_id">
+              <td>{{r.vehicle}}</td>
+              <td>{{r.file_id}}</td>
+              <td>{{r.recorded_at || '—'}}</td>
+              <td v-for="m in groupMetrics(g)" :key="m">
+                <span v-if="r.metrics[m] && r.metrics[m].value !== null && r.metrics[m].value !== undefined">
+                  {{r.metrics[m].value}} {{r.metrics[m].unit}}
+                  <span class="badge" :class="statusClass(r.metrics[m].status)">{{statusTextOf(r.metrics[m].status)}}</span>
+                </span>
+                <span v-else class="badge b-miss">{{reasonText(r.metrics[m])}}</span>
+              </td>
+              <td><span class="link" @click="openRecord(r.record_id)">曲线</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="hint" v-if="compare.not_analyzed && compare.not_analyzed.length">
+        未分析：{{compare.not_analyzed.map(x => x.vehicle + ' ' + x.file_id).join('、')}}（点开记录后才会计算）
+      </div>
+    </section>
+
+    <section v-if="detail">
+      <h2>
+        {{detail.record.vehicle}} · {{detail.record.file_id}} · {{detail.condition_name}}
+        <span class="tag">{{detail.record.file_name}}</span>
+        <span class="badge" :class="statusClass(detail.record.analysis_status)">{{statusTextOf(detail.record.analysis_status)}}</span>
+      </h2>
+      <div class="meta" v-if="detail.windows && detail.windows.length">
+        事件窗口 {{detail.windows.length}} 个：
+        <span v-for="w in detail.windows" :key="w.sample_index" class="tag">
+          #{{w.sample_index + 1}} {{w.t_start.toFixed(2)}}–{{w.t_end.toFixed(2)}}s
+        </span>
+      </div>
+      <div class="hint" v-if="detail.record.last_error">{{detail.record.last_error}}</div>
+      <div v-for="win in sampleGroups" :key="win.index">
+        <div class="meta" v-if="sampleGroups.length > 1">事件 #{{win.index + 1}}</div>
+        <div class="cards">
+          <div class="card" v-for="m in win.metrics" :key="m.metric_key">
+            <div class="nm">{{m.name}}<span class="tag">{{m.metric_key}}</span></div>
+            <div class="val">
+              <template v-if="m.value !== null && m.value !== undefined">{{m.value}} <small>{{m.unit}}</small></template>
+              <span v-else class="badge b-miss">{{reasonText(m)}}</span>
+            </div>
+            <div class="lim">
+              <span class="badge" :class="statusClass(m.status)">{{statusTextOf(m.status)}}</span>
+              <span v-if="m.ok_range"> 限值 {{m.ok_range[0] === null ? '−∞' : m.ok_range[0]}}~{{m.ok_range[1] === null ? '+∞' : m.ok_range[1]}} {{m.unit}}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin:8px 0 4px">
+        <button class="ghost" @click="openRecord(detail.record.record_id, true)" :disabled="loading">重新解析</button>
+        <button class="ghost" @click="closeDetail">关闭</button>
+      </div>
+      <div id="chart"></div>
+    </section>
+  </main>
+</div>
+<script>
+const { createApp } = Vue;
+const STATUS = {ok:'达标', abnormal:'超限', missing:'不可算', info:'仅记录',
+                pending:'未分析', error:'解析失败', file_gone:'文件缺失'};
+const REASON = {no_valid_event:'未切出有效事件', signal_absent:'通道无数据',
+                not_computable:'算不出值', no_matching_entry:'该档位无条目'};
+createApp({
+  data() {
+    return {
+      db: '', meta: {vehicles: [], functions: [], conditions: [], file_ids: [], metrics: [], status: {}},
+      filter: {vehicle: '', function_key: '', condition_id: '', file_id: ''},
+      records: [], hint: '', loading: false,
+      compare: null, detail: null, chart: null,
+    };
+  },
+  computed: {
+    scopedConditions() {
+      if (!this.filter.function_key) return this.meta.conditions;
+      return this.meta.conditions.filter(c => c.function === this.filter.function_key);
+    },
+    statusText() {
+      const s = this.meta.status || {};
+      const parts = Object.keys(s).map(k => STATUS[k] + ' ' + s[k]);
+      return parts.length ? '库内 ' + parts.join(' · ') : '';
+    },
+    sampleGroups() {
+      if (!this.detail) return [];
+      const groups = {};
+      for (const m of this.detail.metrics) {
+        (groups[m.sample_index] = groups[m.sample_index] || []).push(m);
+      }
+      return Object.keys(groups).sort((a,b) => a-b)
+        .map(i => ({index: Number(i), metrics: groups[i]}));
+    },
+  },
+  watch: {
+    'filter.function_key'() {
+      const c = this.meta.conditions.find(x => x.id === this.filter.condition_id);
+      if (c && this.filter.function_key && c.function !== this.filter.function_key) {
+        this.filter.condition_id = '';
+      }
+    },
+  },
+  async mounted() {
+    await this.loadMeta();
+    await this.loadRecords();
+  },
+  methods: {
+    statusTextOf(s) { return STATUS[s] || s || '—'; },
+    statusClass(s) {
+      if (s === 'ok' || s === 'info') return 'b-ok';
+      if (s === 'abnormal') return 'b-abn';
+      if (s === 'pending' || s === 'file_gone' || s === 'missing') return 'b-miss';
+      return 'b-warn';
+    },
+    reasonText(m) { return m && m.missing_reason ? (REASON[m.missing_reason] || m.missing_reason) : '无值'; },
+    metricName(key) {
+      const m = this.meta.metrics.find(x => x.key === key);
+      return m ? m.name + (m.unit ? ' (' + m.unit + ')' : '') : key;
+    },
+    groupMetrics(g) {
+      const keys = new Set();
+      for (const r of g.records) Object.keys(r.metrics || {}).forEach(k => keys.add(k));
+      return [...keys];
+    },
+    qs(params) {
+      const p = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) if (v !== '' && v !== null && v !== undefined) p.set(k, v);
+      return p.toString();
+    },
+    async loadMeta() {
+      const r = await fetch('/api/records/meta');
+      this.meta = await r.json();
+      this.db = this.meta.db;
+    },
+    async loadRecords() {
+      this.loading = true; this.hint = '';
+      try {
+        const r = await fetch('/api/records?' + this.qs(this.filter));
+        const d = await r.json();
+        this.records = d.records || [];
+        this.db = d.db || this.db;
+        if (!this.records.length) this.hint = '确认该编号是否已导入';
+      } finally { this.loading = false; }
+    },
+    async loadCompare() {
+      this.loading = true;
+      try {
+        const params = {function_key: this.filter.function_key, condition_id: this.filter.condition_id};
+        const r = await fetch('/api/records/compare?' + this.qs(params));
+        this.compare = await r.json();
+      } finally { this.loading = false; }
+    },
+    async openRecord(rid, refresh) {
+      this.loading = true;
+      try {
+        const r = await fetch('/api/records/' + rid + (refresh ? '?refresh=true' : ''));
+        if (!r.ok) { alert((await r.json()).detail || '读取失败'); return; }
+        this.detail = await r.json();
+        await this.$nextTick();
+        await this.loadChart(rid);
+        this.loadRecords();
+      } finally { this.loading = false; }
+    },
+    async loadChart(rid) {
+      const r = await fetch('/api/records/' + rid + '/timeseries');
+      if (!r.ok) return;
+      const d = await r.json();
+      if (this.chart && !this.chart.isDisposed()) this.chart.dispose();
+      const el = document.getElementById('chart');
+      if (!el) return;
+      this.chart = echarts.init(el, null, {renderer: 'canvas'});
+      this.chart.setOption(d.chart_option || {});
+    },
+    closeDetail() {
+      if (this.chart && !this.chart.isDisposed()) this.chart.dispose();
+      this.chart = null; this.detail = null;
+    },
+  },
+}).mount('#app');
+</script>
+</body>
+</html>

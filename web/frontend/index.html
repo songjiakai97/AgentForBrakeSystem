@@ -201,6 +201,8 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
       <div class="navbtn" :class="{on:view==='chat'}" @click="switchView('chat')">💬 对话</div>
       <div class="navbtn" :class="{on:view==='kb'}" @click="switchView('kb')">📚 知识库</div>
       <div class="navbtn" :class="{on:view==='mcp'}" @click="switchView('mcp')">🔌 外部工具</div>
+      <a class="navbtn" href="/records" target="_blank" style="text-decoration:none"
+         title="服务器上的试验记录：按编号/车型查询与对比">🗂 记录库</a>
     </div>
     <div class="chatlist" v-if="view==='chat'">
       <div v-for="c in chats" :key="c.chat_id" class="chatitem" :class="{active: c.chat_id===chatId}" @click="openChat(c.chat_id)">

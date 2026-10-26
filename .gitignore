@@ -228,3 +228,8 @@ __pycache__/
 
 # 内部标定文档（保密），仅本机知识库使用
 knowledge/manual/abs_calib.md
+
+# 试验记录库（本机/服务器数据索引，不入库）
+data/records.db
+data/records.db-wal
+data/records.db-shm

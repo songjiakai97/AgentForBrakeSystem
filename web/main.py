@@ -23,7 +23,7 @@ from brake_analyzer.agent.cond_index import ConditionIndex  # noqa: E402
 from brake_analyzer.agent.engine import ChatEngine  # noqa: E402
 from brake_analyzer.charts.html import build_chart_option, timeseries_payload  # noqa: E402
 from brake_analyzer.configs import (  # noqa: E402
-    ConfigError, load_blf_config, load_configs,
+    ConfigError, load_blf_config, load_configs, pick,
 )
 from brake_analyzer.events.segment import is_valid  # noqa: E402
 from brake_analyzer.llm.client import LlmClient, TraceStore  # noqa: E402
@@ -31,6 +31,9 @@ from brake_analyzer.llm.context import ContextBudget  # noqa: E402
 from brake_analyzer.llm.kb import KnowledgeBase  # noqa: E402
 from brake_analyzer.llm.prompts import build_chat_messages, digest_from_analysis  # noqa: E402
 from brake_analyzer.mcp_bridge import McpHub, load_mcp_config  # noqa: E402
+from brake_analyzer.records import store as record_store  # noqa: E402
+from brake_analyzer.records.query import records_compare  # noqa: E402
+from brake_analyzer.records.service import RecordNotFound, RecordService  # noqa: E402
 from brake_analyzer.schemas import json_safe  # noqa: E402
 from web.runs import RunManager  # noqa: E402
 from web.store import Store  # noqa: E402
@@ -114,10 +117,13 @@ except ConfigError as e:
     raise RuntimeError(f"MCP 配置加载失败，服务拒绝启动：{e}")
 MCP_HUB = McpHub(MCP_SPECS)
 
+# 试验记录库（§17）：只登记路径，指标惰性计算。库文件不存在时首次连接自动建表；
+# RECORDS_DB 指向别处（如挂载的共享盘）即可复用同一套服务。
+RECORDS_DB = os.getenv("RECORDS_DB", os.path.join(ROOT, "data", "records.db"))
+RECORDS = RecordService(CFG, RECORDS_DB, blf_cfg=BLF_CFG)
+
 ENGINE = ChatEngine(CFG, LLM, KB, STORE, budget=BUDGET, blf_cfg=BLF_CFG, mcp=MCP_HUB,
-                    cond_index=COND_INDEX)
-ENGINE = ChatEngine(CFG, LLM, KB, STORE, budget=BUDGET, blf_cfg=BLF_CFG, mcp=MCP_HUB,
-                    cond_index=COND_INDEX)
+                    cond_index=COND_INDEX, records=RECORDS)
 # 一轮 = 一个后台任务：与 HTTP 连接解耦，刷新/断网不再丢本轮回复
 RUNS = RunManager()
 
@@ -819,6 +825,135 @@ def api_analysis_timeseries(analysis_id: str, signal: Optional[str] = Query(None
     return payload
 
 
+# ---------------------------------------------------------------- 记录库（§17）
+
+def _record_cond_cards(cond, metrics_rows):
+    """把缓存指标行拼成结果卡片：补上 ok_range/单位（缓存里只存值）。"""
+    out = []
+    for m in metrics_rows:
+        tmpl = CFG.metrics.get(m["metric_key"])
+        entry = pick(cond.metric_index, m["metric_key"], None) if cond else None
+        item = dict(m)
+        item["category"] = tmpl.category if tmpl else ""
+        item["ok_range"] = (entry or {}).get("ok_range")
+        out.append(item)
+    return out
+
+
+@app.get("/api/records/meta")
+def api_records_meta():
+    """记录库筛选项 + 库内状态；页面首次加载用。"""
+    conn = RECORDS.connect()
+    try:
+        return {
+            "db": RECORDS_DB,
+            "vehicles": record_store.distinct(conn, "vehicle"),
+            "file_ids": record_store.distinct(conn, "file_id"),
+            "status": record_store.status_counts(conn),
+            "functions": [{"key": f.key, "name": f.name} for f in CFG.functions.values()],
+            "conditions": [
+                {"id": c.id, "name": c.name, "function": c.function,
+                 "file_ids": list(c.file_ids), "params": dict(c.params)}
+                for c in CFG.conditions.values()
+            ],
+            "metrics": [{"key": k, "name": t.name, "unit": t.unit}
+                        for k, t in CFG.metrics.items()],
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/records/compare")
+def api_records_compare(condition_id: Optional[str] = Query(None),
+                        function_key: Optional[str] = Query(None),
+                        vehicles: Optional[List[str]] = Query(None),
+                        metric: Optional[str] = Query(None)):
+    """横向对比（页面表格用）：同一工况下不同车型的客观指标。"""
+    return records_compare(RECORDS, CFG, condition_id=condition_id,
+                           function_key=function_key, vehicles=vehicles,
+                           metric=metric)
+
+
+@app.get("/api/records")
+def api_records(file_id: Optional[str] = Query(None),
+                condition_id: Optional[str] = Query(None),
+                vehicle: Optional[str] = Query(None),
+                function_key: Optional[str] = Query(None),
+                limit: int = Query(200, ge=1, le=500)):
+    """记录清单：只读元数据，不触发解析。"""
+    cond_ids = ([c.id for c in CFG.conditions_of(function_key)]
+                if function_key else None)
+    rows = RECORDS.list_records(file_id=file_id, condition_id=condition_id,
+                                condition_ids=cond_ids, vehicle=vehicle,
+                                limit=limit)
+    for r in rows:
+        cond = CFG.condition(r["condition_id"])
+        r["condition_name"] = cond.name if cond else r["condition_id"]
+        r["function"] = cond.function if cond else ""
+    return {"count": len(rows), "records": rows, "db": RECORDS_DB}
+
+
+@app.get("/api/records/{record_id}")
+def api_record(record_id: str, refresh: bool = Query(False)):
+    """单条记录：必要时惰性分析，返回结果卡片数据 + 窗口。"""
+    try:
+        if refresh:
+            status, _ = RECORDS.analyze(record_id, force=True)
+            detail = RECORDS.record_detail(record_id, ensure=False)
+            detail["analysis_status"] = status
+        else:
+            detail = RECORDS.record_detail(record_id)
+    except RecordNotFound as e:
+        raise HTTPException(404, str(e))
+    cond = CFG.condition(detail["record"]["condition_id"])
+    detail["metrics"] = _record_cond_cards(cond, detail["metrics"])
+    detail["condition_name"] = cond.name if cond else detail["record"]["condition_id"]
+    detail["function"] = cond.function if cond else ""
+    fn = CFG.function(cond.function) if cond else None
+    detail["signals"] = list(fn.signals) if fn else []
+    return detail
+
+
+@app.get("/api/records/{record_id}/timeseries")
+def api_record_timeseries(record_id: str, signal: Optional[str] = Query(None)):
+    """整段曲线 + 事件窗口高亮；默认只画该功能关心的通道。"""
+    try:
+        signals, row = RECORDS.load_signals(record_id)
+    except RecordNotFound as e:
+        raise HTTPException(404, str(e))
+    cond = CFG.condition(row["condition_id"])
+    fn = CFG.function(cond.function) if cond else None
+    # 曲线要配窗口：先确保有缓存（已算过就是一次查询，没算过才解析）
+    try:
+        RECORDS.analyze(record_id)
+    except RecordNotFound as e:
+        raise HTTPException(404, str(e))
+    conn = RECORDS.connect()
+    try:
+        windows = record_store.sample_windows(conn, record_id)
+        metric_rows = record_store.metric_rows(conn, record_id)
+    finally:
+        conn.close()
+    window = None
+    if windows:
+        window = (windows[0]["t_start"], windows[0]["t_end"])
+    names = [signal] if signal else (list(fn.signals) if fn and fn.signals else None)
+    statuses = {m["status"] for m in metric_rows}
+    highlight = ("abnormal" if "abnormal" in statuses
+                 else "missing" if "missing" in statuses or not metric_rows else "ok")
+    payload = timeseries_payload(signals, window=None, series_names=names,
+                                 layout=CFG.chart_layout)
+    payload["file_name"] = row["file_name"]
+    payload["windows"] = windows
+    payload["chart_option"] = build_chart_option(
+        signals, window=None, series_names=names, layout=CFG.chart_layout,
+        highlight_status=highlight,
+        highlight=window,
+        title=f"{row['vehicle']} · {row['file_name']}",
+    )
+    return payload
+
+
 # ---------------------------------------------------------------- debug
 @app.get("/api/debug/traces")
 def api_traces(chat_id: Optional[str] = None, limit: int = 100):
@@ -834,6 +969,12 @@ def api_trace(tid: str):
 
 
 # ---------------------------------------------------------------- pages
+@app.get("/records", response_class=HTMLResponse)
+def page_records():
+    with open(os.path.join(FRONTEND, "records.html"), "r", encoding="utf-8") as f:
+        return f.read()
+
+
 @app.get("/debug", response_class=HTMLResponse)
 def page_debug():
     with open(os.path.join(FRONTEND, "debug.html"), "r", encoding="utf-8") as f:

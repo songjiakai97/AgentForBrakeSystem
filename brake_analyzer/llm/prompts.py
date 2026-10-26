@@ -39,6 +39,10 @@ SYSTEM_CHAT = """你是制动系统测试数据分析与标定指导助手，服
 - 指标 missing 一律按结果里的 reason 说成因（图例随结果给出），不得自己推断；
 - 实测值一律直接引用 run_analysis_on_files 返回的 results（值/单位/限值/判定），
   不得让用户自查图表；
+- 用户问历史试验记录、某编号测过什么、不同车型在同一工况下的表现差异时，用
+  query_records / compare_records 查记录库（只读，不会顺带重算）。结果里的数值
+  可直接引用；每条记录带 record_id，前端会据此出「整段曲线 + 窗口高亮」，你不要
+  用文字描述曲线。条件不明确时先问编号/车型/工况，不要跨工况拼对比；
 - 回答使用简体中文，简洁、面向工程师。"""
 
 
@@ -257,6 +261,64 @@ def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> L
                             "type": "integer",
                             "description": "要查看通道的文件编号（1 起，取自文件清单）。"
                                            "省略时只返回清单不加载信号",
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_records",
+                "description": (
+                    "查询试验记录库（服务器上的历史/竞品数据）：按编号、工况、车型过滤，"
+                    "返回每条记录的元数据与已算好的指标汇总。只读——未分析的记录不会"
+                    "在这里触发计算，只标 analysis_status。用户问「测过哪些/某编号是什么/"
+                    "有没有某车型的数据」时调用。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {
+                            "type": "string",
+                            "description": "试验编号（如 4.1.1）；用户说编号时优先用这个",
+                        },
+                        "condition_id": cond_schema,
+                        "vehicle": {
+                            "type": "string",
+                            "description": "车型代号（记录库的一级目录名）",
+                        },
+                        "function_key": {"type": "string", "enum": fn_keys},
+                        "limit": {"type": "integer", "description": "最多返回条数，1~50"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "compare_records",
+                "description": (
+                    "同一工况下横向对比不同车型/不同批次的客观指标（制动距离、加速时间、"
+                    "横摆等）。只比已分析的记录；未分析的会列在 not_analyzed 里，"
+                    "让用户点开后再比。用户问「A 车和 B 车哪个制动距离短/差多少」时调用。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "condition_id": cond_schema,
+                        "function_key": {"type": "string", "enum": fn_keys},
+                        "vehicles": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "限定对比的车型代号；省略即全部车型",
+                        },
+                        "metric": {
+                            "type": "string", "enum": list(cfg.metrics),
+                            "description": "只比这一个指标；省略则返回全部指标",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "每个工况最多取几条记录，默认 30",
                         },
                     },
                 },

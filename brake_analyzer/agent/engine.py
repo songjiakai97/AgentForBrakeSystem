@@ -38,6 +38,7 @@ from ..llm.prompts import (
 )
 from ..mcp_bridge import NO_HUB
 from ..pipeline import NoDataError, analyze_signals
+from ..records.query import records_compare, records_query
 from ..schemas import AnalysisResult
 
 log = logging.getLogger(__name__)
@@ -46,8 +47,10 @@ log = logging.getLogger(__name__)
 class ChatEngine:
     def __init__(self, cfg: AppConfigs, llm: LlmClient, kb: KnowledgeBase, store,
                  budget: Optional[ContextBudget] = None, blf_cfg=None, mcp=None,
-                 cond_index=None):
+                 cond_index=None, records=None):
         self.cfg = cfg
+        # 试验记录库服务（§17.5）；None → 记录工具明确回复「未启用」，不静默失败
+        self.records = records
         self.llm = llm
         self.kb = kb
         self.store = store
@@ -300,6 +303,11 @@ class ChatEngine:
                 chat, args.get("condition_id"), args.get("profile"), stop_event,
                 file_indexes=args.get("file_indexes"),
             ),
+            # 记录库只读工具（§17.5）：不做隐式重算，避免一次对话顺带解析十几个文件
+            "query_records": lambda args: self._record_tool(
+                records_query, args, chat.selected_function),
+            "compare_records": lambda args: self._record_tool(
+                records_compare, args, chat.selected_function),
         }
         # 工具规格由配置生成（维度/工况 id 作 enum），已选定功能时进一步收窄取值域
         tool_specs = build_tool_specs(self.cfg, scope_function=chat.selected_function)
@@ -724,6 +732,13 @@ class ChatEngine:
             detail = f"{ch['name']}：{len(ch['channels'])} 个通道" if ch \
                 else f"{len(rows)} 个文件"
             return (f"{name} → {detail}", "", status)
+        if name == "query_records":
+            return (f"{name} → {res.get('count', 0)} 条记录",
+                    f"库内状态 {res.get('db_stats', {})}", status)
+        if name == "compare_records":
+            groups = res.get("groups", []) or []
+            return (f"{name} → {res.get('record_count', 0)} 条记录",
+                    f"{len(groups)} 个工况", status)
         return (f"{name} 完成", "", status)
 
     @staticmethod
@@ -764,6 +779,25 @@ class ChatEngine:
                         "text": " · ".join(f"{k}={v}" for k, v in fields.items())}
                 if r.get("match") == "partial":
                     line["note"] = "子串近似匹配，引用前确认是同一个参数"
+                out.append(line)
+            return out
+        if name in ("query_records", "compare_records"):
+            rows = res.get("records") or [
+                r for g in res.get("groups", []) or [] for r in g.get("records", [])
+            ]
+            out = []
+            for r in rows[:10]:
+                values = []
+                for key, m in (r.get("metrics") or {}).items():
+                    if m.get("value") is None:
+                        values.append(f"{key}=missing")
+                    else:
+                        values.append(f"{key}={m['value']}{m.get('unit', '')}")
+                line = {
+                    "title": f"{r.get('vehicle', '')} {r.get('file_id', '')}".strip(),
+                    "id": r.get("record_id", ""),
+                    "text": " · ".join(values)[:ChatEngine.STEP_HIT_TEXT_MAX],
+                }
                 out.append(line)
             return out
         return []
@@ -873,6 +907,29 @@ class ChatEngine:
                          "section": r["section"], "match": r["match"]}
                         for r in rows],
         }
+
+    def _record_tool(self, fn, args: dict, selected_function: Optional[str]) -> dict:
+        """记录库工具的统一入口：未启用/查询异常都回 ok=false + 说明。
+
+        记录库是旁路能力，挂了它不该让整轮 LLM 编排回退离线——
+        工具异常在这里收敛成模型读得懂的一句话。
+        """
+        if self.records is None:
+            return {"ok": False, "hint": "记录库未启用（未配置 RECORDS_DB）"}
+        allowed = {
+            "records_query": {"file_id", "condition_id", "vehicle", "function_key", "limit"},
+            "records_compare": {"condition_id", "function_key", "vehicles", "metric",
+                                "limit"},
+        }.get(getattr(fn, "__name__", ""), set())
+        kwargs = {k: v for k, v in (args or {}).items()
+                  if k in allowed and v not in (None, "", [])}
+        if not kwargs.get("function_key") and selected_function:
+            kwargs["function_key"] = selected_function
+        try:
+            return fn(self.records, self.cfg, **kwargs)
+        except Exception as e:
+            log.exception("记录库查询失败")
+            return {"ok": False, "hint": f"记录库查询失败: {type(e).__name__}: {e}"}
 
     def _list_files_tool(self, chat, file_index) -> dict:
         """文件清单工具：不带参数纯清单（不加载信号）；带 file_index 加载后给通道名。"""

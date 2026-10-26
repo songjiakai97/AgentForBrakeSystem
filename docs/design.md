@@ -942,6 +942,12 @@ MATLAB 侧还要注意：`--matlab-root` / `--initialize-matlab-on-startup` /
 | GET | `/api/mcp` | 外部 MCP 服务状态：连没连上、报了几个工具、白名单有没有落空、调用与失败计数（§6.11）。`env`/`headers` 只回显**键名** |
 | POST | `/api/mcp/reconnect?name=` | 手动重连（改了 mcp.yaml 或对方服务刚起来）。同步等待并返回新状态；`name` 省略 = 全部；没配任何服务 400 |
 | POST | `/api/mcp/call/{tool_name}` | 调试用：绕开 LLM 直调一个外部工具，用来区分「模型参数填错了」和「工具本来就这样返回」（§6.11）。非外部工具名 404 |
+| GET | `/api/records/meta` | 记录库筛选项与库内状态（§17.6） |
+| GET | `/api/records` | 记录清单：按编号/车型/工况/功能过滤，只读不解析 |
+| GET | `/api/records/{record_id}` | 记录详情：必要时惰性分析，返回结果卡片与事件窗口；`refresh=true` 强制重算 |
+| GET | `/api/records/{record_id}/timeseries` | 整段曲线 + 事件窗口高亮，只画该功能 `signals` |
+| GET | `/api/records/compare` | 同工况跨车型横向对比 |
+| GET | `/records` | 记录库页面 |
 | GET | `/api/debug/traces` | 调试 trace 列表 |
 | GET | `/api/debug/traces/{tid}` | 单条 trace 详情 |
 | GET | `/debug` | 调试页 |
@@ -1176,7 +1182,13 @@ functions:
     profiles: [<profile_a>, <profile_b>, ...]   # 可选；该功能支持的档位标签
     kb_section: <section_id>
     description: <说明>
+    signals: [<logical_signal>, ...]  # 本功能要看的逻辑信号（有序）
 ```
+
+`signals` 有两个用途：图表只画这些通道（ABS 不画 `TCS_Active`、TCS 不画
+`BrakePedalPos`），以及加载期校验——该功能指标的 `inputs`、切窗模板读取的通道
+（含工况级 `segmenter`）都必须在这个清单里。漏写的后果是「图能画、指标却算不出」，
+所以这条检查放在加载期而不是运行期。
 
 `profiles` 的每一项是「一个组合」，用竖线分成若干**维度**：`["4WD|2WD", "DTCS|TCS"]` 读作
 两维（驱动形式 × TCS 档位），加载期同时拆出
@@ -1201,6 +1213,7 @@ functions:
     maneuver: <maneuver>
     surface_code: <surface_code>       # 仅元数据，供展示与 LLM 参考
     segmenter: <segmenter_key>         # 可选：覆盖功能级切窗模板（§6.3）
+    file_ids: ["4.1.1"]                # 试验大纲编号；一个工况可有多个（对开左右各一）
     params:
       <param_key>: <value>
     metrics:
@@ -1252,6 +1265,10 @@ functions:
 
 工况级还可选 `segmenter`（覆盖 `functions.yaml` 的切窗模板，见 §6.3）。窗口不是整段
 速度区间时，`brake_distance` / `acc_time` 会被加载期拒绝——它们的物理含义依赖车速穿越切窗。
+
+`file_ids` 是记录库的入口（§17）：文件名以编号开头即归入该工况，导入脚本据此建库。
+格式只允许数字和点（`4.1.1`、`4.1.3.1`），同一编号不能挂在两个工况上，这两个约束
+都在加载期报错——编号一旦重复，历史数据会静默归错工况。
 
 说明：
 
@@ -2191,3 +2208,109 @@ curl -s -X POST localhost:8000/api/mcp/call/mcp__matlab__detect_matlab_toolboxes
   压缩摘要文本落步骤消息；debug 页 trace 两级折叠（会话→请求），**不自动刷新**——
   5 秒一次的整页重绘会丢掉展开状态与滚动位置，正是要看 trace 的时候最碍事，改为手动点「刷新」。
 - 性能：`_crossings` numpy 向量化；anyio 线程池 40→200（SSE 长连接占线程问题）。
+
+## 17. 试验记录库（2026-10-26）
+
+### 17.1 定位与边界
+
+用途：把服务器上的历史/竞品试验数据登记成可对话查询的库，用于**横向对比实车表现**。
+
+只存三样东西：**编号 + 服务器上的文件路径 + 解析出来的指标结论**。原始信号不入库：
+
+- 一个工况 BLF 动辄几百 MB，复制进库会把磁盘吃光，而结论只有几十个数；
+- 曲线要的是「整段 + 窗口」，随时按路径重新解析即可，没必要存两份；
+- 数据只在服务器侧，不上传、不对外提供下载。
+
+### 17.2 目录与编号约定
+
+```
+<根目录>/<车型代号>/<4-ABS|5-TCS>/<4.1.1_20260801_01.blf
+```
+
+- 车型代号取**第一级目录名**，导入前人工整理好，脚本不猜；
+- 文件名必须以编号开头（`4.1.1_xxx.blf`、`4-1-1-01.blf` 均可）。编号内部的 `.` 与 `-`
+  等价；匹配要求紧后一位不是数字，否则 `4.1.1` 会把 `4.1.10` 吃掉；多个编号同时命中取
+  最长的那个；
+- 编号 → 工况来自 `conditions.yaml` 的 `file_ids`（§9.3）。一个工况可有多个编号
+  （对开路面左低右高/左高右低两条），但一个编号只能属于一个工况；
+- 没有编号的文件**跳过**（大纲外的临时文件很常见），不猜；
+- 科室目录（`4-ABS`/`5-TCS`）与编号所属功能不一致时**跳过并告警**——这种多半是文件放错
+  位置，静默入库会让后续对比拿错工况。
+
+导入：
+
+```bash
+python scripts/import_records.py --root /mnt/testdata --db data/records.db --dry-run
+python scripts/import_records.py --root /mnt/testdata
+```
+
+输出三份清单：已入库 / 重复 / 跳过（按原因分组：无编号、目录不符、缺车型目录、类型不支持）。
+`--dry-run` 只统计不写库；`--json` 给机器读。
+
+### 17.3 数据模型（SQLite）
+
+```
+record(record_id PK, file_id, condition_id, vehicle, rel_path UNIQUE, file_path,
+       file_name, file_size, file_sha1, file_mtime, recorded_at, batch_id,
+       imported_at, analysis_status, last_error)
+analysis(record_id PK, analysis_id, config_fingerprint, analyzed_at,
+         sample_count, degraded)
+metric_value(record_id, sample_index, metric_key, name, value, unit,
+             status, missing_reason, ts_start, ts_end)   PK(record_id,sample_index,metric_key)
+verdict(record_id, sample_index, rule_id, metric_key, status, severity,
+        fault_domain, message)                            PK(record_id,sample_index,rule_id)
+import_batch(batch_id PK, started_at, root, config_fingerprint, 各计数, note)
+```
+
+- `record_id = sha1(rel_path)[:12]`：路径是身份，同一路径重导只更新元数据；
+- `analysis_status`：`pending`（未算）/ `ok` / `error` / `file_gone`；
+- `metric_value` 按事件样本展开，`ts_start/ts_end` 存窗口（即指标 `ts_range`），
+  图表高亮直接取它，不需要重解析；
+- 内容（sha1/大小/mtime）或所属工况变化时，旧 `analysis/metric_value/verdict` 一律删除，
+  避免库里长期留着已经不成立的数值。
+
+### 17.4 惰性分析 + 缓存
+
+导入只登记路径；指标在第一次被查询时才算，并写回缓存。
+
+- 缓存键 = **文件内容 sha1 + 配置指纹**。指纹是 `configs/*.yaml` 内容的 sha1 前 16 位，
+  改工况/阈值/指标后自动失效重算；
+- 文件不在服务器上 → 记 `file_gone`，`analyze_pending` 会跳过它（重新导入同一路径
+  会把状态改回 `pending`）；
+- 解析异常 → `error` + `last_error`（截断 500 字），下次批量补齐会重试；
+- `RecordService.analyze_pending()` 提供给夜间任务/运维做批量补齐，不是默认路径。
+
+### 17.5 对话查询工具
+
+| 工具 | 用途 | 关键口径 |
+| --- | --- | --- |
+| `query_records` | 按编号/工况/车型列记录 | 只读；未分析的记录只标状态，不触发解析 |
+| `compare_records` | 同一工况下按车型横向对比 | 只比已分析记录；未分析的列进 `not_analyzed` |
+
+返回里每条记录都带 `record_id`，前端据此出「整段曲线 + 窗口高亮」；模型只引用数值，
+不描述曲线。指标汇总口径：同一文件多个事件样本取均值，同时给 `min/max/n`；
+状态取最差的一档（平均正常但单样本超限不能被读成正常）。
+
+系统提示里要求：条件不明确时先问编号/车型/工况，不要跨工况拼对比。
+
+### 17.6 Web 接口与页面
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/records/meta` | 筛选项（车型/功能/工况/编号/指标）+ 库内状态 |
+| `GET /api/records` | 清单（只读元数据，不解析） |
+| `GET /api/records/{id}` | 详情：必要时惰性分析，返回结果卡片（含 ok_range）+ 窗口 |
+| `GET /api/records/{id}?refresh=true` | 强制重算 |
+| `GET /api/records/{id}/timeseries` | 整段曲线 + 窗口高亮，只画该功能 `signals` |
+| `GET /api/records/compare` | 横向对比表数据 |
+
+`/records` 页面：车型/功能/工况/编号筛选 → 记录清单 → 详情卡片 + 曲线 → 对比表。
+图表的窗口高亮与曲线裁剪分开（`build_chart_option(highlight=...)`）：记录库看的是
+整段过程，窗口只做标记；分析卡片的图表仍沿用「裁剪到窗口」的旧行为。
+
+### 17.7 运维
+
+- 库路径由 `RECORDS_DB` 环境变量指定（默认 `<repo>/data/records.db`），首次连接自动建表；
+- 配置改了不用重建库：指纹变化后首次查询/查看会自动重算；
+- 删库重导即可彻底重算；`meta.schema_version` 保留给后续迁移；
+- 导入脚本只登记，不做解析，因此可以放心对大盘目录跑（`--dry-run` 先看清单）。
