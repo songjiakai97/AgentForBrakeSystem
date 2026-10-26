@@ -9,11 +9,14 @@
 各自管理生命周期。时间统一存 ISO-8601 字符串（UTC），排序即字典序。
 """
 
+import glob
 import hashlib
 import os
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
+
+import yaml
 
 from ..schemas import AnalysisResult, decompose_metric_key
 
@@ -141,11 +144,57 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 # ---------------------------------------------------------------- 指纹/哈希
 
+def _hash_file(h, path: str, chunk_size: int = 1 << 20) -> None:
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+
+
+def _dbc_refs(config_dir: str) -> List[tuple]:
+    """signals_blf.yaml 里引用的 DBC：("file", 绝对路径) 或 ("absent", 原始写法)。
+
+    现场库常以 ${ENV} 指向仓外路径；未提供时把 "absent" 也写进指纹，库装上
+    那次分析才会重算，而不是沿用没有该总线信号时的旧结论。
+    """
+    # 局部导入：configs 会反过来引 records.naming，模块级互相 import 容易踩顺序坑
+    from ..configs import _expand_env, _resolve_config_path
+
+    path = os.path.join(config_dir, "signals_blf.yaml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return []
+    buses = raw.get("buses") if isinstance(raw, dict) else None
+    if not isinstance(buses, dict):
+        return []
+    out: List[tuple] = []
+    for info in buses.values():
+        if not isinstance(info, dict):
+            continue
+        dbc = info.get("dbc")
+        items = [dbc] if isinstance(dbc, str) else (dbc if isinstance(dbc, list) else [])
+        for item in items:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            item = item.strip()
+            expanded = _expand_env(item)
+            if expanded is None:
+                out.append(("absent", item))
+                continue
+            real = _resolve_config_path(expanded, config_dir)
+            out.append(("file", real) if os.path.exists(real) else ("absent", item))
+    return out
+
+
 def config_fingerprint(config_dir: str) -> str:
-    """配置指纹：任何 yaml 内容变化都换指纹，缓存随之失效。
+    """配置指纹：yaml 与 DBC 内容一变就换指纹，缓存随之失效。
 
     只算配置不算代码：改指标实现而配置不变的场景，用户可以删库重导或
     手动把 analysis 行删掉，比每次启动强制重算更可控。
+
+    DBC 必须计入：它决定信号怎么解码，只哈希 yaml 会出现「配置没动、
+    曲线却该变」的静默陈旧，尤其是同一总线挂多份 DBC 之后。
     """
     h = hashlib.sha1()
     if not os.path.isdir(config_dir):
@@ -157,8 +206,22 @@ def config_fingerprint(config_dir: str) -> str:
         if not os.path.isfile(path):
             continue
         h.update(name.encode("utf-8"))
-        with open(path, "rb") as f:
-            h.update(f.read())
+        _hash_file(h, path)
+
+    # 1) configs 目录下所有 DBC（提交入库的那部分，含子目录）
+    root = os.path.abspath(config_dir)
+    for path in sorted(glob.glob(os.path.join(root, "**", "*.dbc"), recursive=True)):
+        h.update(b"#dbc:")
+        h.update(os.path.relpath(path, root).encode("utf-8"))
+        _hash_file(h, path)
+
+    # 2) signals_blf.yaml 里指向仓外的库（现场 ${ENV} 路径）
+    for kind, value in _dbc_refs(config_dir):
+        if kind == "file" and os.path.abspath(value).startswith(root + os.sep):
+            continue                    # 已在 1) 里算过
+        h.update(f"#dbc-ref:{kind}:{value}".encode("utf-8"))
+        if kind == "file":
+            _hash_file(h, value)
     return h.hexdigest()[:16]
 
 

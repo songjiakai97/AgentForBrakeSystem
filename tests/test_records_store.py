@@ -212,6 +212,33 @@ def test_config_fingerprint_tracks_yaml_edits(tmp_path):
     assert store.config_fingerprint(str(cfg_dir)) != before
 
 
+def test_config_fingerprint_tracks_dbc_edits(tmp_path):
+    """DBC 决定怎么解码：库改了而 yaml 没动，缓存也必须失效。"""
+    cfg_dir = tmp_path / "configs"
+    shutil.copytree(CONFIG_DIR, cfg_dir)
+    before = store.config_fingerprint(str(cfg_dir))
+    dbc = cfg_dir / "dbc" / "brake_demo.dbc"
+    dbc.write_text(dbc.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert store.config_fingerprint(str(cfg_dir)) != before
+
+
+def test_config_fingerprint_tracks_missing_env_dbc(tmp_path, monkeypatch):
+    """现场库未提供时留 absent 占位：库装上后指纹必须变，否则会沿用旧结论。"""
+    cfg_dir = tmp_path / "configs"
+    shutil.copytree(CONFIG_DIR, cfg_dir)
+    yml = cfg_dir / "signals_blf.yaml"
+    yml.write_text(yml.read_text(encoding="utf-8").replace(
+        "dbc: configs/dbc/brake_demo.dbc", "dbc: ${LATE_DBC}"), encoding="utf-8")
+
+    monkeypatch.delenv("LATE_DBC", raising=False)
+    before = store.config_fingerprint(str(cfg_dir))
+
+    late = tmp_path / "late.dbc"
+    late.write_text('VERSION "t"\n', encoding="utf-8")
+    monkeypatch.setenv("LATE_DBC", str(late))
+    assert store.config_fingerprint(str(cfg_dir)) != before
+
+
 def test_iter_pending_includes_stale_fingerprint(tmp_path, imp, cfg):
     root = tmp_path / "data"
     _touch(root, "carA/4-ABS/4.1.1_a.blf")

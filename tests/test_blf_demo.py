@@ -57,7 +57,7 @@ def blf_cfg(cfg):
 def blf_loader(blf_cfg):
     from brake_analyzer.loaders import BLFLoader
 
-    return BLFLoader(blf_cfg.dbc_files, blf_cfg.signal_maps)
+    return BLFLoader(blf_cfg)
 
 
 def _require(fname):
@@ -70,18 +70,19 @@ def _require(fname):
 # ---------------------------------------------------------------- 1. 配置
 
 class TestBlfConfig:
-    def test_single_dbc_channel_zero(self, blf_cfg):
-        assert list(blf_cfg.dbc_files) == ["BRAKE"], "demo 只用一份 DBC"
-        info = blf_cfg.dbc_files["BRAKE"]
-        assert info["channel"] == 0, "通道全部设成 0"
-        assert os.path.isabs(info["path"]) and os.path.exists(info["path"])
+    def test_single_bus_auto_channels(self, blf_cfg):
+        assert list(blf_cfg.buses) == ["BRAKE"], "demo 只用一条总线"
+        info = blf_cfg.buses["BRAKE"]
+        assert blf_cfg.channels is None, "channels: auto = 运行时按 msg_id 识别"
+        assert len(info["dbcs"]) == 1, "demo 一条总线挂一份 DBC"
+        assert os.path.isabs(info["dbcs"][0]) and os.path.exists(info["dbcs"][0])
 
     def test_paths_resolved_from_any_cwd(self, blf_cfg):
         """yaml 里写仓库根相对路径，Loader 拿到的必须已是绝对路径。"""
         from brake_analyzer.loaders import BLFLoader
 
         # 不依赖进程 cwd（pytest 可能在任意目录启动）
-        assert BLFLoader(blf_cfg.dbc_files, blf_cfg.signal_maps) is not None
+        assert BLFLoader(blf_cfg) is not None
 
     def test_coverage_contract(self, cfg, blf_cfg):
         """两侧不再要求信号集相同；卡的是「逻辑名已登记 + 计算必需信号齐全」。"""
@@ -94,10 +95,10 @@ class TestBlfConfig:
                 cfg.signal_registry[name]["description"]
 
     def test_candidates_all_resolvable_in_dbc(self, blf_cfg):
-        db = cantools.database.load_file(blf_cfg.dbc_files["BRAKE"]["path"])
+        db = cantools.database.load_file(blf_cfg.buses["BRAKE"]["dbcs"][0])
         for name, spec in blf_cfg.signal_maps.items():
-            for alias, msg_id, sig_name in spec["candidates"]:
-                assert alias in blf_cfg.dbc_files
+            for bus, msg_id, sig_name in spec["candidates"]:
+                assert bus in blf_cfg.buses
                 frame_id, is_ext = _parse(msg_id)
                 msg = db.get_message_by_frame_id(frame_id)
                 assert msg is not None, f"{name} 帧 {msg_id} 不在 DBC"
@@ -105,7 +106,7 @@ class TestBlfConfig:
                 assert any(s.name == sig_name for s in msg.signals), f"{name} 信号缺失"
 
     def test_dbc_layout_8bytes_no_overlap(self, blf_cfg):
-        db = cantools.database.load_file(blf_cfg.dbc_files["BRAKE"]["path"])
+        db = cantools.database.load_file(blf_cfg.buses["BRAKE"]["dbcs"][0])
         for msg in db.messages:
             assert msg.length == 8
             used = {}
@@ -115,7 +116,7 @@ class TestBlfConfig:
                     used[bit] = sig.name
 
     def test_status_bits_are_one_bit_enums(self, blf_cfg):
-        db = cantools.database.load_file(blf_cfg.dbc_files["BRAKE"]["path"])
+        db = cantools.database.load_file(blf_cfg.buses["BRAKE"]["dbcs"][0])
         for name in ("ABS_Active", "TCS_Active"):
             sig = next(s for m in db.messages for s in m.signals if s.name == name)
             assert sig.length == 1
@@ -131,14 +132,14 @@ class TestBlfConfig:
         with pytest.raises(ConfigError, match="msg_id"):
             load_blf_config(d)
 
-    def test_unknown_alias_rejected(self, tmp_path):
+    def test_unknown_bus_rejected(self, tmp_path):
         import yaml
 
         d = _copy_config(tmp_path)
         raw = yaml.safe_load(open(os.path.join(CONFIG_DIR, "signals_blf.yaml"), encoding="utf-8"))
         raw["signal_maps"]["Ax"]["candidates"] = [["NOPE", "0x102", "Ax"]]
         _write(d, "signals_blf.yaml", raw)
-        with pytest.raises(ConfigError, match="alias"):
+        with pytest.raises(ConfigError, match="bus"):
             load_blf_config(d)
 
     def test_missing_dbc_file_rejected(self, tmp_path):
@@ -146,7 +147,7 @@ class TestBlfConfig:
 
         d = _copy_config(tmp_path)
         raw = yaml.safe_load(open(os.path.join(CONFIG_DIR, "signals_blf.yaml"), encoding="utf-8"))
-        raw["dbc_files"]["BRAKE"]["path"] = "dbc/not_here.dbc"
+        raw["buses"]["BRAKE"]["dbc"] = "dbc/not_here.dbc"
         _write(d, "signals_blf.yaml", raw)
         with pytest.raises(ConfigError, match="不存在"):
             load_blf_config(d)
@@ -171,7 +172,7 @@ class TestBlfConfig:
         assert "Ax" not in blf_cfg.signal_maps
         # 计算必需的信号仍在，缺的观测量由 Loader 回退成"该通道不存在"
         assert "speed_vbox" in blf_cfg.signal_maps
-        data = BLFLoader(blf_cfg.dbc_files, blf_cfg.signal_maps).load(
+        data = BLFLoader(blf_cfg).load(
             _require("abs_dry100_normal.blf"))
         assert "Ax" not in data and "speed_vbox" in data
 
@@ -309,11 +310,14 @@ class TestBlfLoaderOnDemo:
         assert data["yaw_rate"].ts.size == 0
         assert data["speed_vbox"].values.size > 0
 
-    def test_wrong_channel_would_not_match(self, blf_cfg):
+    def test_explicit_wrong_channel_would_not_match(self, blf_cfg):
+        """显式 channels 写错通道号 → 全空；显式优先，不会偷偷回退到自动识别。"""
+        from dataclasses import replace
+
         from brake_analyzer.loaders import BLFLoader
 
-        bad = {"BRAKE": {"path": blf_cfg.dbc_files["BRAKE"]["path"], "channel": 3}}
-        data = BLFLoader(bad, blf_cfg.signal_maps).load(_require("abs_dry100_normal.blf"))
+        bad = replace(blf_cfg, channels={3: "BRAKE"})
+        data = BLFLoader(bad).load(_require("abs_dry100_normal.blf"))
         assert all(sd.values.size == 0 for sd in data.values())
 
     def test_loader_instance_reusable(self, blf_loader):
@@ -328,7 +332,7 @@ class TestGenerator:
     def test_check_layout_passes_on_committed_dbc(self, blf_cfg):
         from scripts.generate_demo_blf import check_layout
 
-        db = cantools.database.load_file(blf_cfg.dbc_files["BRAKE"]["path"])
+        db = cantools.database.load_file(blf_cfg.buses["BRAKE"]["dbcs"][0])
         check_layout(db, CONFIG_DIR)
 
     def test_check_layout_catches_overlap(self):
@@ -349,7 +353,7 @@ class TestGenerator:
     def test_check_layout_catches_wrong_length(self, blf_cfg):
         from scripts.generate_demo_blf import check_layout
 
-        db = cantools.database.load_file(blf_cfg.dbc_files["BRAKE"]["path"])
+        db = cantools.database.load_file(blf_cfg.buses["BRAKE"]["dbcs"][0])
         db.messages[0].length = 6
         with pytest.raises(AssertionError, match="8 字节"):
             check_layout(db, CONFIG_DIR)
@@ -365,7 +369,7 @@ class TestGenerator:
                 for m in db.messages for s in m.signals)
 
         assert digest(build_database()) == digest(
-            cantools.database.load_file(blf_cfg.dbc_files["BRAKE"]["path"]))
+            cantools.database.load_file(blf_cfg.buses["BRAKE"]["dbcs"][0]))
 
     def test_scenario_matrix_coverage(self):
         from scripts.generate_demo_blf import scenario_matrix

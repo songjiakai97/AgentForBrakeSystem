@@ -1,12 +1,18 @@
 # BLF 信号映射（design.md §9.6）
 #
-# 只回答一件事：逻辑信号在 CAN/DBC 侧叫什么、在哪一帧。
+# 只回答两件事：文件里有哪几条总线、逻辑信号在 CAN 侧叫什么、在哪一帧。
 # 单位与描述在 configs/signals.yaml 登记一次，这里不重复写。
+#
+# 通道号不写死：`channels: auto` 时由 BLFLoader 按下面 candidates 里出现的
+# msg_id 自动识别「哪个 CAN 通道是哪条总线」（loaders/blf_channels.py）。
+#   - 识别不读 DBC，只比对报文 ID → 没有 DBC 的总线同样能被识别；
+#   - 一个总线可挂多份 DBC，按书写顺序查找，先命中者胜；
+#   - 识别有把握时不打扰人，把握不足会在分析的告警里说明，可用
+#     `channels: {0: BRAKE}` 显式指定（显式优先且跳过识别扫描）。
 #
 # demo 约定：一份 DBC 管全部逻辑信号（configs/dbc/brake_demo.dbc，由
 # scripts/generate_demo_blf.py 用 cantools 生成并提交入库），实车信号名 = 逻辑名，
-# 所有报文都发在通道 0（dbc_files.channel: 0，BLFLoader 按
-# (frame_id, is_extended, channel) 匹配帧）。
+# 所有报文都发在通道 0；BLFLoader 按 (frame_id, is_extended, 识别出的通道) 匹配帧。
 #
 # DBC 布局（8 字节标准帧，逐信号连续排布故不重叠；量化按「不改变 demo 判定」选）：
 #   0x100 WHEEL_SPEED_1  wheelSpeed_FL/FR   16bit × 0.01 km/h
@@ -15,16 +21,28 @@
 #   0x103 PEDAL_STATUS_1 BrakePedalPos/ThrottlePedalPos 8bit × 0.5 %，ABS/TCS 各 1bit
 #   0x104 VEH_DYN_2      yaw_rate 16bit 有符号 × 0.01 deg/s（单独一帧，便于造「缺通道」）
 #
-# 接入真实数据时：把真实 DBC 追加为另一个 alias，并在对应信号的 candidates 前面
-# 插入 [真实alias, "0x123", 真实信号名]；扩展帧 id 写作 "0x123x"。
+# 接入真实数据时：把真实 DBC 追加到对应总线的 dbc 列表，并在信号的 candidates
+# 前面插入 [总线, "0x123", 真实信号名]；扩展帧 id 写作 "0x123x"。
+# 客户现场才有的库写 ${ENV_VAR}：变量未设置时视为「本机没有这份库」，不影响启动。
 #
 # 覆盖度：BLF 只有总线上发布的信号，允许比 MF4 少带纯观测量（如 Ax、状态位）；
 # 参与计算的信号（metrics.yaml inputs ∪ 分段器通道）一个都不能少，
 # 由 load_blf_config(required_signals=...) 在启动期把关。
-dbc_files:
+
+buses:
   BRAKE:
-    path: configs/dbc/brake_demo.dbc
-    channel: 0
+    label: 制动 demo
+    dbc: configs/dbc/brake_demo.dbc
+
+channels: auto
+
+channel_detect:
+  scan_seconds: 15          # 采样识别只看前 15 s（周期帧足够）
+  scan_frames: 500000       # 或前 50 万帧，先到者为准
+  min_frames: 2             # 一个 ID 至少出现几帧才算「在场」
+  min_hits: 2               # 一条总线至少命中几个逻辑信号才算识别成功
+  min_score: 0.6            # 归一化后的最低得分
+  min_margin: 0.15          # 领先次优通道的最小差距
 
 signal_maps:
   speed_vbox:

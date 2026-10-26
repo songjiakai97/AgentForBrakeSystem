@@ -145,11 +145,14 @@ BLF_MAPS = {
 class TestBLFLoader:
     def _loader(self, blf_files):
         p_ec, p_body, _ = blf_files
-        dbc_files = {
-            "EC": {"path": p_ec, "channel": 0},
-            "BODY": {"path": p_body, "channel": 1},
-        }
-        return BLFLoader(dbc_files, BLF_MAPS), blf_files[2]
+        from brake_analyzer.configs import BlfConfigs
+
+        cfg = BlfConfigs(
+            buses={"EC": {"label": "EC", "dbcs": [p_ec], "unavailable": []},
+                   "BODY": {"label": "BODY", "dbcs": [p_body], "unavailable": []}},
+            signal_maps=BLF_MAPS,
+        )
+        return BLFLoader(cfg), blf_files[2]
 
     def test_load(self, blf_files):
         loader, blf_path = self._loader(blf_files)
@@ -180,3 +183,16 @@ class TestBLFLoader:
         a = loader.load(blf_path)
         b = loader.load(blf_path)
         assert np.allclose(a["wheel_speed"].values, b["wheel_speed"].values)
+
+    def test_explicit_channel_on_wrong_number_matches_nothing(self, blf_files):
+        """显式 channels 优先且跳过识别；通道号写错 → 全部空，不静默猜。"""
+        from brake_analyzer.configs import BlfConfigs
+
+        p_ec, _p_body, blf_path = blf_files
+        cfg = BlfConfigs(
+            buses={"EC": {"label": "EC", "dbcs": [p_ec], "unavailable": []}},
+            signal_maps={"wheel_speed": BLF_MAPS["wheel_speed"]},
+            channels={3: "EC"},
+        )
+        data = BLFLoader(cfg).load(blf_path)
+        assert all(sd.values.size == 0 for sd in data.values())

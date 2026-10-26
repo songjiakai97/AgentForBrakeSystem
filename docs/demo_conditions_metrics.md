@@ -375,7 +375,8 @@ signal_maps:
   ThrottlePedalPos: {candidates: [ThrottlePedalPos]}
 ```
 
-BLF 侧（`signals_blf.yaml`）同样只填 `[dbc_alias, msg_id, signal_name]` 候选，逻辑名保持不变；
+BLF 侧（`signals_blf.yaml`）同样只填 `[bus, msg_id, signal_name]` 候选，逻辑名保持不变；
+通道归属由 `channels: auto` 在加载时按这些 msg_id 识别，不再手写通道号。
 参与计算的信号（metrics.yaml 的 inputs ∪ 分段器通道）必须两侧齐全，纯观测量可以只带一侧。
 
 ## 7. 指标口径确认结论（2026-09-22）

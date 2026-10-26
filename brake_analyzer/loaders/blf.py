@@ -1,13 +1,23 @@
-"""BLF Loader：基于 python-can + cantools 按 DBC 定义解码 CAN 信号。"""
+"""BLF Loader：基于 python-can + cantools 按 DBC 定义解码 CAN 信号。
+
+通道归属由 loaders/blf_channels.py 按 `signals_blf.yaml` 里的 msg_id 自动识别
+（`channels: auto`），识别结果逐文件决定，因此：
+
+- 同一 ID 出现在两条总线上、甚至代表不同信号也不会串线——解码用的
+  `frame_lookup` 键始终带通道号；
+- 一条总线可以挂多份 DBC，按 yaml 里的声明顺序查找，先命中者胜。
+"""
 
 import logging
-from typing import Any, Dict
+import os
+from typing import Any, Dict, List, Tuple
 
 import can
 import cantools
 import numpy as np
 
 from .base import Loader, SignalData, _parse_msg_id
+from .blf_channels import identify
 
 log = logging.getLogger(__name__)
 
@@ -17,67 +27,109 @@ class BLFLoader(Loader):
     从 BLF 文件中按候选名依次提取 CAN 信号（基于 cantools 解码）。
 
     用法：
-        loader = BLFLoader(dbc_files, signal_maps)
+        loader = BLFLoader(blf_cfg)          # signals_blf.yaml 的校验结果
         data_a = loader.load("a.blf")
         data_b = loader.load("b.blf")
     """
 
-    def __init__(
-        self,
-        dbc_files: Dict[str, Dict[str, Any]],
-        signal_maps: Dict[str, Dict[str, Any]],
-    ):
-        self.dbc_files = dbc_files
-        self.signal_maps = signal_maps
+    def __init__(self, blf_cfg):
+        self.cfg = blf_cfg
+        self.buses: Dict[str, Dict[str, Any]] = blf_cfg.buses
+        self.signal_maps: Dict[str, Dict[str, Any]] = blf_cfg.signal_maps
         # 解析中断告警：BLF 中途坏帧/IO 失败会让剩余帧全部丢失。半截数据出结论
         # 比报错更危险，所以保留部分数据但必须把中断事实暴露给调用方
         self.load_errors: list = []
 
-        self._db_by_alias_ch: Dict[tuple, Any] = {}
-        for alias, info in dbc_files.items():
-            db = cantools.database.load_file(info["path"])
-            self._db_by_alias_ch[(alias, info["channel"])] = db
+        # DBC 在构造期解析：坏库/路径错在启动时就暴露，而不是等第一次分析；
+        # 同一份库被多条总线引用时只解析一次
+        self._db_by_path: Dict[str, Any] = {}
+        for info in self.buses.values():
+            for path in info.get("dbcs", []):
+                if path not in self._db_by_path:
+                    self._db_by_path[path] = cantools.database.load_file(path)
 
-    def load(self, file_path: str) -> Dict[str, SignalData]:
-        result: Dict[str, SignalData] = {}
+        # 识别结果按「文件 stat + 路径」缓存：引擎会复用同一个 loader 实例，
+        # 同一文件常常要被连算两次（分析 + 出图）
+        self._channels_cache: Dict[tuple, Tuple[Dict[str, int], List[str]]] = {}
 
-        # 1. 候选解析：为每个逻辑信号确定 (alias, channel, msg_def, sig_name, sig_def)
+    # ------------------------------------------------------------ 通道识别
+    def _stat_key(self, path: str) -> tuple:
+        st = os.stat(path)
+        return (path, st.st_size, st.st_mtime_ns)
+
+    def _bus_channels(self, path: str, errors: List[str]) -> Dict[str, int]:
+        """返回 {总线: 通道号}；识别失败的总线不在结果里（其信号按缺失处理）。"""
+        if self.cfg.channels is not None:       # 显式绑定优先，且不扫文件
+            return {bus: ch for ch, bus in self.cfg.channels.items()}
+        key = self._stat_key(path)
+        cached = self._channels_cache.get(key)
+        if cached is None:
+            report = identify(path, list(self.buses), self.signal_maps,
+                              self.cfg.channel_detect)
+            cached = (report.bus_channels(), report.warnings)
+            self._channels_cache[key] = cached
+        channels, warnings = cached
+        errors.extend(warnings)
+        return channels
+
+    # ------------------------------------------------------------ 解析
+    def _resolve(self, bus_ch: Dict[str, int]) -> Dict[str, tuple]:
+        """候选 → (bus, channel, msg_def, signal_name, signal_def)。
+
+        候选顺序优先，其次 DBC 声明顺序：一个逻辑信号只对应一个 (msg_def, signal)，
+        不会因为两份 DBC 都定义了同一帧而重复出点。
+        """
         resolved: Dict[str, tuple] = {}
         for logical_name, spec in self.signal_maps.items():
             for cand in spec.get("candidates", []):
-                alias, msg_id, sig_name = cand[0], cand[1], cand[2]
-                alias_ch = self.dbc_files.get(alias, {}).get("channel")
-                if alias_ch is None:
+                bus, msg_id, sig_name = cand[0], cand[1], cand[2]
+                ch = bus_ch.get(bus)
+                if ch is None:
                     continue
-                db = self._db_by_alias_ch.get((alias, alias_ch))
-                if db is None:
-                    continue
-
                 frame_id, is_ext = _parse_msg_id(msg_id)
-                try:
-                    msg_def = db.get_message_by_frame_id(
-                        frame_id, force_extended_id=is_ext
-                    )
-                except KeyError:
-                    continue
+                for dbc_path in self.buses.get(bus, {}).get("dbcs", []):
+                    db = self._db_by_path.get(dbc_path)
+                    if db is None:
+                        continue
+                    try:
+                        msg_def = db.get_message_by_frame_id(
+                            frame_id, force_extended_id=is_ext)
+                    except KeyError:
+                        continue
+                    sig_def = next((s for s in msg_def.signals if s.name == sig_name), None)
+                    if sig_def is None:
+                        continue
+                    resolved[logical_name] = (bus, ch, msg_def, sig_name, sig_def)
+                    break
+                if logical_name in resolved:
+                    break
+        return resolved
 
-                sig_def = next((s for s in msg_def.signals if s.name == sig_name), None)
-                if sig_def is None:
-                    continue
+    def load(self, file_path: str) -> Dict[str, SignalData]:
+        result: Dict[str, SignalData] = {}
+        self.load_errors = []
 
-                resolved[logical_name] = (alias, alias_ch, msg_def, sig_name, sig_def)
-                break
+        # 1. 通道识别 → 候选解析（总线未识别或 DBC 里找不到的候选逐条回退）
+        bus_ch = self._bus_channels(file_path, self.load_errors)
+        for bus in bus_ch:
+            missing = self.buses.get(bus, {}).get("unavailable") or []
+            if missing:      # 识别成功但本机没有库：说清楚是「解不了」而不是「没数据」
+                self.load_errors.append(
+                    f"总线 {bus} 的 DBC 未提供（{', '.join(missing)}），"
+                    "该总线的信号无法解码")
+        resolved = self._resolve(bus_ch)
 
         # 2. 按报文分组，避免同一帧重复解码
         decode_groups: Dict[tuple, list] = {}
-        for logical_name, (alias, ch, msg_def, sig_name, sig_def) in resolved.items():
+        for logical_name, (_bus, ch, msg_def, sig_name, sig_def) in resolved.items():
             key = (id(msg_def), ch, bool(msg_def.is_extended_frame))
             decode_groups.setdefault(key, []).append((logical_name, sig_name, sig_def))
 
-        # 3. 帧索引：(frame_id, is_extended, channel) → 待解码分组列表
+        # 3. 帧索引：(frame_id, is_extended, channel) → 待解码分组列表。
+        #    键里带通道号是「同一 ID 在不同总线代表不同信号」不被解错的关键
         frame_lookup: Dict[tuple, list] = {}
         msg_def_by_id: Dict[int, Any] = {}
-        for logical_name, (alias, ch, msg_def, sig_name, sig_def) in resolved.items():
+        for _logical_name, (_bus, ch, msg_def, _sig_name, _sig_def) in resolved.items():
             msg_def_by_id[id(msg_def)] = msg_def
             lookup_key = (msg_def.frame_id, bool(msg_def.is_extended_frame), ch)
             group_key = (id(msg_def), ch, bool(msg_def.is_extended_frame))
@@ -88,7 +140,6 @@ class BLFLoader(Loader):
         collected: Dict[str, list] = {ln: [[], [], None] for ln in resolved}
 
         # 4. 单次遍历文件
-        self.load_errors = []
         n_frames = 0
         try:
             reader = can.BLFReader(file_path)

@@ -90,7 +90,7 @@ def make_loader(path: str, cfg: AppConfigs, blf_cfg=None) -> "object":
             raise NoDataError(".blf 需要 BLF 信号映射（configs/signals_blf.yaml）与 DBC，当前未启用")
         from .loaders.blf import BLFLoader
 
-        return BLFLoader(blf_cfg.dbc_files, blf_cfg.signal_maps)
+        return BLFLoader(blf_cfg)
     from .loaders.mf4 import MF4Loader
 
     return MF4Loader(cfg.signal_maps)

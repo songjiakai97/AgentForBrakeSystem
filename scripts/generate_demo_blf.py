@@ -146,17 +146,17 @@ def check_layout(db: Database, config_dir: str = None) -> None:
     missing = declared - {s.name for m in db.messages for s in m.signals}
     assert not missing, f"DBC 信号未覆盖 signals_blf.yaml 声明的信号：{sorted(missing)}"
 
-    # yaml 侧候选三元组必须能在 DBC 里解析到，且 alias 的 channel 与本帧一致
+    # yaml 侧候选三元组必须能在 DBC 里解析到（通道由 channels: auto 识别，不写死）
     for name, spec in blf_cfg.signal_maps.items():
-        alias, msg_id, sig_name = spec["candidates"][0]
+        bus, msg_id, sig_name = spec["candidates"][0]
+        assert bus in blf_cfg.buses, f"{name}: 候选总线 {bus} 未在 buses 里声明"
+        assert blf_cfg.buses[bus]["dbcs"], f"{name}: 总线 {bus} 没有配置 DBC"
         frame_id, is_ext = _parse_msg_id(msg_id)
         msg = db.get_message_by_frame_id(frame_id)
         assert msg is not None, f"{name}: DBC 里没有帧 {msg_id}"
         assert bool(msg.is_extended_frame) == is_ext, f"{name}: 帧 {msg_id} 标准/扩展不匹配"
         assert any(s.name == sig_name for s in msg.signals), (
             f"{name}: 帧 {msg_id} 里没有信号 {sig_name}")
-        assert int(blf_cfg.dbc_files[alias]["channel"]) == 0, (
-            f"demo 约定通道全部为 0，实际 {alias}={blf_cfg.dbc_files[alias]['channel']}")
 
 
 # ---------------------------------------------------------------- BLF 写入

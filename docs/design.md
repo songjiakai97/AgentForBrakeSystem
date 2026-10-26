@@ -134,7 +134,7 @@ brake-agent/
 ├── configs/
 │   ├── signals.yaml            # 格式无关层：logical_signals 登记表 + chart_layout 分组（§9.6）
 │   ├── signals_mf4.yaml        # MF4 侧：只声明候选通道名（§9.6）
-│   ├── signals_blf.yaml        # BLF 侧：dbc_files + 三元组候选（§9.6）
+│   ├── signals_blf.yaml        # BLF 侧：buses（可多份 DBC）+ 三元组候选 + 通道自动识别（§9.6）
 │   ├── dbc/
 │   │   └── brake_demo.dbc      # demo 唯一 DBC，由 scripts/generate_demo_blf.py 生成后入库
 │   ├── functions.yaml          # 功能清单
@@ -232,11 +232,16 @@ brake-agent/
 `signals_blf.yaml` 由同文件的 `load_blf_config(config_dir, required_signals=None, registry=None)`
 加载校验（与 `load_configs` 分开，因为 BLF 是可选能力，内核启动不强依赖它）：
 
-- `dbc_files` 必须非空，`channel` 必须是 int；`path` 解析成绝对路径后必须存在
-  （相对路径先按 `config_dir` 解析，再按仓库根解析，故 yaml 里可写
-  `configs/dbc/brake_demo.dbc`，进程从任意 cwd 启动都能找到）。
-- 每条候选必须是 `[alias, msg_id, signal_name]` 三元组，alias 在 `dbc_files` 内，
-  `msg_id` 符合 `"0x123"` / `"0x123x"` / int 约定。
+- `buses` 必须非空；每个总线可挂 0~N 份 DBC（`dbc` 写单条或列表），
+  `path` 解析成绝对路径后必须存在（相对路径先按 `config_dir` 解析，再按仓库根解析，
+  故 yaml 里可写 `configs/dbc/brake_demo.dbc`，进程从任意 cwd 启动都能找到）。
+  `dbc` 里可写 `${ENV_VAR}` 指向客户现场才有的库：变量未设置视为「本机没有这份库」，
+  不阻塞启动（识别不读 DBC，只是该总线的信号无法解码）。
+- `channels` 省略或写 `auto` 即自动识别；写成 `{通道号: 总线名}` 则显式绑定并跳过识别。
+- `channel_detect` 只接受 `scan_seconds`/`scan_frames`/`min_frames`/`min_hits`/`min_score`/`min_margin`，
+  取值为负或超出 0~1 的分数直接报错（参数含义见 §9.6）。
+- 每条候选必须是 `[bus, msg_id, signal_name]` 三元组，bus 在 `buses` 内，
+  `msg_id` 符合 `"0x123"` / `"0x123x"` / int 约定；声明了却没有任何候选引用的总线报错。
 - 传入 `registry`（`signals.yaml` 的 `logical_signals`）时，BLF 侧出现未登记的逻辑名即报错
   —— 这就是「相同的信号，逻辑名必须一致」的执行方式；`required_signals` 同时给出时，
   只要求参与计算的信号一个不缺，纯观测量允许缺席（§9.6 覆盖度约定）。
@@ -289,9 +294,10 @@ class SignalData:
 Loader 实现：
 
 - `MF4Loader(signal_maps)`：基于 asammdf，按 `candidates` 顺序用 `mdf.whereis` 解析首个命中通道；`raw=False` 取物理值，文本采样再以 `raw=True` 回取编码值构造 `choices`。
-- `BLFLoader(dbc_files, signal_maps)`：基于 python-can `BLFReader` + cantools 解码。`candidates` 为三元组 `[dbc_alias, msg_id, signal_name]`；`msg_id` 字符串约定：`"0x123"` 标准帧、`"0x123x"` 扩展帧、裸 int 按标准帧兼容处理。单次遍历文件，按 (frame_id, is_extended, channel) 建帧索引，逐帧解码后抽取各信号。
+- `BLFLoader(blf_cfg)`：基于 python-can `BLFReader` + cantools 解码。`candidates` 为三元组 `[bus, msg_id, signal_name]`；`msg_id` 字符串约定：`"0x123"` 标准帧、`"0x123x"` 扩展帧、裸 int 按标准帧兼容处理。先按 `signals_blf.yaml` 里的 msg_id 识别「通道 ↔ 总线」（`loaders/blf_channels.py`，§9.6），再按 (frame_id, is_extended, 识别出的通道) 建帧索引，单次遍历逐帧解码。
 - `make_loader(path, cfg, blf_cfg=None)`（`pipeline.py`）：按扩展名选 Loader，`.blf` → `BLFLoader`，其余 → `MF4Loader`；未给 `blf_cfg` 时分析 `.blf` 直接报"未启用 BLF"。
-  `ChatEngine` 按扩展名缓存 Loader 实例（`_loaders`），`BLFLoader` 的 DBC 解析在会话生命周期内只做一次。
+  `ChatEngine` 按扩展名缓存 Loader 实例（`_loaders`），`BLFLoader` 的 DBC 解析在会话生命周期内只做一次；
+  通道识别结果按 (路径, 大小, mtime) 逐文件缓存，同一文件重复加载不重复扫描。
 - 解码/加载失败（如非 BLF 内容冒充 `.blf`）不抛给用户：Loader 返回空信号，pipeline 补退化窗口，
   指标全 missing、规则命中 data_quality。
 
@@ -1336,7 +1342,7 @@ fault_domain: stability | brake_performance | traction | powertrain_interaction 
 ```text
 configs/signals.yaml     格式无关：logical_signals（名称/单位/描述）+ chart_layout（分组）
 configs/signals_mf4.yaml 格式相关：这个逻辑信号在 MF4 里叫什么通道名
-configs/signals_blf.yaml 格式相关：这个逻辑信号在 BLF 里是哪条 CAN 信号（+ dbc_files）
+configs/signals_blf.yaml 格式相关：这个逻辑信号在 BLF 里是哪条 CAN 信号（+ buses/channels）
 ```
 
 **覆盖度约定**（取代早期"两侧逻辑信号集必须完全相同"）：
@@ -1393,28 +1399,84 @@ signal_maps:
 #### signals_blf.yaml
 
 ```yaml
-dbc_files:
-  <dbc_alias>:
-    path: <dbc 文件路径>
-    channel: <int，CAN 通道号>
+buses:
+  <总线名>:
+    label: <显示名，可省>
+    dbc: <路径>              # 或路径列表；可写 ${ENV_VAR}
+
+channels: auto               # 或 {0: <总线名>, 1: <总线名>}
+
+channel_detect:
+  scan_seconds: 15
+  scan_frames: 500000
+  min_frames: 2
+  min_hits: 2
+  min_score: 0.6
+  min_margin: 0.15
 
 signal_maps:
   <逻辑名称>:
     candidates:
-      - [<dbc_alias>, <msg_id>, <signal_name>]
-      - ...
+      - [<总线名>, <msg_id>, <signal_name>]
 ```
 
-- 顶层只允许 `dbc_files` + `signal_maps`；条目同样只允许 `candidates`。
-- `dbc_files`：CAN 报文库清单；`path` 指向 `.dbc` 文件，`channel` 为该 DBC 对应的 CAN 通道号，用于帧索引匹配。
-- `candidates` 每条为三元组 `[dbc_alias, msg_id, signal_name]`，按顺序解析，首个在 DBC 中可解析的即采用。
-- `msg_id` 约定：字符串 `"0x123"` 标准帧、`"0x123x"`（十六进制 + `x` 后缀）扩展帧、裸 int 按标准帧兼容处理。
-- 三元组解析失败（alias 不存在、frame_id 查不到、signal 不在报文中）尝试下一候选；全部失败返回空 `ts`/`values`，不报错。
+- 顶层只允许 `buses` / `channels` / `channel_detect` / `signal_maps`；信号条目只允许 `candidates`。
+- `buses`：总线清单。一条总线可挂多份 DBC（`dbc` 写单条或列表，按声明顺序查找，
+  先命中者胜；同一路径自动去重）。`dbc` 可写 `${ENV_VAR}`，变量未设置即「本机没有这份库」。
+- `channels`：`auto` 表示逐文件识别；显式映射优先且完全跳过识别扫描。实车日志的通道号
+  常从 1 开始，写死 `0` 是典型踩坑点，所以默认不写死。
+- `candidates` 每条为三元组 `[总线名, msg_id, signal_name]`，按顺序解析：先看该总线是否
+  识别到通道，再按 DBC 声明顺序找「同时含该帧和该信号」的库，首个命中即采用。
+- `msg_id` 约定：字符串 `"0x123"` 标准帧、`"0x123x"`（十六进制 + `x` 后缀）扩展帧、
+  裸 int 按标准帧兼容处理。
+- 全部候选失败返回空 `ts`/`values`，不报错。
+
+##### 通道自动识别（`loaders/blf_channels.py`）
+
+问题：同一报文 ID 可能出现在不同总线上，甚至代表不同信号。所以必须先定「通道 → 总线」，
+再按 (frame_id, is_extended, 通道) 取帧；否则会把 A 网的帧按 B 网的 DBC 解出错误的物理量。
+
+**指纹只来自 config，不读 DBC**：识别用的就是 `candidates` 里写下的 msg_id。这样没有
+DBC 的总线（客户现场的 VBOX）同样能识别，DBC 只在识别完成之后用来解码。
+
+**投票单位是逻辑信号**（不是报文 ID）：
+
+```text
+M(S,b)      = { msg_id | (b, msg_id, *) ∈ candidates(S) }
+Ids(c)      = { msg_id | 通道 c 上帧数 ≥ min_frames }
+Hit(c,b)    = { S | M(S,b) ∩ Ids(c) ≠ ∅ }        # 一信号一票，候选再多也只算 1
+Obs(b)      = { S | M(S,b) ∩ Ids(·) ≠ ∅ }        # 本文件里该总线可能看得见的信号
+recall(c,b) = |Hit(c,b)| / |Obs(b)|
+Amb(S)      = { b | M(S,b) ∩ Ids(·) ≠ ∅ }        # 该信号能被几条总线认领
+pure(c,b)   = |{ S ∈ Hit(c,b) : |Amb(S)| = 1 }| / |Hit(c,b)|
+score(c,b)  = recall(c,b) × (0.5 + 0.5 × pure(c,b))
+```
+
+- `recall` 按 `Obs(b)` 归一化，不拿通道总帧数做分母：config 里的 ID 只是总线的子集，
+  各总线子集大小不同，不归一化会变成「配得多的总线赢」。
+- `pure` 惩罚网关转发：同一信号在两条通道都命中时 `Amb(S)` 变大，分数下降。
+- 抽样：识别只需要 ID 集合，默认只读前 15 s（或 50 万帧，先到者为准）。若样本里证据不足
+  且确实提前停过，再全量重扫一次兜底。抽样不影响打分口径——`Obs` 也来自同一份样本，
+  分子分母同时缩小；某个只在触发时才发的信号没落进窗口，对两条总线一样缺席。
+- 全局指派：通道与总线一一对应，按分数贪心后做对调优化，保证不存在更优的互换。
+- 置信度：对每对已分配总线算「互换损失」（对调后总分掉多少），低于 `min_margin`，
+  或某总线有证据但通道被更强的总线占用 → `ambiguous`；`hits` 不足、`score` 不够 →
+  `low_confidence`。`min_hits` 与 `Obs` 取小，避免「这条总线本来就只配了 1 个信号」
+  被永远判低置信。
+- 报告：同一 ID 出现在多个通道时输出一条告警（网关转发还是 ID 复用交给人看），
+  只提示不决策。识别结论写日志；告警经 `BLFLoader.load_errors` 进入分析错误列表，
+  用户能看到「通道归属不确定」。
+- 失败形态：没有任何候选报文的总线 → `not_observed`，其信号按缺失处理，与「识别失败」
+  （`ambiguous`/`low_confidence`）区分开。
+
+设计取舍：不用「通道上出现的全部 ID」与「DBC 里的全部 ID」比对，原因有二——候选是
+config 的子集，拿 DBC 全集当分母会惩罚只在 config 里引用少数报文的总线；现场常常拿不到
+完整 DBC（vbox）时，识别必须能脱离 DBC 工作。
 
 demo 约定（`configs/signals_blf.yaml` + `configs/dbc/brake_demo.dbc`）：
 
-- **一份 DBC 管全部 12 个逻辑信号**，alias = `BRAKE`，`channel: 0`；所有 BLF 帧也发在通道 0
-  （loader 按 `(frame_id, is_extended, channel)` 匹配，两侧必须一致）。
+- **一份 DBC 管全部 12 个逻辑信号**，总线名 = `BRAKE`，`channels: auto`；所有 BLF 帧都发在
+  通道 0，识别阶段从 candidates 里的 msg_id 反推出「通道 0 = BRAKE」。
 - DBC 由 `scripts/generate_demo_blf.py` 用 cantools 定义后 `dump_file` 生成，**入库**（4 KB，
   是数据契约的一部分）；BLF 输出到 `tests/data/blf/`，与 MF4 一样不入库、可再生。
 - 实车信号名 = 逻辑名（不做重命名），状态位 1 bit 带 `INACTIVE/ACTIVE` 枚举表，
@@ -2273,8 +2335,10 @@ import_batch(batch_id PK, started_at, root, config_fingerprint, 各计数, note)
 
 导入只登记路径；指标在第一次被查询时才算，并写回缓存。
 
-- 缓存键 = **文件内容 sha1 + 配置指纹**。指纹是 `configs/*.yaml` 内容的 sha1 前 16 位，
-  改工况/阈值/指标后自动失效重算；
+- 缓存键 = **文件内容 sha1 + 配置指纹**。指纹是 `configs/` 下全部 `*.yaml` 与 `*.dbc`
+  内容、以及 `signals_blf.yaml` 引用的仓外 DBC（`${ENV}` 路径）的 sha1 前 16 位；
+  改工况/阈值/指标/DBC 后自动失效重算。现场 DBC 未提供时指纹里留 `absent` 占位，
+  库装上的那次分析会重算，而不是沿用缺信号时的旧结论；
 - 文件不在服务器上 → 记 `file_gone`，`analyze_pending` 会跳过它（重新导入同一路径
   会把状态改回 `pending`）；
 - 解析异常 → `error` + `last_error`（截断 500 字），下次批量补齐会重试；
