@@ -154,6 +154,68 @@ class TestIdentify:
         assert stats[0].ids[(0x200, False)] >= 2
 
 
+# ---------------------------------------------------------------- 部分显式绑定
+
+class TestPartialPin:
+    def test_pinned_bus_and_auto_others(self, dbcs, tmp_path):
+        """只写死 BODY → 其余总线仍自动识别，写死的通道不会被抢走。"""
+        from brake_analyzer.loaders import BLFLoader
+        from brake_analyzer.loaders.blf_channels import identify
+
+        blf = _write_blf(tmp_path / "run.blf", _two_bus_frames())
+        cfg = _cfg(*dbcs, channels={1: "BODY"})
+        data = BLFLoader(cfg).load(blf)
+        assert data["b_val"].values.tolist() == [200 + i for i in range(20)]
+        assert data["b_other"].values.tolist() == [250 - i for i in range(20)]
+        assert data["a_val"].values.tolist() == list(range(1, 21))
+
+        report = identify(blf, _buses(*dbcs), MAPS, ChannelDetect(),
+                          pinned={"BODY": 1})
+        assert report.bus_channels() == {"EC": 0, "BODY": 1}
+        assert {e.bus: e.status for e in report.evidence} == {
+            "EC": "matched", "BODY": "explicit"}
+
+    def test_pinned_absent_channel_leaves_bus_empty(self, dbcs, tmp_path):
+        """绑定到文件里不存在的通道：该总线信号为空，其它总线照常自动识别。"""
+        from brake_analyzer.loaders import BLFLoader
+
+        blf = _write_blf(tmp_path / "run.blf", _two_bus_frames())
+        loader = BLFLoader(_cfg(*dbcs, channels={3: "BODY"}))
+        data = loader.load(blf)
+        assert data["b_val"].values.size == 0
+        assert data["b_other"].values.size == 0
+        assert data["a_val"].values.tolist() == list(range(1, 21))
+        assert any("通道 3" in w and "没有任何报文" in w
+                   for w in loader.load_errors)
+
+    def test_pinned_channel_absent_warns(self, dbcs, tmp_path):
+        from brake_analyzer.loaders.blf_channels import identify
+
+        frames = [(100.0 + i * 0.01, 0, 0x200, i) for i in range(10)]
+        blf = _write_blf(tmp_path / "only0.blf", frames)
+        report = identify(blf, _buses(*dbcs), MAPS, ChannelDetect(),
+                          pinned={"BODY": 3})
+        assert report.bus_channels() == {"EC": 0, "BODY": 3}
+        assert any("通道 3" in w and "没有任何报文" in w for w in report.warnings)
+        # 写死的总线不再被阈值告警打扰
+        body = next(e for e in report.evidence if e.bus == "BODY")
+        assert body.status == "explicit"
+        assert not any("BODY" in w and "证据不足" in w for w in report.warnings)
+
+    def test_all_pinned_skips_scan(self, dbcs, tmp_path, monkeypatch):
+        from brake_analyzer.loaders import blf as blf_mod
+
+        blf = _write_blf(tmp_path / "run.blf", _two_bus_frames())
+
+        def boom(*a, **kw):
+            raise AssertionError("全部显式绑定时不应扫描文件")
+
+        monkeypatch.setattr(blf_mod, "identify", boom)
+        data = blf_mod.BLFLoader(_cfg(*dbcs, channels={0: "EC", 1: "BODY"})).load(blf)
+        assert data["a_val"].values.tolist() == list(range(1, 21))
+        assert data["b_other"].values.tolist() == [250 - i for i in range(20)]
+
+
 # ---------------------------------------------------------------- 配置
 
 class TestBusesConfig:
@@ -259,6 +321,29 @@ signal_maps:
 """)
         cfg = load_blf_config(d)
         assert cfg.channels == {1: "CHASSIS"}
+
+    def test_partial_channels_parsed(self, tmp_path):
+        """channels 只写一部分是合法的：其余总线保持自动识别。"""
+        from brake_analyzer.configs import load_blf_config
+
+        d = self._mini(tmp_path, f"""
+buses:
+  CHASSIS:
+    dbcs:
+      CHASSIS_MAIN: {DEMO_DBC}
+  VBOX:
+    dbcs:
+      VBOX_MAIN: {DEMO_DBC}
+channels:
+  1: VBOX
+signal_maps:
+  speed_vbox:
+    candidates:
+      - [CHASSIS_MAIN, "0x102", speed_vbox]
+      - [VBOX_MAIN, "0x102", speed_vbox]
+""")
+        cfg = load_blf_config(d)
+        assert cfg.channels == {1: "VBOX"}
 
     def test_channel_detect_validated(self, tmp_path):
         from brake_analyzer.configs import ConfigError, load_blf_config

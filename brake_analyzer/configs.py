@@ -684,8 +684,9 @@ class ChannelDetect:
 class BlfConfigs:
     """signals_blf.yaml 的校验结果；dbc 已解析为绝对路径，可直接喂 BLFLoader。
 
-    channels 为 None 表示自动识别（`channels: auto`）；否则是显式的
-    {通道号: 总线名}。buses[name]["dbcs"] 是 {DBC 别名: 绝对路径}，
+    channels 为 None 表示全部自动识别（`channels: auto`）；否则是
+    {通道号: 总线名} 的显式绑定，可以只写一部分——写死的总线不再参与自动识别，
+    其余总线照常按候选 ID 推断。buses[name]["dbcs"] 是 {DBC 别名: 绝对路径}，
     ["unavailable"] 是因 ${ENV} 未设置而跳过的别名（识别照常，解码不了）。
     """
     buses: Dict[str, Dict[str, Any]]
@@ -785,6 +786,7 @@ def dbc_alias_bus(buses: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
 
 
 def _parse_channels(raw: Any, buses: Dict[str, Any]) -> Optional[Dict[int, str]]:
+    """channels: auto | {通道号: 总线名}；写一部分时其余总线仍自动识别。"""
     if raw is None:
         return None
     if isinstance(raw, str) and raw.strip().lower() == "auto":

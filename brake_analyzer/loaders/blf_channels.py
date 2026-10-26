@@ -48,7 +48,7 @@ class BusEvidence:
     purity: float = 0.0
     score: float = 0.0
     margin: float = 0.0
-    status: str = "not_observed"        # matched | ambiguous | low_confidence | not_observed
+    status: str = "not_observed"        # explicit | matched | ambiguous | low_confidence | not_observed
 
     def as_dict(self) -> Dict[str, Any]:
         return {"bus": self.bus, "channel": self.channel, "status": self.status,
@@ -168,20 +168,29 @@ def _cells(present: Dict[int, Set[IdKey]], bus_names: Iterable[str],
 def score_channels(stats: Dict[int, ChannelStats], buses: Dict[str, Dict[str, Any]],
                    signal_maps: Dict[str, Dict[str, Any]],
                    detect: Optional[ChannelDetect] = None,
-                   scanned: Tuple[int, float] = (0, 0.0)) -> ChannelReport:
-    """由通道统计得出 assignment 与逐总线证据（不读文件，便于单测）。"""
+                   scanned: Tuple[int, float] = (0, 0.0),
+                   pinned: Optional[Dict[str, int]] = None) -> ChannelReport:
+    """由通道统计得出 assignment 与逐总线证据（不读文件，便于单测）。
+
+    `pinned` 是 `{总线: 通道}` 的显式绑定（signals_blf.yaml 的 channels）。只绑
+    一部分总线时，其余总线照常自动识别；已绑定的总线与其通道都不进入自动指派，
+    所以新加一个网段可以「老网段写死、新网段自动认」。
+    """
     detect = detect or ChannelDetect()
+    pinned = dict(pinned or {})
+    pinned_ch = set(pinned.values())
     bus_names = list(buses)
     present = {ch: st.present(detect.min_frames) for ch, st in stats.items()}
     index = candidate_index(dbc_alias_bus(buses), signal_maps)
     cells, observable = _cells(present, bus_names, index)
 
-    # 全局指派：边按分数降序贪心，通道与总线各用一次（总线数很少，够用且确定）
+    # 全局指派：边按分数降序贪心，通道与总线各用一次（总线数很少，够用且确定）。
+    # 已显式绑定的总线/通道不参与，避免自动结果把用户的绑定顶掉
     assignment: Dict[int, str] = {}
-    used: Set[str] = set()
+    used: Set[str] = set(pinned)
     for (ch, bus), (score, hits, _pure) in sorted(
             cells.items(), key=lambda kv: (-kv[1][0], -kv[1][1], kv[0][0], kv[0][1])):
-        if score <= 0 or ch in assignment or bus in used:
+        if score <= 0 or ch in assignment or ch in pinned_ch or bus in used:
             continue
         assignment[ch] = bus
         used.add(bus)
@@ -209,7 +218,7 @@ def score_channels(stats: Dict[int, ChannelStats], buses: Dict[str, Dict[str, An
     # 置信度用「互换损失」衡量：把这条总线换到别的通道，或与另一条已分配总线
     # 对调，总分至少要掉多少。只在单条总线上比分数会把「本总线 ID 两条通道都有、
     # 但靠另一条总线的独有 ID 反推出来」误判成分不清。
-    free = [c for c in present if c not in assignment]
+    free = [c for c in present if c not in assignment and c not in pinned_ch]
     margins: Dict[str, float] = {}
     items = list(assignment.items())
     for i, (c1, b1) in enumerate(items):
@@ -224,6 +233,15 @@ def score_channels(stats: Dict[int, ChannelStats], buses: Dict[str, Dict[str, An
 
     evidence: List[BusEvidence] = []
     for bus in bus_names:
+        if bus in pinned:
+            ch = pinned[bus]
+            score, hits, pure = cells.get((ch, bus), (0.0, 0, 0.0))
+            obs = len(observable.get(bus, ()))
+            evidence.append(BusEvidence(
+                bus=bus, channel=ch, hits=hits, observed=obs,
+                recall=(hits / obs) if obs else 0.0, purity=pure,
+                score=score, margin=1.0, status="explicit"))
+            continue
         ch = bus_ch.get(bus)
         score, hits, pure = cells.get((ch, bus), (0.0, 0, 0.0)) if ch is not None \
             else (0.0, 0, 0.0)
@@ -244,9 +262,14 @@ def score_channels(stats: Dict[int, ChannelStats], buses: Dict[str, Dict[str, An
             recall=(hits / obs) if obs else 0.0, purity=pure,
             score=score, margin=margin, status=status))
 
+    # 显式绑定并入结果；自动指派已排除这些通道，不会互相覆盖
+    for bus, ch in pinned.items():
+        assignment[ch] = bus
+
     report = ChannelReport(assignment=assignment, evidence=evidence,
                            scanned_frames=scanned[0], scanned_seconds=scanned[1])
     report.warnings.extend(_conflict_warnings(present))
+    report.warnings.extend(_pinned_warnings(pinned, stats))
     report.warnings.extend(_evidence_warnings(evidence, detect))
     return report
 
@@ -268,9 +291,23 @@ def _conflict_warnings(present: Dict[int, Set[IdKey]]) -> List[str]:
     return [f"有报文 ID 同时出现在多个通道（网关转发或 ID 复用）：{'、'.join(items)}{more}"]
 
 
+def _pinned_warnings(pinned: Dict[str, int], stats: Dict[int, ChannelStats]) -> List[str]:
+    """显式绑定的通道里没有任何报文：多半是通道号写错或文件里没有这条网段。"""
+    out = []
+    for bus, ch in sorted(pinned.items()):
+        st = stats.get(ch)
+        if st is None or st.frames == 0:
+            out.append(
+                f"总线 {bus} 在 channels 里绑定到通道 {ch}，"
+                "但扫描范围内该通道没有任何报文，请确认通道号")
+    return out
+
+
 def _evidence_warnings(evidence: List[BusEvidence], detect: ChannelDetect) -> List[str]:
     out = []
     for e in evidence:
+        if e.status == "explicit":       # 用户自己写的，不必再提示
+            continue
         if e.status == "not_observed":
             out.append(f"总线 {e.bus} 在文件里没有出现任何候选报文，其信号按缺失处理")
         elif e.status == "ambiguous":
@@ -296,24 +333,27 @@ def _evidence_warnings(evidence: List[BusEvidence], detect: ChannelDetect) -> Li
 
 def identify(path: str, buses: Dict[str, Dict[str, Any]],
              signal_maps: Dict[str, Dict[str, Any]],
-             detect: Optional[ChannelDetect] = None) -> ChannelReport:
+             detect: Optional[ChannelDetect] = None,
+             pinned: Optional[Dict[str, int]] = None) -> ChannelReport:
     """识别一个 BLF 文件的通道归属。
 
-    先按 scan_seconds/scan_frames 采样；若有总线证据不足且采样确实提前停了，
-    再全量重扫一次（识别不解码，重扫很便宜），避免把「窗口没覆盖到」当成
-    「这条总线不存在」。
+    先按 scan_seconds/scan_frames 采样；若有总线证据不足（含显式绑定的通道没
+    采到报文）且采样确实提前停了，再全量重扫一次（识别不解码，重扫很便宜），
+    避免把「窗口没覆盖到」当成「这条总线不存在」。
     """
     detect = detect or ChannelDetect()
     stats, frames, span, truncated, err = scan(
         path, detect.scan_seconds, detect.scan_frames)
-    report = score_channels(stats, buses, signal_maps, detect, (frames, span))
+    report = score_channels(stats, buses, signal_maps, detect, (frames, span), pinned)
     if err:
         report.warnings.insert(0, err)
 
     weak = any(e.status in ("low_confidence", "ambiguous") for e in report.evidence)
-    if truncated and weak:
+    missing_pinned = any(ch not in stats or stats[ch].frames == 0
+                         for ch in (pinned or {}).values())
+    if truncated and (weak or missing_pinned):
         stats2, frames2, span2, _t, err2 = scan(path, float("inf"), float("inf"))
-        full = score_channels(stats2, buses, signal_maps, detect, (frames2, span2))
+        full = score_channels(stats2, buses, signal_maps, detect, (frames2, span2), pinned)
         full.warnings.insert(0, "采样窗口内识别证据不足，已回退全量重扫")
         if err2:
             full.warnings.insert(0, err2)

@@ -62,14 +62,19 @@ class BLFLoader(Loader):
         return (path, st.st_size, st.st_mtime_ns)
 
     def _bus_channels(self, path: str, errors: List[str]) -> Dict[str, int]:
-        """返回 {总线: 通道号}；识别失败的总线不在结果里（其信号按缺失处理）。"""
-        if self.cfg.channels is not None:       # 显式绑定优先，且不扫文件
-            return {bus: ch for ch, bus in self.cfg.channels.items()}
+        """返回 {总线: 通道号}；没认出来的总线不在结果里（其信号按缺失处理）。
+
+        `channels` 可以只写一部分：写死的总线和通道不参与自动识别，其余总线照
+        常扫描推断。全部写死时连文件都不扫。
+        """
+        pinned = {bus: ch for ch, bus in (self.cfg.channels or {}).items()}
+        if pinned and len(pinned) == len(self.buses):
+            return dict(pinned)
         key = self._stat_key(path)
         cached = self._channels_cache.get(key)
         if cached is None:
             report = identify(path, self.buses, self.signal_maps,
-                              self.cfg.channel_detect)
+                              self.cfg.channel_detect, pinned=pinned)
             cached = (report.bus_channels(), report.warnings)
             self._channels_cache[key] = cached
         channels, warnings = cached
