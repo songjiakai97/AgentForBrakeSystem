@@ -879,13 +879,14 @@ def api_records(file_id: Optional[str] = Query(None),
                 condition_id: Optional[str] = Query(None),
                 vehicle: Optional[str] = Query(None),
                 function_key: Optional[str] = Query(None),
+                keyword: Optional[str] = Query(None),
                 limit: int = Query(200, ge=1, le=500)):
-    """记录清单：只读元数据，不触发解析。"""
+    """记录清单：只读元数据，不触发解析。编号/车型/关键词按「包含」匹配。"""
     cond_ids = ([c.id for c in CFG.conditions_of(function_key)]
                 if function_key else None)
     rows = RECORDS.list_records(file_id=file_id, condition_id=condition_id,
                                 condition_ids=cond_ids, vehicle=vehicle,
-                                limit=limit)
+                                keyword=keyword, limit=limit)
     for r in rows:
         cond = CFG.condition(r["condition_id"])
         r["condition_name"] = cond.name if cond else r["condition_id"]

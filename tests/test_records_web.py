@@ -68,9 +68,14 @@ def test_records_list_filters(client, records_db):
 
     one = client.get("/api/records", params={"vehicle": "carB"}).json()
     assert one["count"] == 1 and one["records"][0]["vehicle"] == "carB"
+    # 车型只给片段也命中
+    assert client.get("/api/records", params={"vehicle": "car"}).json()["count"] == 2
 
     none = client.get("/api/records", params={"file_id": "9.9"}).json()
     assert none["count"] == 0
+
+    kw = client.get("/api/records", params={"keyword": "20260801"}).json()
+    assert kw["count"] == 2, "keyword 应跨文件名匹配"
 
 
 def test_record_detail_lazy_then_cached(client, records_db):

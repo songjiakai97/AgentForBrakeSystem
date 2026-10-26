@@ -2359,8 +2359,13 @@ import_batch(batch_id PK, started_at, root, config_fingerprint, 各计数, note)
 
 | 工具 | 用途 | 关键口径 |
 | --- | --- | --- |
-| `query_records` | 按编号/工况/车型列记录 | 只读；未分析的记录只标状态，不触发解析 |
+| `query_records` | 按编号/关键词/工况/车型列记录 | 只读；未分析的记录只标状态，不触发解析 |
 | `compare_records` | 同一工况下按车型横向对比 | 只比已分析记录；未分析的列进 `not_analyzed` |
+
+编号、车型、关键词都按「包含」匹配（SQL `LIKE '%kw%'`，`%`/`_` 转义为字面量）：
+用户只记得片段（「4.1」「carB」）时也应命中，而不是回一句「没有这条记录」。
+`keyword` 跨 编号/车型/文件名/相对路径 做 OR，用于记不清归类时的模糊搜索。
+`condition_id` 仍要求精确（它来自配置，模糊匹配会让对比跨工况）。
 
 返回里每条记录都带 `record_id`，前端据此出「整段曲线 + 窗口高亮」；模型只引用数值，
 不描述曲线。指标汇总口径：同一文件多个事件样本取均值，同时给 `min/max/n`；
@@ -2373,13 +2378,13 @@ import_batch(batch_id PK, started_at, root, config_fingerprint, 各计数, note)
 | 接口 | 说明 |
 | --- | --- |
 | `GET /api/records/meta` | 筛选项（车型/功能/工况/编号/指标）+ 库内状态 |
-| `GET /api/records` | 清单（只读元数据，不解析） |
+| `GET /api/records` | 清单（只读元数据，不解析；编号/车型/关键词按包含匹配） |
 | `GET /api/records/{id}` | 详情：必要时惰性分析，返回结果卡片（含 ok_range）+ 窗口 |
 | `GET /api/records/{id}?refresh=true` | 强制重算 |
 | `GET /api/records/{id}/timeseries` | 整段曲线 + 窗口高亮，只画该功能 `signals` |
 | `GET /api/records/compare` | 横向对比表数据 |
 
-`/records` 页面：车型/功能/工况/编号筛选 → 记录清单 → 详情卡片 + 曲线 → 对比表。
+`/records` 页面：车型/功能/工况/编号筛选 + 关键词 → 记录清单 → 详情卡片 + 曲线 → 对比表。
 图表的窗口高亮与曲线裁剪分开（`build_chart_option(highlight=...)`）：记录库看的是
 整段过程，窗口只做标记；分析卡片的图表仍沿用「裁剪到窗口」的旧行为。
 

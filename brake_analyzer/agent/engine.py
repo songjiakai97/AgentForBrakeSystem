@@ -917,7 +917,8 @@ class ChatEngine:
         if self.records is None:
             return {"ok": False, "hint": "记录库未启用（未配置 RECORDS_DB）"}
         allowed = {
-            "records_query": {"file_id", "condition_id", "vehicle", "function_key", "limit"},
+            "records_query": {"file_id", "condition_id", "vehicle", "function_key",
+                              "keyword", "limit"},
             "records_compare": {"condition_id", "function_key", "vehicles", "metric",
                                 "limit"},
         }.get(getattr(fn, "__name__", ""), set())

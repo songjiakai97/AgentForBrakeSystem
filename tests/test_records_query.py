@@ -120,6 +120,23 @@ def test_query_empty_gives_inventory(cfg, db):
     assert "4.1.1" in res["file_ids"]
 
 
+def test_query_matches_substrings(cfg, db):
+    """编号/车型/关键词都按「包含」匹配：只记得片段时也查得到。"""
+    svc = _svc(cfg, db)
+    assert records_query(svc, cfg, file_id="4.1.3")["count"] == 2
+    assert records_query(svc, cfg, vehicle="car")["count"] == 4
+    assert records_query(svc, cfg, keyword="4.1.1")["count"] == 2
+    assert records_query(svc, cfg, keyword="20260802")["count"] == 2      # 只在文件名里
+    assert records_query(svc, cfg, keyword="nothing-here")["count"] == 0
+
+
+def test_query_keyword_escapes_like_wildcards(cfg, db):
+    """关键词里的 % / _ 是字面量，不能被当成 LIKE 通配符。"""
+    svc = _svc(cfg, db)
+    assert records_query(svc, cfg, keyword="%")["count"] == 0
+    assert records_query(svc, cfg, file_id="4.1.1%")["count"] == 0
+
+
 def test_compare_groups_by_condition(cfg, db):
     res = records_compare(_svc(cfg, db), cfg, condition_id="abs_full_brake_dry_asphalt_100kph")
     assert res["ok"] and res["record_count"] == 2
@@ -169,12 +186,15 @@ def test_record_tool_guards_and_filters(cfg, db):
     engine.records = _svc(cfg, db)
     out = engine._record_tool(records_query, {"file_id": "4.1.1", "bogus": 1}, "abs")
     assert out["ok"] and out["count"] == 2
+    # keyword 也要在白名单里，否则模糊搜索会被静默丢掉
+    out = engine._record_tool(records_query, {"keyword": "carB"}, "abs")
+    assert out["ok"] and out["count"] == 2
 
 
 def test_tool_specs_expose_record_tools(cfg):
     specs = {s["function"]["name"]: s for s in build_tool_specs(cfg, "abs")}
     q = specs["query_records"]["function"]["parameters"]["properties"]
-    assert "file_id" in q and "condition_id" in q
+    assert "file_id" in q and "condition_id" in q and "keyword" in q
     assert q["condition_id"]["enum"] == cfg.scope_conditions("abs")
     c = specs["compare_records"]["function"]["parameters"]["properties"]
     assert "vehicles" in c and "metric" in c

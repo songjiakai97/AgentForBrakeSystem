@@ -425,6 +425,12 @@ def verdict_rows(conn: sqlite3.Connection, record_id: str) -> List[sqlite3.Row]:
     ).fetchall()
 
 
+def _like(value: str) -> str:
+    """关键词 → LIKE 模式：`%kw%`，转义用户输入里的 % 和 _。"""
+    esc = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{esc}%"
+
+
 def query_records(
     conn: sqlite3.Connection,
     *,
@@ -432,14 +438,20 @@ def query_records(
     condition_id: Optional[str] = None,
     condition_ids: Optional[List[str]] = None,
     vehicle: Optional[str] = None,
+    keyword: Optional[str] = None,
     limit: int = 200,
 ) -> List[sqlite3.Row]:
-    """按编号/工况/车型过滤；功能维度的工况集合由调用方从配置算好传进来。"""
+    """按编号/工况/车型过滤；功能维度的工况集合由调用方从配置算好传进来。
+
+    编号、车型、关键词都是「包含即可」（子串匹配），不要求写全：
+    用户说「4.1」或「carB」时就该查得到，而不是回一句「没有这条记录」。
+    keyword 跨 编号/车型/文件名/相对路径 做 OR，用于一次性模糊搜索。
+    """
     where: List[str] = []
     args: List[Any] = []
     if file_id:
-        where.append("file_id=?")
-        args.append(file_id)
+        where.append("file_id LIKE ? ESCAPE '\\'")
+        args.append(_like(file_id))
     if condition_id:
         where.append("condition_id=?")
         args.append(condition_id)
@@ -449,8 +461,13 @@ def query_records(
         where.append("condition_id IN (%s)" % ",".join("?" * len(condition_ids)))
         args.extend(condition_ids)
     if vehicle:
-        where.append("vehicle=?")
-        args.append(vehicle)
+        where.append("vehicle LIKE ? ESCAPE '\\'")
+        args.append(_like(vehicle))
+    if keyword:
+        pattern = _like(keyword)
+        where.append("(file_id LIKE ? ESCAPE '\\' OR vehicle LIKE ? ESCAPE '\\'"
+                     " OR file_name LIKE ? ESCAPE '\\' OR rel_path LIKE ? ESCAPE '\\')")
+        args.extend([pattern] * 4)
     sql = "SELECT * FROM record"
     if where:
         sql += " WHERE " + " AND ".join(where)

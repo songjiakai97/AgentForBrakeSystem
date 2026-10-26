@@ -271,22 +271,28 @@ def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> L
             "function": {
                 "name": "query_records",
                 "description": (
-                    "查询试验记录库（服务器上的历史/竞品数据）：按编号、工况、车型过滤，"
-                    "返回每条记录的元数据与已算好的指标汇总。只读——未分析的记录不会"
-                    "在这里触发计算，只标 analysis_status。用户问「测过哪些/某编号是什么/"
-                    "有没有某车型的数据」时调用。"
+                    "查询试验记录库（服务器上的历史/竞品数据）：按编号、关键词、工况、车型"
+                    "过滤，返回每条记录的元数据与已算好的指标汇总。编号/车型/关键词都是"
+                    "「包含即可」，用户只记得片段（如「4.1」「carB」）时也能查到。只读——"
+                    "未分析的记录不会在这里触发计算，只标 analysis_status。用户问"
+                    "「测过哪些/某编号是什么/有没有某车型的数据」时调用。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "file_id": {
                             "type": "string",
-                            "description": "试验编号（如 4.1.1）；用户说编号时优先用这个",
+                            "description": "试验编号，可只给片段（如 4.1）；用户说编号时优先用这个",
+                        },
+                        "keyword": {
+                            "type": "string",
+                            "description": "模糊关键词，跨 编号/车型/文件名 匹配；"
+                                           "用户只记得文件名或说不清归哪一类时用它",
                         },
                         "condition_id": cond_schema,
                         "vehicle": {
                             "type": "string",
-                            "description": "车型代号（记录库的一级目录名）",
+                            "description": "车型代号，可只给片段（如 carB）",
                         },
                         "function_key": {"type": "string", "enum": fn_keys},
                         "limit": {"type": "integer", "description": "最多返回条数，1~50"},

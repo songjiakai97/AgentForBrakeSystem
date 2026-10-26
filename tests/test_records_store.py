@@ -262,7 +262,12 @@ def test_query_records_filters(tmp_path, imp, cfg):
     conn = store.connect(db)
 
     assert len(store.query_records(conn, vehicle="carA")) == 2
-    assert len(store.query_records(conn, file_id="4.1.1")) == 1
+    # 编号按「包含」匹配：4.1.1 同时命中 4.1.1 与 4.1.10
+    assert len(store.query_records(conn, file_id="4.1.1")) == 2
+    assert len(store.query_records(conn, file_id="4.1.10")) == 1
+    assert len(store.query_records(conn, vehicle="car")) == 3
+    assert len(store.query_records(conn, keyword="20260802")) == 1
+    assert len(store.query_records(conn, keyword="%")) == 0          # 通配符按字面量
     assert len(store.query_records(
         conn, condition_ids=["abs_full_brake_split_80kph"])) == 1
     assert store.query_records(conn, condition_ids=[]) == []

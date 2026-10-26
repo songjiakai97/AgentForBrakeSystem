@@ -75,7 +75,10 @@ tr:hover td{background:#0f1a2c}
         </select>
       </label>
       <label>编号
-        <input v-model.trim="filter.file_id" placeholder="如 4.1.1">
+        <input v-model.trim="filter.file_id" placeholder="如 4.1（包含即可）">
+      </label>
+      <label>关键词
+        <input v-model.trim="filter.keyword" placeholder="编号/车型/文件名片段">
       </label>
       <button @click="loadRecords" :disabled="loading">查询</button>
       <button class="ghost" @click="loadCompare" :disabled="loading">横向对比</button>
@@ -187,7 +190,7 @@ createApp({
   data() {
     return {
       db: '', meta: {vehicles: [], functions: [], conditions: [], file_ids: [], metrics: [], status: {}},
-      filter: {vehicle: '', function_key: '', condition_id: '', file_id: ''},
+      filter: {vehicle: '', function_key: '', condition_id: '', file_id: '', keyword: ''},
       records: [], hint: '', loading: false,
       compare: null, detail: null, chart: null,
     };

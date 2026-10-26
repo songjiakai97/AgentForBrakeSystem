@@ -85,9 +85,14 @@ def records_query(
     condition_id: Optional[str] = None,
     vehicle: Optional[str] = None,
     function_key: Optional[str] = None,
+    keyword: Optional[str] = None,
     limit: int = 20,
 ) -> dict:
-    """按编号/工况/车型查记录 + 指标汇总；未命中时给出库里有哪些可查。"""
+    """按编号/关键词/工况/车型查记录 + 指标汇总；未命中时给出库里有哪些可查。
+
+    编号与车型按「包含」匹配（说「4.1」「carB」都能查到）；keyword 再跨
+    编号/车型/文件名做一次模糊搜索，用户只记得文件名片段时也能定位。
+    """
     if function_key and cfg.function(function_key) is None:
         return {"ok": False, "hint": f"未知功能 {function_key}"}
     cond_ids = ([c.id for c in cfg.conditions_of(function_key)] if function_key else None)
@@ -98,6 +103,7 @@ def records_query(
     try:
         rows = store.query_records(conn, file_id=file_id, condition_id=condition_id,
                                    condition_ids=cond_ids, vehicle=vehicle,
+                                   keyword=keyword,
                                    limit=min(max(1, int(limit or 20)), 50))
         items = [_record_view(conn, cfg, r) for r in rows]
         result: Dict[str, Any] = {
