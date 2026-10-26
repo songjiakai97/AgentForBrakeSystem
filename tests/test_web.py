@@ -520,3 +520,33 @@ def test_detail_toggle_key_matches_template():
     assert re.search(r'toggle\((\w+)\)\{\s*this\.opened\[\1\]=!', src), \
         "toggle 形参应与 opened 的索引 key 同名且不经过二次拼接"
     assert f'@click="toggle({key})"' in src, f"模板传入的 key 与 v-if 读的 key 不一致：{key}"
+
+
+def test_wait_notice_is_revocable():
+    """静默提示要能撤销，且只在真有可停的 run 时挂。
+
+    历史 bug：定时器只负责"置"、不负责"清"，事件恢复后计数冻在旧值；一轮已收尾
+    （正文已展示、服务端还在写库/摘要）而连接尚未关闭时，界面一直停在
+    「仍在等待模型响应（已静默 Ns）」。这段是 Vue 方法体，加载与渲染都不报错，
+    只能在浏览器里等 30 秒才复现，所以把不变式固化成静态断言。
+    """
+    import re
+
+    path = os.path.join(ROOT, "web", "frontend", "index.html")
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
+    # 只在有 run 可停（currentRunId 来自 run 帧）时提示
+    assert "if(idle > 30 && this.currentRunId)" in src
+    # 有帧进来就撤提示（feed 内紧跟 lastEventAt 复位）
+    assert re.search(r"lastEventAt=Date\.now\(\);\s*\n\s*this\._clearWaitNotice\(\)", src), \
+        "收到 SSE 帧必须复位静默提示，否则计数会冻在旧值"
+
+    def block(head: str) -> str:
+        m = re.search(re.escape(head) + r"\{(.*?)\n      \}", src, re.S)
+        assert m, f"找不到分支 {head}"
+        return m.group(1)
+
+    for head in ("if(name==='run_error')", "} else if(name==='done')"):
+        assert "_stopSilenceWatch(false)" in block(head), f"{head} 必须停表并撤提示"
+    # 订阅到的 run 已结束（刷新/重连）同样不能再数静默
+    assert re.search(r"data\.status!=='running'\)\{[^}]*_stopSilenceWatch\(false\)", src)

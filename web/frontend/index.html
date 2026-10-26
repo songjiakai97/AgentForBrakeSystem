@@ -792,6 +792,7 @@ createApp({
     async attachActiveRun(){
       if(this._attaching) return;
       this._attaching = true;
+      this._clearWaitNotice();   // 刷新/切回会话：上一轮残留的「等待」提示不再成立
       try{
         const d = await (await fetch(`/api/chats/${this.chatId}/run`)).json();
         if(!d.run || d.run.status!=='running') return;
@@ -888,13 +889,16 @@ createApp({
       if(this.runCid && this.runCid!==this.chatId) return;
       if(name==='run'){
         this.currentRunId = data.run_id || this.currentRunId;
-        if(data.status && data.status!=='running') this.live.done = true;
+        // 订阅时这一轮可能已经收尾（重连/页面刷新）：状态一非 running 就停表，
+        // 否则界面会对着一个已结束的 run 一直数「静默」秒数
+        if(data.status && data.status!=='running'){ this.live.done = true; this._stopSilenceWatch(false); }
         return;
       }
       if(name==='run_error'){
         this.chat.messages.push({message_id:'tmp_x'+Date.now(),role:'assistant',kind:'error',
                                  content:'本轮执行失败：'+(data.error||''),meta:{}});
         this.live.done = true;
+        this._stopSilenceWatch(false);
         return;
       }
       if(name==='delta'){
@@ -911,23 +915,33 @@ createApp({
         this.pushMsg(m);
       } else if(name==='done'){
         this.live.done=true;
+        // done 是本轮最后一个事件：之后只剩服务端关闭连接，不该再数静默
+        this._stopSilenceWatch(false);
       }
       this.$nextTick(this.scroll);
     },
     // 慢段心跳兜底：后端有心跳 step，但本地模型卡住/分析大文件时仍可能长时间
     // 无任何事件。静默超 30s 就提示「还在等」，避免被当成假死；收到任何帧即复位。
+    // 提醒只在真有可停的 run 时挂（currentRunId 由 run 帧给出）：一轮结束后
+    // 就算连接还没关，也不该继续显示「等待模型响应 + 可按停止」。
     _startSilenceWatch(){
       this.lastEventAt = Date.now();
       this._silenceTimer = setInterval(()=>{
         const idle = Math.round((Date.now()-this.lastEventAt)/1000);
-        if(idle > 30)
+        if(idle > 30 && this.currentRunId)
           this.notice = `仍在等待模型响应（已静默 ${idle}s）：本地模型较慢或正在加载/分析大文件，`
                       + '可按「■ 停止」中止本轮。';
+        else
+          this._clearWaitNotice();   // 事件恢复/轮次已结束：把过期提示撤掉
       }, 3000);
     },
-    _stopSilenceWatch(){
+    _clearWaitNotice(){
+      if(this.notice && this.notice.startsWith('仍在等待模型响应')) this.notice='';
+    },
+    // clearAll=false：只撤静默提示，保留「上一轮还没收尾」这类真正需要用户看的说明
+    _stopSilenceWatch(clearAll=true){
       if(this._silenceTimer){ clearInterval(this._silenceTimer); this._silenceTimer=null; }
-      this.notice='';
+      if(clearAll) this.notice=''; else this._clearWaitNotice();
     },
     // 读取一条 SSE 流：记录每帧 seq，供断线后增量续传；返回是否正常读完
     async consumeStream(response){
@@ -935,6 +949,7 @@ createApp({
       let buf='', sawDone=false;
       const feed=(frame)=>{
         this.lastEventAt=Date.now();
+        this._clearWaitNotice();   // 有帧进来就不再是「等待模型响应」
         let ev='message', payload='', idv=null;
         for(const line of frame.split('\n')){
           if(line.startsWith('event:')) ev=line.slice(6).trim();
@@ -1053,6 +1068,7 @@ createApp({
     async select(t,key,profile,panel,label){
       // 连点保护：上一次选择未返回时忽略新点击（否则同一面板会重复触发分析）
       if(this.busy) return;
+      this._clearWaitNotice();   // /select 是同步请求，不走 SSE，别留着上一轮的等待提示
       // 乐观折叠：点下去就把面板变成回执，等服务端确认（存储层同样会写 consumed）
       if(panel){
         panel.meta = Object.assign({}, panel.meta, {consumed:true, chosen: label || (panel.meta&&panel.meta.chosen) || key});
