@@ -867,11 +867,24 @@ def api_records_meta():
 def api_records_compare(condition_id: Optional[str] = Query(None),
                         function_key: Optional[str] = Query(None),
                         vehicles: Optional[List[str]] = Query(None),
-                        metric: Optional[str] = Query(None)):
-    """横向对比（页面表格用）：同一工况下不同车型的客观指标。"""
+                        metric: Optional[str] = Query(None),
+                        vehicle: Optional[str] = Query(None),
+                        file_id: Optional[str] = Query(None),
+                        keyword: Optional[str] = Query(None)):
+    """横向对比（页面表格用）：同一工况下不同车型的客观指标。
+
+    车型/编号/关键词与清单页同口径传进来：页面筛了却比全库，会出现
+    「对比表里的记录不是我搜出来的」。`vehicle` 是页面单选，`vehicles` 给对话工具用。
+    """
+    picked = list(vehicles or [])
+    if vehicle and vehicle not in picked:
+        picked.append(vehicle)
     return records_compare(RECORDS, CFG, condition_id=condition_id,
-                           function_key=function_key, vehicles=vehicles,
-                           metric=metric)
+                           function_key=function_key,
+                           vehicles=picked or None, metric=metric,
+                           file_id=file_id, keyword=keyword,
+                           keyword_condition_ids=(CFG.conditions_by_text(keyword)
+                                                  if keyword else None))
 
 
 @app.get("/api/records")

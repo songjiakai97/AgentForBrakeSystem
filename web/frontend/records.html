@@ -125,6 +125,8 @@ tr.detail-row>td{padding:10px 6px 16px;background:#0b1626}
 
     <section v-if="compare">
       <h2>横向对比<span class="tag" v-if="compare.metric">仅 {{metricName(compare.metric)}}</span></h2>
+      <div class="meta">{{compareScope}}</div>
+      <div class="hint" v-if="compare.hint">{{compare.hint}}</div>
       <div class="empty" v-if="!compare.groups || !compare.groups.length">{{compare.hint || '没有可对比的记录'}}</div>
       <div v-for="g in compare.groups" :key="g.condition_id" style="margin-bottom:18px">
         <div style="margin-bottom:6px"><b>{{g.condition_name}}</b>
@@ -303,6 +305,21 @@ const app = createApp({
     };
   },
   computed: {
+    compareScope() {
+      const f = this.filter;
+      const scope = f.condition_id
+        ? ('工况 ' + ((this.meta.conditions.find(c => c.id === f.condition_id) || {}).name || f.condition_id))
+        : (f.function_key
+            ? ('功能 ' + ((this.meta.functions.find(x => x.key === f.function_key) || {}).name || f.function_key) + ' 的全部工况')
+            : '');
+      const bits = [];
+      if (f.vehicle) bits.push('车型 ' + f.vehicle);
+      if (f.file_id) bits.push('编号含「' + f.file_id + '」');
+      if (f.keyword) bits.push('关键词「' + f.keyword + '」');
+      if (!scope) return '先选「功能」或「工况」再对比：跨工况的指标不可比。';
+      if (!bits.length) return '范围：' + scope + ' · 库内全部车型（未套用上方筛选）';
+      return '范围：' + scope + ' · ' + bits.join(' · ');
+    },
     scopedConditions() {
       if (!this.filter.function_key) return this.meta.conditions;
       return this.meta.conditions.filter(c => c.function === this.filter.function_key);
@@ -366,7 +383,14 @@ const app = createApp({
     async loadCompare() {
       this.loading = true;
       try {
-        const params = {function_key: this.filter.function_key, condition_id: this.filter.condition_id};
+        // 车型/编号/关键词要一起带上：页面筛了却比全库，用户会觉得「这不是我搜的」
+        const params = {
+          function_key: this.filter.function_key,
+          condition_id: this.filter.condition_id,
+          vehicle: this.filter.vehicle,
+          file_id: this.filter.file_id,
+          keyword: this.filter.keyword,
+        };
         const r = await fetch('/api/records/compare?' + this.qs(params));
         this.compare = await r.json();
       } finally { this.loading = false; }

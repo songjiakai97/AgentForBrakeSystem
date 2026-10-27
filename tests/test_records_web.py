@@ -124,6 +124,26 @@ def test_record_timeseries_full_curve_with_highlight(client, records_db):
     assert len(data["series"]) == len(opt["series"])
 
 
+def test_compare_endpoint_applies_page_filters(client, records_db):
+    """页面筛了车型/关键词，对比表就必须是同一批记录。"""
+    for rid in records_db["ids"].values():
+        client.get(f"/api/records/{rid}")
+    cond = "abs_full_brake_dry_asphalt_100kph"
+    full = client.get("/api/records/compare", params={"condition_id": cond}).json()
+    assert full["record_count"] == 2
+    one = client.get("/api/records/compare",
+                     params={"condition_id": cond, "vehicle": "carA"}).json()
+    assert one["record_count"] == 1
+    assert one["groups"][0]["records"][0]["vehicle"] == "carA"
+    kw = client.get("/api/records/compare",
+                    params={"condition_id": cond, "keyword": "干沥青"}).json()
+    assert kw["record_count"] == 2
+    # 关键词指向另一个工况时不能越界返回全库
+    other = client.get("/api/records/compare",
+                       params={"condition_id": cond, "keyword": "湿沥青"}).json()
+    assert other["record_count"] == 0 and other["groups"] == []
+
+
 def test_records_compare_endpoint(client, records_db):
     for rid in records_db["ids"].values():
         client.get(f"/api/records/{rid}")

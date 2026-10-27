@@ -392,6 +392,11 @@ def test_records_detail_expands_under_the_clicked_row():
     assert 0 < body < detail
     # 对比表点开也在该行下面展开（同一记录两处都有时不重复渲染）
     assert "openSource==='compare'" in src
+    # 对比必须套用页面筛选：只传 function/condition 时对比的是全库，
+    # 用户会觉得「这不是我搜出来的」
+    cmp_src = src.split("async loadCompare()")[1].split("async ")[0]
+    for k in ("vehicle", "file_id", "keyword"):
+        assert f"{k}: this.filter.{k}" in cmp_src, f"对比没带上 {k} 筛选"
     # 详情组件内的图表同样走 mkChart（ChartKit 在时带游标 / 缩放，不在时退化为纯图）
     detail_src = src.split("const RecordDetail")[1]
     assert "mkChart(el, opt)" in detail_src

@@ -176,6 +176,34 @@ def test_compare_lists_not_analyzed(cfg, db):
     assert res["not_analyzed"][0]["analysis_status"] == "pending"
 
 
+def test_compare_honours_page_filters(cfg, db):
+    """对比范围必须跟页面筛选一致。
+
+    以前对比只吃 condition/function，页面上的车型/编号/关键词一个都没传进去，
+    于是「我搜的是 carA 这几条，对比表里却是全库」——横向对比变成另一个数据集。
+    """
+    svc = _svc(cfg, db)
+    cond = "abs_full_brake_dry_asphalt_100kph"
+    full = records_compare(svc, cfg, condition_id=cond)
+    assert full["record_count"] == 2
+    # 车型收窄
+    only_a = records_compare(svc, cfg, condition_id=cond, vehicles=["carA"])
+    assert only_a["record_count"] == 1
+    assert [r["vehicle"] for r in only_a["groups"][0]["records"]] == ["carA"]
+    assert "去掉车型/编号/关键词筛选" in only_a["hint"]
+    # 编号片段收窄
+    by_id = records_compare(svc, cfg, condition_id=cond, file_id="4.1.1")
+    assert by_id["record_count"] == 2
+    # 关键词按工况语义展开后仍在该工况内求交
+    kw = records_compare(svc, cfg, condition_id=cond, keyword="干沥青",
+                         keyword_condition_ids=cfg.conditions_by_text("干沥青"))
+    assert kw["record_count"] == 2
+    # 关键词与工况不匹配时列表为空，而不是绕过去返回全库
+    none = records_compare(svc, cfg, condition_id=cond, keyword="湿沥青",
+                           keyword_condition_ids=cfg.conditions_by_text("湿沥青"))
+    assert none["record_count"] == 0 and none["groups"] == []
+
+
 def test_compare_metric_filter_and_unknown(cfg, db):
     svc = _svc(cfg, db)
     res = records_compare(svc, cfg, condition_id="abs_full_brake_dry_asphalt_100kph",

@@ -175,11 +175,18 @@ def records_compare(
     vehicles: Optional[List[str]] = None,
     metric: Optional[str] = None,
     limit: int = 30,
+    file_id: Optional[str] = None,
+    keyword: Optional[str] = None,
+    keyword_condition_ids: Optional[List[str]] = None,
 ) -> dict:
     """同一工况下横向对比客观指标（默认该功能全部工况、全部车型）。
 
     只比已经算过的记录；没算过的在这里不触发重算，而是列进 not_analyzed，
     由用户点开单条记录再算——对比表里混进“正在计算”会让结论无法复现。
+
+    `file_id` / `keyword` / `keyword_condition_ids` 与列表页的筛选同口径：
+    页面上的筛选条件不传进来，就会出现「我搜的是这几条，对比表里却是全库」的错位。
+    对比仍然是「同一工况内、按车型/试验横着比」，筛的只是范围。
     """
     if condition_id:
         conds = [cfg.condition(condition_id)]
@@ -201,7 +208,9 @@ def records_compare(
         compared_metric = metric
         for cond in conds:
             rows = store.query_records(conn, condition_id=cond.id,
-                                       condition_ids=None, limit=limit)
+                                       condition_ids=None, limit=limit,
+                                       file_id=file_id, keyword=keyword,
+                                       keyword_condition_ids=keyword_condition_ids)
             if vehicles:
                 rows = [r for r in rows if r["vehicle"] in vehicles]
             if not rows:
@@ -241,11 +250,14 @@ def records_compare(
             "record_count": sum(len(g["records"]) for g in groups),
             "not_analyzed": not_analyzed[:10],
         }
+        narrowed = bool(vehicles or file_id or keyword)
         if not groups:
             result["hint"] = ("没有可对比的已分析记录；先点开记录或运行 "
                               "scripts/import_records.py 后补齐分析")
-        elif len(groups[0]["records"]) < 2 and not vehicles:
-            result["hint"] = "该工况当前只有一条记录，暂无法构成横向对比"
+        elif len(groups[0]["records"]) < 2:
+            result["hint"] = ("当前范围内只有一条记录，凑不成横向对比"
+                              + ("；去掉车型/编号/关键词筛选可对比库内全部"
+                                 if narrowed else ""))
         return result
     finally:
         conn.close()
