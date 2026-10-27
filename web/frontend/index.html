@@ -6,6 +6,7 @@
 <title>制动测试分析 Agent · Demo</title>
 <script src="./vendor/vue.global.prod.js"></script>
 <script src="./vendor/echarts.min.js"></script>
+<script src="./chart.js"></script>
 <script src="./vendor/marked.min.js"></script>
 <script src="./vendor/purify.min.js"></script>
 <style>
@@ -552,7 +553,7 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
 
   <div class="chartbox" v-if="chartData">
     <div class="cb-head">
-      <span>{{chartTitle}} — 多行子图 · 共享时间轴（滚轮缩放 / 拖拽平移）</span>
+      <span>{{chartTitle}} — 多行子图 · 共享时间轴（滚轮缩放 / 拖拽框选缩放 / 双击复位）</span>
       <span class="gchk">
         <label v-for="g in chartGroups" :key="g.index" :class="{on: !chartHidden.includes(g.index)}">
           <input type="checkbox" :checked="!chartHidden.includes(g.index)" @change="toggleGroup(g.index)">
@@ -1187,25 +1188,33 @@ createApp({
       const k=this.chartHidden.indexOf(i);
       if(k>=0) this.chartHidden.splice(k,1); else this.chartHidden.push(i);
       if(!this._chart||this._chart.isDisposed()) return;
-      // 显隐走 legend.selected（merge 更新）：不重建 grid/轴，避开多 grid notMerge 崩溃
+      // 显隐走 legend.selected（merge 更新）：不重建 grid/轴，避开多 grid notMerge 崩溃。
+      // 读数浮层要靠 setLegendSelected 一起更新，否则勾掉的行游标还在报数。
       const sel={};
       const hidden=new Set(this.chartHidden);
       (this.chartGroups||[]).forEach(g=>{
         g.signals.forEach(s=>{ sel[s]=!hidden.has(g.index); });
       });
-      this._chart.setOption({legend:{selected:sel}});
+      if(this._chart.setLegendSelected) this._chart.setLegendSelected(sel);
+      else this._chart.setOption({legend:{selected:sel}});
     },
     closeChart(){
       this.chartData=null;
-      if(this._chart && !this._chart.isDisposed()) this._chart.dispose();
+      if(this._chart){
+        if(this._chart.destroyChart) this._chart.destroyChart();
+        else if(!this._chart.isDisposed()) this._chart.dispose();
+      }
       this._chart=null;
     },
     renderSeries(){
       const el=this.$refs.chartEl;
       if(!el||!this.chartData||!this.chartFull) return;
-      if(this._chart && !this._chart.isDisposed()) this._chart.dispose();
-      this._chart=Vue.markRaw(echarts.init(el,null,{renderer:'canvas'}));
-      // 服务端已排好多 grid/共享 x：原样渲染，显隐交给 legend.selected
+      if(this._chart){
+        if(this._chart.destroyChart) this._chart.destroyChart();
+        else if(!this._chart.isDisposed()) this._chart.dispose();
+      }
+      // 服务端已排好多 grid/共享 x：原样渲染，显隐交给 legend.selected。
+      // 游标读数、拖拽框选缩放、双击复位都在 chart.js（记录库页面共用同一份）。
       const opt=JSON.parse(JSON.stringify(this.chartFull));
       const sel={};
       const hidden=new Set(this.chartHidden);
@@ -1213,37 +1222,7 @@ createApp({
         g.signals.forEach(s=>{ sel[s]=!hidden.has(g.index); });
       });
       opt.legend={show:false, data:(opt.series||[]).map(s=>s.name), selected:sel, type:'scroll'};
-      opt.textStyle={color:'#e2e8f0'};
-      opt.backgroundColor='transparent';
-      (opt.xAxis||[]).forEach(ax=>{
-        ax.axisLine={lineStyle:{color:'#334155'}};
-        ax.axisLabel=Object.assign({}, ax.axisLabel, {color:'#94a3b8'});
-      });
-      (opt.yAxis||[]).forEach(ax=>{
-        ax.nameTextStyle=Object.assign({}, ax.nameTextStyle, {color:'#94a3b8'});
-        ax.axisLabel=Object.assign({}, ax.axisLabel, {color:'#94a3b8'});
-      });
-      (opt.series||[]).forEach(s=>{ s.lineStyle=Object.assign({width:1.2}, s.lineStyle); });
-
-      // 游标读数列出全部信号：axisPointer.link 联动各行 x 轴，trigger:'axis'
-      // 会把所有行的系列并进同一个浮层（12 条 ≈ 500px，confine 保证不出绘图区）。
-      // 隐藏的组（legend.selected 勾掉）ECharts 自动不进 tooltip，无需处理
-      const fmtRow=(params)=>{
-        if(!params||!params.length) return '';
-        const t=Array.isArray(params[0].value)?params[0].value[0]:null;
-        const head=t==null?'':`<div style="opacity:.7">t = ${Number(t).toFixed(3)} s</div>`;
-        return head+params.map(p=>{
-          const v=Array.isArray(p.value)?p.value[1]:p.value;
-          return `${p.marker}${p.seriesName}&nbsp;&nbsp;<b>${v==null?'—':v}</b>`;
-        }).join('<br/>');
-      };
-      opt.tooltip=Object.assign({}, opt.tooltip,
-        {trigger:'axis', confine:true, formatter:fmtRow});
-      // 跨行对齐的竖直游标要留着（这是多行共享时间轴的意义所在）
-      opt.axisPointer={link:[{xAxisIndex:'all'}]};
-
-      this._chart.setOption(opt, true);
-      this._chart.resize();
+      this._chart=Vue.markRaw(ChartKit.create(el, opt));
     },
   }
 }).mount('#app');

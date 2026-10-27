@@ -175,10 +175,11 @@ def build_chart_option(
 
     option = {
         "title": {"text": title, "left": "center", "textStyle": {"fontSize": 13}},
-        # link 让竖直游标跨行对齐（共享时间轴的读数体验），代价是 trigger:'axis' 的
-        # tooltip 会把**所有行**的系列并进同一个浮层：6 行 12 条 ≈ 494px，高出绘图区
-        # 就被裁，用户看到的是"这一行少了几条测线"。裁切先在这里兜住（confine），
-        # 「只列鼠标所在那一行」必须在前端做——formatter 是函数，进不了 JSON。
+        # link 让竖直游标跨行对齐（共享时间轴的读数体验）。读数浮层由前端
+        # web/frontend/chart.js 自己画（按 groupIndex 分组列全部可见信号）；
+        # ECharts 的 axis tooltip 在多行 link 下会把所有行并进一个浮层，
+        # 高出绘图区就被裁成「这一行少了几条」。formatter 是函数进不了 JSON，
+        # 这里只保留 link 这个可序列化的前提。
         "tooltip": {"trigger": "axis", "confine": True,
                     "axisPointer": {"type": "cross", "link": [{"xAxisIndex": "all"}]}},
         "axisPointer": {"link": [{"xAxisIndex": "all"}]},

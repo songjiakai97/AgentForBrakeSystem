@@ -305,13 +305,12 @@ def test_steps_and_chart_groups(client):
 
 
 def test_chart_option_carries_tooltip_contract(client):
-    """游标读数的服务端半边：link 保留 + confine 兜底 + 每条系列带 groupIndex。
+    """游标读数的服务端半边：link 保留 + 每条系列带 groupIndex。
 
-    前端要靠 `series[].groupIndex` 把 tooltip 收窄到鼠标所在那一行（多行 link 会把
-    全部行的系列并进同一个浮层，高出绘图区就被裁 → "轮速那行有时只显示 4 个"）。
-    那是函数 formatter，进不了 JSON，所以这里只卡住它能工作的前提：
-    link 还在（跨行对齐不能为了修 tooltip 而牺牲）、confine 在（任何情况下都不裁切）、
-    groupIndex 与所在行一致（前端据此分组的依据）。
+    前端 `web/frontend/chart.js` 用 `series[].groupIndex` 把读数按行分组，竖直游标靠
+    `axisPointer.link` 跨行对齐；读数浮层是函数式渲染，进不了 JSON option，所以这里
+    只卡住它能工作的前提：link 还在（跨行对齐不能为了读数而牺牲）、`tooltip.confine`
+    仍在（旧 tooltip 路径的兜底），groupIndex 与所在行一致（分组的依据）。
     """
     chat = client.post("/api/chats").json()
     cid = chat["chat_id"]
@@ -336,6 +335,56 @@ def test_chart_option_carries_tooltip_contract(client):
     speed_row = next(s["groupIndex"] for s in opt["series"] if s["name"] == "speed_vbox")
     assert rows[speed_row] == {"speed_vbox", "wheelSpeed_FL", "wheelSpeed_FR",
                                "wheelSpeed_RL", "wheelSpeed_RR"}
+
+
+def test_chart_interactions_live_in_one_shared_module(client):
+    """游标读数 / 拖拽框选缩放只有一份实现，两个页面都加载它。
+
+    这两处都只能在真浏览器里验（本轮已用 Playwright 探针跑到过：读数列全 10 条、
+    拖拽后 dataZoom 从 27% 变到 59%、双击复位），但回归不该依赖有人手动点一遍，
+    所以把关键实现点固化成静态断言。
+    """
+    with open(os.path.join(ROOT, "web", "frontend", "chart.js"), encoding="utf-8") as f:
+        ck = f.read()
+    with open(os.path.join(ROOT, "web", "frontend", "index.html"), encoding="utf-8") as f:
+        index = f.read()
+    with open(os.path.join(ROOT, "web", "frontend", "records.html"), encoding="utf-8") as f:
+        records = f.read()
+    assert client.get("/chart.js").status_code == 200, "静态目录没把 chart.js 带出去"
+    for src, name in ((index, "index.html"), (records, "records.html")):
+        assert src.count('src="./chart.js"') == 1, f"{name} 没加载共享图表模块"
+        assert "ChartKit.create" in src, f"{name} 没有走 ChartKit"
+    # 主页面不再自己写 ECharts tooltip formatter（那条路会裁，见 design.md §6.6）
+    assert "fmtRow" not in index
+    # 读数按 groupIndex 分组、两列排版，且整组隐藏时不参与
+    assert "if (hiddenGroups[s.groupIndex]) return" in ck
+    assert "grid-template-columns:1fr 1fr" in ck
+    # 像素 → 数据坐标必须用 gridIndex：多行一列时 xAxisIndex 取不到唯一 cartesian（返 NaN）
+    assert "gridIndex: gi" in ck and "xAxisIndex: 0" not in ck
+    # 拖拽框选：遮罩 → dataZoom(startValue/endValue)，只动 X；不足 4px 不算选区
+    assert "zr.on('mousedown'" in ck and "zr.on('dblclick'" in ck
+    assert "startValue: lo, endValue: hi" in ck
+    assert "Math.abs(x2 - d.x1) >= 4" in ck
+    # inside dataZoom 的平移要关掉，否则一拖是平移不是选区
+    assert "z.moveOnMouseMove = false" in ck
+    # 程序化显隐（主页面的分组勾选）不会触发 legend 事件，必须显式同步读数
+    assert "setLegendSelected" in ck and "setLegendSelected" in index
+
+
+def test_records_detail_expands_under_the_clicked_row():
+    """记录库详情：曲线和卡片必须展开在被点的那一行下面，不再挂页面底部。"""
+    with open(os.path.join(ROOT, "web", "frontend", "records.html"), encoding="utf-8") as f:
+        src = f.read()
+    assert 'id="chart"' not in src, "旧的页面底部单图容器还在"
+    assert "record-detail" in src and "tr.detail-row" in src
+    # 同一 tbody 里，详情行紧跟被点行的 template v-for 之后
+    body = src.index('<template v-for="r in records"')
+    detail = src.index("v-if=\"openId===r.record_id && openSource==='list'\"")
+    assert 0 < body < detail
+    # 对比表点开也在该行下面展开（同一记录两处都有时不重复渲染）
+    assert "openSource==='compare'" in src
+    # 详情组件内的图表同样走 ChartKit（带游标 / 缩放）
+    assert "ChartKit.create" in src.split("const RecordDetail")[1]
 
 
 def test_chart_layout_validation():

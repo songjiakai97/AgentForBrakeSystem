@@ -413,10 +413,14 @@ phases: list[str]
     未编排的信号补成单信号分组，所以这里不需要再判断"漏了谁"。分组内没有实际数据通道的行
     整行不生成（`_groups_from_layout` 先过滤），所以 grid / 轴 / `groupIndex` 三者始终同序。
   - **游标读数列出全部信号**（§8.3）：`axisPointer.link=[{xAxisIndex:'all'}]` 让竖直游标
-    跨行对齐（共享时间轴的意义），`trigger:'axis'` 的 tooltip 会把所有行的系列并进同一个
-    浮层（12 条 ≈ 500px），`tooltip.confine: true` 限幅；隐藏的组（前端 legend.selected
-    勾掉）自动不进 tooltip。formatter 是函数进不了 JSON option，在前端做。早期版本做过
-    「只列鼠标所在行」，实测读不全被否掉。
+    跨行对齐（共享时间轴的意义）。读数由前端 `web/frontend/chart.js` 自己画浮层，
+    不再用 ECharts 的 axis tooltip：
+    - tooltip 方案下多行 link 会把所有行的系列并进同一个浮层（12 条 ≈ 500px），
+      高出绘图区就被裁，用户看到的是「轮速那行只显示 4 个」；
+    - 只列鼠标所在行又读不到别的行（早期版本做过，被否）。
+    现在按 `groupIndex` 分组、两列排版（6 行 12 条约 280px），贴指针显示并做边界翻转，
+    隐藏的组（前端 legend.selected 勾掉）整组不进读数。formatter 是函数进不了 JSON
+    option，所以这一层只能在前端。
 - 本期无静态图/报告导出，Markdown/HTML 报告与 PDF/Excel 导出列入 §15 后续扩展。
 
 ### 6.7 编排流水线（`pipeline.py`）
@@ -1115,8 +1119,9 @@ MATLAB 侧还要注意：`--matlab-root` / `--initialize-matlab-on-startup` /
   `:class="{stop:…, busywait:…}"` 两个条件写反，静态读代码完全正常，只有真浏览器里
   按一次才看到"该能点的停止键是灰的"（§8.4）。模板表达式不在测试覆盖范围内，
   探针要负责点它。
-- 点“查看图表”拉取事件窗口时序，ECharts 多行子图共享时间轴。tooltip 列出**全部信号**
-  （axisPointer.link 跨行对齐，confine 限幅；隐藏组自动不进 tooltip）。
+- 点“查看图表”拉取事件窗口时序，ECharts 多行子图共享时间轴。游标读数、X 轴拖拽框选
+  缩放、双击复位由 `web/frontend/chart.js` 统一提供（记录库页面共用同一份，见 §17.6）；
+  读数列出全部可见信号，按行分组两列排版，贴指针显示并做边界翻转。
 - **标定建议闭环**（§6.9 `_maybe_suggest` 的延续）：卡片上有「已采纳 / 验证有效 /
   验证无效」按钮（验证类可附说明）→ `POST /api/analyses/{id}/feedback` 落反馈 →
   LLM 基于反馈+原建议+实测摘要生成 `followup`（下一步标定动作，可为空并说明理由）
@@ -2423,9 +2428,25 @@ surface_code + function + 功能名` 做归一化包含比对（`_norm_text` 去
 | `GET /api/records/{id}/timeseries` | 整段曲线 + 窗口高亮，只画该功能 `signals` |
 | `GET /api/records/compare` | 横向对比表数据 |
 
-`/records` 页面：车型/功能/工况/编号筛选 + 关键词 → 记录清单 → 详情卡片 + 曲线 → 对比表。
+`/records` 页面：车型/功能/工况/编号筛选 + 关键词 → 记录清单 →（行内展开）详情卡片 + 曲线
+→ 对比表。详情用 `<record-detail>` 组件渲染在**被点的那一行下面**（`tr.detail-row`）：
+以前固定挂在页面最底部，点开以后还得往下滚才找得到，看起来像"没反应"。
+从对比表点「曲线」也在该行下面展开（`openSource` 区分来源，同一条记录两处都出现时
+不会同时渲染两个图）。
+
 图表的窗口高亮与曲线裁剪分开（`build_chart_option(highlight=...)`）：记录库看的是
 整段过程，窗口只做标记；分析卡片的图表仍沿用「裁剪到窗口」的旧行为。
+
+两条页面共用 `web/frontend/chart.js`（`ChartKit.create(el, option)`）做交互，
+避免「主页面有游标、记录库没有」这类不一致：
+- 游标读数：全部可见信号，按行分组两列排版，贴指针 + 边界翻转，隐藏组不参与；
+- X 轴拖拽框选缩放：mousedown 记录起点（只在绘图区内响应，滑条/轴标签不抢），
+  拖动时画半透明遮罩覆盖 `[min(x1,x), max(x1,x)]`，松开用 `convertFromPixel` 把
+  像素映射成数据坐标，`dispatchAction(dataZoom, startValue/endValue)` 只改 X；
+  位移不足 4px 视为点击，不缩放。`inside` dataZoom 的 `moveOnMouseMove` 关掉，
+  否则拖动是平移不是选区；
+- 双击复位全量程；
+- `destroyChart()` 负责解绑 window 监听、断开 ResizeObserver、移除遮罩/浮层。
 
 ### 17.7 运维
 

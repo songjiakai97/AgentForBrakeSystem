@@ -6,6 +6,7 @@
 <title>试验记录库</title>
 <script src="./vendor/vue.global.prod.js"></script>
 <script src="./vendor/echarts.min.js"></script>
+<script src="./chart.js"></script>
 <style>
 :root{--bg:#0b1220;--panel:#111a2b;--line:#1e293b;--text:#e2e8f0;--muted:#94a3b8;
       --ok:#22c55e;--abn:#ef4444;--warn:#f59e0b;--accent:#38bdf8}
@@ -29,6 +30,9 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--muted);font-weight:500;font-size:12px;white-space:nowrap}
 tr:hover td{background:#0f1a2c}
+tr.open td{background:#0f1a2c}
+/* 详情就展开在被点的那一行下面：以前固定在页面最底部，用户要点开再往下滚才找得到 */
+tr.detail-row>td{padding:10px 6px 16px;background:#0b1626}
 .link{color:var(--accent);cursor:pointer}
 .link:hover{text-decoration:underline}
 .badge{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;border:1px solid}
@@ -41,10 +45,12 @@ tr:hover td{background:#0f1a2c}
 .card .nm{font-size:12px;color:var(--muted)}
 .card .val{font-size:19px;margin-top:2px}
 .card .lim{font-size:11px;color:var(--muted);margin-top:2px}
-#chart{height:520px;width:100%}
+.chartwrap{height:420px;width:100%;margin-top:10px}
 .empty{color:var(--muted);padding:10px 0}
 .hint{color:var(--warn);font-size:12px;margin-top:6px}
 .tag{font-size:11px;color:var(--muted);margin-left:6px}
+.detail-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13px;font-weight:600}
+.dbar{display:flex;gap:8px;margin:8px 0 4px}
 </style>
 </head>
 <body>
@@ -96,15 +102,23 @@ tr:hover td{background:#0f1a2c}
           <th>车型</th><th>编号</th><th>工况</th><th>文件</th><th>试验日期</th><th>状态</th><th></th>
         </tr></thead>
         <tbody>
-          <tr v-for="r in records" :key="r.record_id">
-            <td>{{r.vehicle}}</td>
-            <td>{{r.file_id}}</td>
-            <td>{{r.condition_name}}<span class="tag">{{r.function}}</span></td>
-            <td>{{r.file_name}}</td>
-            <td>{{r.recorded_at || '—'}}</td>
-            <td><span class="badge" :class="statusClass(r.analysis_status)">{{statusTextOf(r.analysis_status)}}</span></td>
-            <td><span class="link" @click="openRecord(r.record_id)">查看 / 曲线</span></td>
-          </tr>
+          <template v-for="r in records" :key="r.record_id">
+            <tr :class="{open: openId===r.record_id && openSource==='list'}">
+              <td>{{r.vehicle}}</td>
+              <td>{{r.file_id}}</td>
+              <td>{{r.condition_name}}<span class="tag">{{r.function}}</span></td>
+              <td>{{r.file_name}}</td>
+              <td>{{r.recorded_at || '—'}}</td>
+              <td><span class="badge" :class="statusClass(r.analysis_status)">{{statusTextOf(r.analysis_status)}}</span></td>
+              <td><span class="link" @click="toggleRecord(r.record_id, 'list')">
+                {{ openId===r.record_id && openSource==='list' ? '收起' : '查看 / 曲线' }}</span></td>
+            </tr>
+            <tr v-if="openId===r.record_id && openSource==='list'" class="detail-row">
+              <td colspan="7">
+                <record-detail :key="openId" :rid="openId" @close="closeDetail" @refresh="loadRecords"></record-detail>
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
     </section>
@@ -122,61 +136,32 @@ tr:hover td{background:#0f1a2c}
             <th></th>
           </tr></thead>
           <tbody>
-            <tr v-for="r in g.records" :key="r.record_id">
-              <td>{{r.vehicle}}</td>
-              <td>{{r.file_id}}</td>
-              <td>{{r.recorded_at || '—'}}</td>
-              <td v-for="m in groupMetrics(g)" :key="m">
-                <span v-if="r.metrics[m] && r.metrics[m].value !== null && r.metrics[m].value !== undefined">
-                  {{r.metrics[m].value}} {{r.metrics[m].unit}}
-                  <span class="badge" :class="statusClass(r.metrics[m].status)">{{statusTextOf(r.metrics[m].status)}}</span>
-                </span>
-                <span v-else class="badge b-miss">{{reasonText(r.metrics[m])}}</span>
-              </td>
-              <td><span class="link" @click="openRecord(r.record_id)">曲线</span></td>
-            </tr>
+            <template v-for="r in g.records" :key="r.record_id">
+              <tr :class="{open: openId===r.record_id && openSource==='compare'}">
+                <td>{{r.vehicle}}</td>
+                <td>{{r.file_id}}</td>
+                <td>{{r.recorded_at || '—'}}</td>
+                <td v-for="m in groupMetrics(g)" :key="m">
+                  <span v-if="r.metrics[m] && r.metrics[m].value !== null && r.metrics[m].value !== undefined">
+                    {{r.metrics[m].value}} {{r.metrics[m].unit}}
+                    <span class="badge" :class="statusClass(r.metrics[m].status)">{{statusTextOf(r.metrics[m].status)}}</span>
+                  </span>
+                  <span v-else class="badge b-miss">{{reasonText(r.metrics[m])}}</span>
+                </td>
+                <td><span class="link" @click="toggleRecord(r.record_id, 'compare')">曲线</span></td>
+              </tr>
+              <tr v-if="openId===r.record_id && openSource==='compare'" class="detail-row">
+                <td :colspan="groupMetrics(g).length + 4">
+                  <record-detail :key="openId" :rid="openId" @close="closeDetail" @refresh="loadRecords"></record-detail>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>
       <div class="hint" v-if="compare.not_analyzed && compare.not_analyzed.length">
         未分析：{{compare.not_analyzed.map(x => x.vehicle + ' ' + x.file_id).join('、')}}（点开记录后才会计算）
       </div>
-    </section>
-
-    <section v-if="detail">
-      <h2>
-        {{detail.record.vehicle}} · {{detail.record.file_id}} · {{detail.condition_name}}
-        <span class="tag">{{detail.record.file_name}}</span>
-        <span class="badge" :class="statusClass(detail.record.analysis_status)">{{statusTextOf(detail.record.analysis_status)}}</span>
-      </h2>
-      <div class="meta" v-if="detail.windows && detail.windows.length">
-        事件窗口 {{detail.windows.length}} 个：
-        <span v-for="w in detail.windows" :key="w.sample_index" class="tag">
-          #{{w.sample_index + 1}} {{w.t_start.toFixed(2)}}–{{w.t_end.toFixed(2)}}s
-        </span>
-      </div>
-      <div class="hint" v-if="detail.record.last_error">{{detail.record.last_error}}</div>
-      <div v-for="win in sampleGroups" :key="win.index">
-        <div class="meta" v-if="sampleGroups.length > 1">事件 #{{win.index + 1}}</div>
-        <div class="cards">
-          <div class="card" v-for="m in win.metrics" :key="m.metric_key">
-            <div class="nm">{{m.name}}<span class="tag">{{m.metric_key}}</span></div>
-            <div class="val">
-              <template v-if="m.value !== null && m.value !== undefined">{{m.value}} <small>{{m.unit}}</small></template>
-              <span v-else class="badge b-miss">{{reasonText(m)}}</span>
-            </div>
-            <div class="lim">
-              <span class="badge" :class="statusClass(m.status)">{{statusTextOf(m.status)}}</span>
-              <span v-if="m.ok_range"> 限值 {{m.ok_range[0] === null ? '−∞' : m.ok_range[0]}}~{{m.ok_range[1] === null ? '+∞' : m.ok_range[1]}} {{m.unit}}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div style="display:flex;gap:8px;margin:8px 0 4px">
-        <button class="ghost" @click="openRecord(detail.record.record_id, true)" :disabled="loading">重新解析</button>
-        <button class="ghost" @click="closeDetail">关闭</button>
-      </div>
-      <div id="chart"></div>
     </section>
   </main>
 </div>
@@ -186,13 +171,117 @@ const STATUS = {ok:'达标', abnormal:'超限', missing:'不可算', info:'仅�
                 pending:'未分析', error:'解析失败', file_gone:'文件缺失'};
 const REASON = {no_valid_event:'未切出有效事件', signal_absent:'通道无数据',
                 not_computable:'算不出值', no_matching_entry:'该档位无条目'};
-createApp({
+
+// 一条记录的全部展示：指标卡片 + 曲线。卡片和图表放一起，是因为它们回答同一个问题
+// ——「这条记录的这些数，长什么样」；拆到页面底部会把它和清单割开。
+const RecordDetail = {
+  props: {rid: {type: String, required: true}},
+  emits: ['close', 'refresh'],
+  data() { return {d: null, err: '', busy: false, chart: null}; },
+  computed: {
+    rec() { return (this.d && this.d.record) || {}; },
+    windows() { return (this.d && this.d.windows) || []; },
+    sampleGroups() {
+      if (!this.d) return [];
+      const groups = {};
+      for (const m of this.d.metrics || []) {
+        (groups[m.sample_index] = groups[m.sample_index] || []).push(m);
+      }
+      return Object.keys(groups).sort((a, b) => a - b)
+        .map(i => ({index: Number(i), metrics: groups[i]}));
+    },
+  },
+  methods: {
+    statusTextOf(s) { return STATUS[s] || s || '—'; },
+    statusClass(s) {
+      if (s === 'ok' || s === 'info') return 'b-ok';
+      if (s === 'abnormal') return 'b-abn';
+      if (s === 'pending' || s === 'file_gone' || s === 'missing') return 'b-miss';
+      return 'b-warn';
+    },
+    reasonText(m) { return m && m.missing_reason ? (REASON[m.missing_reason] || m.missing_reason) : '无值'; },
+    async load(refresh) {
+      this.busy = true; this.err = '';
+      try {
+        const r = await fetch('/api/records/' + this.rid + (refresh ? '?refresh=true' : ''));
+        if (!r.ok) {
+          this.err = ((await r.json()).detail) || '读取失败';
+          return;
+        }
+        this.d = await r.json();
+        await this.$nextTick();
+        await this.loadChart();
+        if (refresh) this.$emit('refresh');
+      } finally { this.busy = false; }
+    },
+    async loadChart() {
+      const r = await fetch('/api/records/' + this.rid + '/timeseries');
+      if (!r.ok) return;
+      const data = await r.json();
+      this.disposeChart();
+      const el = this.$refs.chartEl;
+      if (!el) return;
+      // 与主页面同一份渲染逻辑（游标读数 / 拖拽框选缩放 / 双击复位）
+      this.chart = ChartKit.create(el, data.chart_option || {});
+    },
+    disposeChart() {
+      if (!this.chart) return;
+      if (this.chart.destroyChart) this.chart.destroyChart();
+      else if (!this.chart.isDisposed()) this.chart.dispose();
+      this.chart = null;
+    },
+  },
+  mounted() { this.load(false); },
+  beforeUnmount() { this.disposeChart(); },
+  template: `
+  <div>
+    <div class="detail-head">
+      <span>{{rec.vehicle}} · {{rec.file_id}} · {{d && d.condition_name}}</span>
+      <span class="tag">{{rec.file_name}}</span>
+      <span class="badge" :class="statusClass(rec.analysis_status)">{{statusTextOf(rec.analysis_status)}}</span>
+    </div>
+    <div class="meta" v-if="windows.length">
+      事件窗口 {{windows.length}} 个：
+      <span v-for="w in windows" :key="w.sample_index" class="tag">
+        #{{w.sample_index + 1}} {{w.t_start.toFixed(2)}}–{{w.t_end.toFixed(2)}}s
+      </span>
+    </div>
+    <div class="hint" v-if="err">{{err}}</div>
+    <div class="hint" v-if="rec.last_error">{{rec.last_error}}</div>
+    <div class="empty" v-if="busy && !d">解析中…</div>
+    <div v-for="win in sampleGroups" :key="win.index">
+      <div class="meta" v-if="sampleGroups.length > 1">事件 #{{win.index + 1}}</div>
+      <div class="cards">
+        <div class="card" v-for="m in win.metrics" :key="m.metric_key">
+          <div class="nm">{{m.name}}<span class="tag">{{m.metric_key}}</span></div>
+          <div class="val">
+            <template v-if="m.value !== null && m.value !== undefined">{{m.value}} <small>{{m.unit}}</small></template>
+            <span v-else class="badge b-miss">{{reasonText(m)}}</span>
+          </div>
+          <div class="lim">
+            <span class="badge" :class="statusClass(m.status)">{{statusTextOf(m.status)}}</span>
+            <span v-if="m.ok_range"> 限值 {{m.ok_range[0] === null ? '−∞' : m.ok_range[0]}}~{{m.ok_range[1] === null ? '+∞' : m.ok_range[1]}} {{m.unit}}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="dbar">
+      <button class="ghost" @click="load(true)" :disabled="busy">重新解析</button>
+      <button class="ghost" @click="$emit('close')">收起</button>
+    </div>
+    <div class="chartwrap" ref="chartEl"></div>
+  </div>`,
+};
+
+const app = createApp({
   data() {
     return {
       db: '', meta: {vehicles: [], functions: [], conditions: [], file_ids: [], metrics: [], status: {}},
       filter: {vehicle: '', function_key: '', condition_id: '', file_id: '', keyword: ''},
       records: [], hint: '', loading: false,
-      compare: null, detail: null, chart: null,
+      compare: null,
+      // 详情展开在「被点的那一行」下面，所以要记住点的是哪条、从哪张表点的
+      openId: '', openSource: 'list',
     };
   },
   computed: {
@@ -204,15 +293,6 @@ createApp({
       const s = this.meta.status || {};
       const parts = Object.keys(s).map(k => STATUS[k] + ' ' + s[k]);
       return parts.length ? '库内 ' + parts.join(' · ') : '';
-    },
-    sampleGroups() {
-      if (!this.detail) return [];
-      const groups = {};
-      for (const m of this.detail.metrics) {
-        (groups[m.sample_index] = groups[m.sample_index] || []).push(m);
-      }
-      return Object.keys(groups).sort((a,b) => a-b)
-        .map(i => ({index: Number(i), metrics: groups[i]}));
     },
   },
   watch: {
@@ -273,33 +353,20 @@ createApp({
         this.compare = await r.json();
       } finally { this.loading = false; }
     },
-    async openRecord(rid, refresh) {
-      this.loading = true;
-      try {
-        const r = await fetch('/api/records/' + rid + (refresh ? '?refresh=true' : ''));
-        if (!r.ok) { alert((await r.json()).detail || '读取失败'); return; }
-        this.detail = await r.json();
-        await this.$nextTick();
-        await this.loadChart(rid);
-        this.loadRecords();
-      } finally { this.loading = false; }
+    toggleRecord(rid, source) {
+      if (this.openId === rid && this.openSource === source) { this.closeDetail(); return; }
+      this.openId = rid; this.openSource = source || 'list';
+      // 详情就在该行下面，但行可能已经滚出视口（从对比表点回来的情况）
+      this.$nextTick(() => {
+        const el = document.querySelector('tr.detail-row');
+        if (el && el.scrollIntoView) el.scrollIntoView({block: 'nearest'});
+      });
     },
-    async loadChart(rid) {
-      const r = await fetch('/api/records/' + rid + '/timeseries');
-      if (!r.ok) return;
-      const d = await r.json();
-      if (this.chart && !this.chart.isDisposed()) this.chart.dispose();
-      const el = document.getElementById('chart');
-      if (!el) return;
-      this.chart = echarts.init(el, null, {renderer: 'canvas'});
-      this.chart.setOption(d.chart_option || {});
-    },
-    closeDetail() {
-      if (this.chart && !this.chart.isDisposed()) this.chart.dispose();
-      this.chart = null; this.detail = null;
-    },
+    closeDetail() { this.openId = ''; },
   },
-}).mount('#app');
+});
+app.component('record-detail', RecordDetail);
+app.mount('#app');
 </script>
 </body>
 </html>
