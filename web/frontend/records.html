@@ -6,7 +6,7 @@
 <title>试验记录库</title>
 <script src="./vendor/vue.global.prod.js"></script>
 <script src="./vendor/echarts.min.js"></script>
-<script src="./chart.js"></script>
+<script src="./chart.js?v=1"></script>
 <style>
 :root{--bg:#0b1220;--panel:#111a2b;--line:#1e293b;--text:#e2e8f0;--muted:#94a3b8;
       --ok:#22c55e;--abn:#ef4444;--warn:#f59e0b;--accent:#38bdf8}
@@ -45,7 +45,7 @@ tr.detail-row>td{padding:10px 6px 16px;background:#0b1626}
 .card .nm{font-size:12px;color:var(--muted)}
 .card .val{font-size:19px;margin-top:2px}
 .card .lim{font-size:11px;color:var(--muted);margin-top:2px}
-.chartwrap{height:420px;width:100%;margin-top:10px}
+.chartwrap{height:620px;width:100%;margin-top:10px}
 .empty{color:var(--muted);padding:10px 0}
 .hint{color:var(--warn);font-size:12px;margin-top:6px}
 .tag{font-size:11px;color:var(--muted);margin-left:6px}
@@ -167,6 +167,15 @@ tr.detail-row>td{padding:10px 6px 16px;background:#0b1626}
 </div>
 <script>
 const { createApp } = Vue;
+// 与主页面同一份降级：chart.js 没加载也要出图，不能留一片空白
+function mkChart(el, opt){
+  if(window.ChartKit) return ChartKit.create(el, opt);
+  console.warn('[chart] ChartKit 未加载，已退化为无游标图表；强刷（Ctrl/Cmd+Shift+R）可恢复');
+  const c=echarts.init(el,null,{renderer:'canvas'});
+  c.setOption(opt,true); c.resize();
+  c.destroyChart=()=>{ if(!c.isDisposed()) c.dispose(); };
+  return c;
+}
 const STATUS = {ok:'达标', abnormal:'超限', missing:'不可算', info:'仅记录',
                 pending:'未分析', error:'解析失败', file_gone:'文件缺失'};
 const REASON = {no_valid_event:'未切出有效事件', signal_absent:'通道无数据',
@@ -216,13 +225,22 @@ const RecordDetail = {
     },
     async loadChart() {
       const r = await fetch('/api/records/' + this.rid + '/timeseries');
-      if (!r.ok) return;
+      if (!r.ok) {
+        // 以前这里静默 return，用户只看到一块空白，不知道是解析失败还是没数据
+        this.err = '曲线数据获取失败（HTTP ' + r.status + '）：' + (this.rec.last_error || '原始文件可能已不存在');
+        return;
+      }
       const data = await r.json();
+      const opt = data.chart_option || {};
+      if (!(opt.series || []).length) {
+        this.err = '这条记录没有可画的信号通道（该功能关心的通道在这个文件里都缺）';
+        return;
+      }
       this.disposeChart();
       const el = this.$refs.chartEl;
       if (!el) return;
       // 与主页面同一份渲染逻辑（游标读数 / 拖拽框选缩放 / 双击复位）
-      this.chart = ChartKit.create(el, data.chart_option || {});
+      this.chart = mkChart(el, opt);
     },
     disposeChart() {
       if (!this.chart) return;

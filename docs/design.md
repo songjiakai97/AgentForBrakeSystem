@@ -412,13 +412,18 @@ phases: list[str]
     §9.6）：一行子图 = 一组同单位信号共用 y 轴；该段缺失时按 unit 自动分组。加载期已把
     未编排的信号补成单信号分组，所以这里不需要再判断"漏了谁"。分组内没有实际数据通道的行
     整行不生成（`_groups_from_layout` 先过滤），所以 grid / 轴 / `groupIndex` 三者始终同序。
-  - **游标读数列出全部信号**（§8.3）：`axisPointer.link=[{xAxisIndex:'all'}]` 让竖直游标
-    跨行对齐（共享时间轴的意义）。读数由前端 `web/frontend/chart.js` 自己画浮层，
-    不再用 ECharts 的 axis tooltip：
-    - tooltip 方案下多行 link 会把所有行的系列并进同一个浮层（12 条 ≈ 500px），
-      高出绘图区就被裁，用户看到的是「轮速那行只显示 4 个」；
-    - 只列鼠标所在行又读不到别的行（早期版本做过，被否）。
-    现在按 `groupIndex` 分组、两列排版（6 行 12 条约 280px），贴指针显示并做边界翻转，
+  - **游标读数列出全部信号**（§8.3）：读数与游标线都由前端 `web/frontend/chart.js`
+    自己画，ECharts 的 tooltip / axisPointer 全部关掉。三个方案里只有自己画是对
+    的：
+    - ECharts tooltip：多行 link 会把所有行的系列并进同一个浮层（12 条 ≈ 500px），
+      高出绘图区就被裁，用户看到「轮速那行只显示 4 个」；
+    - 只列鼠标所在行：又读不到别的行（早期版本做过，被否）；
+    - ECharts axisPointer：y 轴 label 显示的是**鼠标的 y 值**（跟时间序列无关），
+      link 之后每个联动行还会各画一个 x label 和标记点——一屏好几个「3.68」，
+      看起来像「点不在游标的 x 上」。
+    现在读数按 `groupIndex` 分组、两列排版（6 行 12 条约 280px），贴指针显示并做边界
+    翻转；信号名用该信号在 ECharts 调色板里的实际颜色（按 `seriesIndex` 取，与曲线
+    同色）；游标是一条自己画的竖线，只由 x 决定、跨行贯通、不带数值标签；
     隐藏的组（前端 legend.selected 勾掉）整组不进读数。formatter 是函数进不了 JSON
     option，所以这一层只能在前端。
 - 本期无静态图/报告导出，Markdown/HTML 报告与 PDF/Excel 导出列入 §15 后续扩展。
@@ -2440,6 +2445,7 @@ surface_code + function + 功能名` 做归一化包含比对（`_norm_text` 去
 两条页面共用 `web/frontend/chart.js`（`ChartKit.create(el, option)`）做交互，
 避免「主页面有游标、记录库没有」这类不一致：
 - 游标读数：全部可见信号，按行分组两列排版，贴指针 + 边界翻转，隐藏组不参与；
+  信号名用该信号曲线的实际颜色；游标竖线自绘（不带 ECharts 的 y 值标签与重复 x 标签）；
 - X 轴拖拽框选缩放：mousedown 记录起点（只在绘图区内响应，滑条/轴标签不抢），
   拖动时画半透明遮罩覆盖 `[min(x1,x), max(x1,x)]`，松开用 `convertFromPixel` 把
   像素映射成数据坐标，`dispatchAction(dataZoom, startValue/endValue)` 只改 X；

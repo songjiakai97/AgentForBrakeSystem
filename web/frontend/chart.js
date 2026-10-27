@@ -73,16 +73,13 @@
       }
     });
 
-    // 读数改由下面的 DOM 浮层负责，ECharts 自带 tooltip 关掉（留着会和遮罩抢层）。
-    // 竖直游标单独开着：standalone 的 axisPointer 要靠 triggerOn 才会跟着鼠标走。
+    // 读数和游标线都由下面的 DOM 层负责，ECharts 的 tooltip / axisPointer 全关：
+    //   - axisPointer 的 y 轴 label 显示的是「鼠标的 y 值」，跟时间序列无关；
+    //   - link 之后每个联动行都会再画一个 x label（一屏好几个「3.68」）和标记点，
+    //     看起来像「点不在游标 x 上」。
+    // 自己画一条竖线才干净：位置只由 x 决定，跨行贯通，不带任何数值标签。
     option.tooltip = {show: false};
-    option.axisPointer = {
-      show: true,
-      triggerOn: 'mousemove',
-      type: 'line',
-      lineStyle: {color: '#64748b', width: 1, type: 'dashed'},
-      link: [{xAxisIndex: 'all'}]
-    };
+    option.axisPointer = {show: false};
 
     var chart = echarts.init(el, null, {renderer: 'canvas'});
     chart.setOption(option, true);
@@ -95,6 +92,29 @@
       'background:rgba(56,189,248,.18);border-left:1px solid rgba(56,189,248,.65);' +
       'border-right:1px solid rgba(56,189,248,.65);pointer-events:none;z-index:6;';
     el.appendChild(mask);
+
+    // ---------------------------------------------------------------- 游标竖线
+    var cursor = document.createElement('div');
+    cursor.style.cssText = 'position:absolute;top:0;left:0;display:none;' +
+      'border-left:1px dashed #64748b;pointer-events:none;z-index:5;';
+    el.appendChild(cursor);
+
+    function gridSpan() {
+      var rs = grids();
+      if (!rs.length) return null;
+      return {top: rs[0].y, bottom: rs[rs.length - 1].y + rs[rs.length - 1].h};
+    }
+
+    function moveCursor(x) {
+      var sp = gridSpan();
+      if (!sp) return;
+      cursor.style.display = 'block';
+      cursor.style.left = Math.round(x) + 'px';
+      cursor.style.top = sp.top + 'px';
+      cursor.style.height = Math.max(1, sp.bottom - sp.top) + 'px';
+    }
+
+    function hideCursor() { cursor.style.display = 'none'; }
 
     // ---------------------------------------------------------------- 读数浮层
     var readout = document.createElement('div');
@@ -167,13 +187,31 @@
     var groupLabels = {};
     ((option._groups) || []).forEach(function (g) { groupLabels[g.index] = g.label; });
 
+    // 读数里的色点必须和曲线同色：ECharts 不给 series 指定颜色时按 seriesIndex
+    // 顺序取调色板，这里照同一规则取，避免"名字一个色、线另一个色"。
+    var palette = null;
+    function colorOf(idx) {
+      if (!palette) {
+        var got = [];
+        try { got = chart.getOption().color || []; } catch (e) { got = []; }
+        if (!got.length) got = option.color || [];
+        if (!got.length) got = ['#5470c6'];
+        palette = got;
+      }
+      return palette[idx % palette.length];
+    }
+
     // 读数列**全部**可见信号（按行分组，两列排），不是只列鼠标那一行：
     // 早期版本只列当前行，用户读不到别的行；改成全部塞进 ECharts tooltip 又被裁。
     // 自己画浮层才能「全都要 + 不被裁」——两列排版把 6 行 12 条压到 ~180px。
+    var idxOf = {};
+    (option.series || []).forEach(function (s, i) { idxOf[s.name] = i; });
+
     function showReadout(row, x, y) {
       var t = timeAt(x, row);
       if (t === null || row === null) {
         readout.style.display = 'none';
+        hideCursor();
         return;
       }
       var byGroup = {};
@@ -183,11 +221,17 @@
         var p = nearest(s.data, t);
         if (!p) return;
         if (!byGroup[s.groupIndex]) { byGroup[s.groupIndex] = []; order.push(s.groupIndex); }
+        var color = colorOf(idxOf[s.name] || 0);
         byGroup[s.groupIndex].push(
-          '<span><span style="opacity:.5">' + s.name + '</span> <b>' + fmtVal(p[1]) + '</b>' +
+          '<span><span style="color:' + color + '">' + s.name + '</span> ' +
+          '<b>' + fmtVal(p[1]) + '</b>' +
           (units[s.name] ? ' <span style="opacity:.5">' + units[s.name] + '</span>' : '') + '</span>');
       });
-      if (!order.length) { readout.style.display = 'none'; return; }
+      if (!order.length) {
+        readout.style.display = 'none';
+        hideCursor();
+        return;
+      }
       var html = '<div style="opacity:.75;margin-bottom:2px">t = ' + Number(t).toFixed(3) + ' s</div>';
       order.forEach(function (gi) {
         var label = groupLabels[gi] ? groupLabels[gi] : ('#' + (gi + 1));
@@ -197,6 +241,7 @@
       });
       readout.innerHTML = html;
       readout.style.display = 'block';
+      moveCursor(x);
       // 贴指针显示，靠近右/下边界时翻到另一侧，任何情况下都不出容器
       var ow = readout.offsetWidth, oh = readout.offsetHeight;
       var W = chart.getWidth(), H = chart.getHeight();
@@ -207,7 +252,7 @@
       readout.style.top = ty + 'px';
     }
 
-    function hideReadout() { readout.style.display = 'none'; }
+    function hideReadout() { readout.style.display = 'none'; hideCursor(); }
 
     // ---------------------------------------------------------------- 拖拽缩放
     var drag = null;
@@ -233,9 +278,17 @@
 
     function hideMask() { mask.style.display = 'none'; }
 
+    // 选区里必须有数据：否则缩放后是空白图，看起来像「数据没了」
+    function hasDataIn(lo, hi) {
+      return (option.series || []).some(function (s) {
+        var d = s.data || [];
+        return d.length && d[d.length - 1][0] >= lo && d[0][0] <= hi;
+      });
+    }
+
     function zoomTo(t0, t1) {
       var lo = Math.min(t0, t1), hi = Math.max(t0, t1);
-      if (!(hi > lo)) return false;
+      if (!(hi > lo) || !hasDataIn(lo, hi)) return false;
       (option.dataZoom || []).forEach(function (z, i) {
         chart.dispatchAction({type: 'dataZoom', dataZoomIndex: i, startValue: lo, endValue: hi});
       });
@@ -288,7 +341,11 @@
       if (!(Math.abs(x2 - d.x1) >= 4)) return;
       var t0 = timeAt(d.x1, d.row), t1 = timeAt(x2, d.row);
       if (t0 === null || t1 === null) return;
-      zoomTo(t0, t1);
+      if (!zoomTo(t0, t1) || !ev) return;
+      // 松手后把读数补回来：缩放完还停在空白处会让人以为图没了
+      var rect = el.getBoundingClientRect();
+      var px = ev.clientX - rect.left, py = ev.clientY - rect.top;
+      showReadout(rowAt(px, py), px, py);
     }
 
     window.addEventListener('mousemove', onWinMove);
@@ -308,6 +365,7 @@
       window.removeEventListener('mouseup', onWinUp);
       if (ro) ro.disconnect();
       if (mask.parentNode) mask.parentNode.removeChild(mask);
+      if (cursor.parentNode) cursor.parentNode.removeChild(cursor);
       if (readout.parentNode) readout.parentNode.removeChild(readout);
       if (!chart.isDisposed()) chart.dispose();
     };

@@ -6,7 +6,7 @@
 <title>制动测试分析 Agent · Demo</title>
 <script src="./vendor/vue.global.prod.js"></script>
 <script src="./vendor/echarts.min.js"></script>
-<script src="./chart.js"></script>
+<script src="./chart.js?v=1"></script>
 <script src="./vendor/marked.min.js"></script>
 <script src="./vendor/purify.min.js"></script>
 <style>
@@ -568,6 +568,16 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
 
 <script>
 const { createApp } = Vue;
+// chart.js 若因浏览器缓存/部署滞后没加载，也不能一片空白：退化到纯 ECharts
+// （丢游标读数与拖拽缩放），并提示强刷。空白最容易让人以为数据没了。
+function mkChart(el, opt){
+  if(window.ChartKit) return ChartKit.create(el, opt);
+  console.warn('[chart] ChartKit 未加载，已退化为无游标图表；强刷（Ctrl/Cmd+Shift+R）可恢复');
+  const c=echarts.init(el,null,{renderer:'canvas'});
+  c.setOption(opt,true); c.resize();
+  c.destroyChart=()=>{ if(!c.isDisposed()) c.dispose(); };
+  return c;
+}
 const blankLive = () => ({engine:'', reasoning:'', content:'', showThink:true, done:false});
 createApp({
   data(){ return {
@@ -1173,8 +1183,18 @@ createApp({
       const url = rec ? `/api/records/${rec.record_id}/timeseries`
                       : `/api/analyses/${s.sample_id}/timeseries`;
       const r=await fetch(url);
-      if(!r.ok){ alert((await r.json()).detail||'无法获取时序'); return; }
+      if(!r.ok){
+        // 不留一个空覆盖层：看到空白比看到原因更糟
+        alert((await r.json()).detail||'无法获取时序');
+        this.closeChart();
+        return;
+      }
       const data = await r.json();
+      const opt0 = data.chart_option || {};
+      if(!(opt0.series||[]).length){
+        alert('这条记录没有可画的信号通道（该功能关心的通道在这个文件里都缺）');
+        return;
+      }
       this.chartData=Vue.markRaw(data);
       const opt=data.chart_option||{};
       this.chartGroups=(opt._groups)||[];
@@ -1222,7 +1242,7 @@ createApp({
         g.signals.forEach(s=>{ sel[s]=!hidden.has(g.index); });
       });
       opt.legend={show:false, data:(opt.series||[]).map(s=>s.name), selected:sel, type:'scroll'};
-      this._chart=Vue.markRaw(ChartKit.create(el, opt));
+      this._chart=Vue.markRaw(mkChart(el, opt));
     },
   }
 }).mount('#app');

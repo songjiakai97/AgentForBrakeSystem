@@ -352,13 +352,22 @@ def test_chart_interactions_live_in_one_shared_module(client):
         records = f.read()
     assert client.get("/chart.js").status_code == 200, "静态目录没把 chart.js 带出去"
     for src, name in ((index, "index.html"), (records, "records.html")):
-        assert src.count('src="./chart.js"') == 1, f"{name} 没加载共享图表模块"
-        assert "ChartKit.create" in src, f"{name} 没有走 ChartKit"
+        # 带版本参数：浏览器缓存过一个 404 的话，裸路径会一直白图
+        assert src.count('src="./chart.js?v=1"') == 1, f"{name} 没加载共享图表模块"
+        # ChartKit 不在时退化成纯 ECharts，不允许静默空白
+        assert "function mkChart(el, opt)" in src and "window.ChartKit" in src
     # 主页面不再自己写 ECharts tooltip formatter（那条路会裁，见 design.md §6.6）
     assert "fmtRow" not in index
     # 读数按 groupIndex 分组、两列排版，且整组隐藏时不参与
     assert "if (hiddenGroups[s.groupIndex]) return" in ck
     assert "grid-template-columns:1fr 1fr" in ck
+    # ECharts 的 tooltip / axisPointer 必须关掉：y 轴 label 显示鼠标 y 值、link 之后
+    # 每行再画一个 x label 和标记点，正是「点不在游标 x 上」的来源
+    assert "option.tooltip = {show: false}" in ck
+    assert "option.axisPointer = {show: false}" in ck
+    # 自绘游标竖线 + 信号名按 ECharts 调色板取色（与曲线同色）
+    assert "border-left:1px dashed #64748b" in ck
+    assert "function colorOf(idx)" in ck and "palette[idx % palette.length]" in ck
     # 像素 → 数据坐标必须用 gridIndex：多行一列时 xAxisIndex 取不到唯一 cartesian（返 NaN）
     assert "gridIndex: gi" in ck and "xAxisIndex: 0" not in ck
     # 拖拽框选：遮罩 → dataZoom(startValue/endValue)，只动 X；不足 4px 不算选区
@@ -383,8 +392,12 @@ def test_records_detail_expands_under_the_clicked_row():
     assert 0 < body < detail
     # 对比表点开也在该行下面展开（同一记录两处都有时不重复渲染）
     assert "openSource==='compare'" in src
-    # 详情组件内的图表同样走 ChartKit（带游标 / 缩放）
-    assert "ChartKit.create" in src.split("const RecordDetail")[1]
+    # 详情组件内的图表同样走 mkChart（ChartKit 在时带游标 / 缩放，不在时退化为纯图）
+    detail_src = src.split("const RecordDetail")[1]
+    assert "mkChart(el, opt)" in detail_src
+    # 取不到时序 / 没有可画通道时要给出原因，而不是留一块空白
+    assert "曲线数据获取失败（HTTP " in detail_src
+    assert "没有可画的信号通道" in detail_src
 
 
 def test_chart_layout_validation():
