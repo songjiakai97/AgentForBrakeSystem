@@ -439,6 +439,7 @@ def query_records(
     condition_ids: Optional[List[str]] = None,
     vehicle: Optional[str] = None,
     keyword: Optional[str] = None,
+    keyword_condition_ids: Optional[List[str]] = None,
     limit: int = 200,
 ) -> List[sqlite3.Row]:
     """按编号/工况/车型过滤；功能维度的工况集合由调用方从配置算好传进来。
@@ -446,6 +447,10 @@ def query_records(
     编号、车型、关键词都是「包含即可」（子串匹配），不要求写全：
     用户说「4.1」或「carB」时就该查得到，而不是回一句「没有这条记录」。
     keyword 跨 编号/车型/文件名/相对路径 做 OR，用于一次性模糊搜索。
+    `keyword_condition_ids` 是同一 keyword 在**配置侧**解析出的工况 id 集合
+    （路面/动作这类中文词只存在于 conditions.yaml，库里根本没有那个字符串）：
+    它并进 keyword 的 OR 组，不是新的 AND 条件，所以「ABS 干沥青」既受
+    `condition_ids`（功能范围）约束，又能靠工况名命中。
     """
     where: List[str] = []
     args: List[Any] = []
@@ -465,9 +470,14 @@ def query_records(
         args.append(_like(vehicle))
     if keyword:
         pattern = _like(keyword)
-        where.append("(file_id LIKE ? ESCAPE '\\' OR vehicle LIKE ? ESCAPE '\\'"
-                     " OR file_name LIKE ? ESCAPE '\\' OR rel_path LIKE ? ESCAPE '\\')")
-        args.extend([pattern] * 4)
+        ors = ["file_id LIKE ? ESCAPE '\\'", "vehicle LIKE ? ESCAPE '\\'",
+               "file_name LIKE ? ESCAPE '\\'", "rel_path LIKE ? ESCAPE '\\'"]
+        vals: List[Any] = [pattern] * 4
+        if keyword_condition_ids:
+            ors.append("condition_id IN (%s)" % ",".join("?" * len(keyword_condition_ids)))
+            vals.extend(keyword_condition_ids)
+        where.append("(" + " OR ".join(ors) + ")")
+        args.extend(vals)
     sql = "SELECT * FROM record"
     if where:
         sql += " WHERE " + " AND ".join(where)

@@ -268,6 +268,19 @@ def test_query_records_filters(tmp_path, imp, cfg):
     assert len(store.query_records(conn, vehicle="car")) == 3
     assert len(store.query_records(conn, keyword="20260802")) == 1
     assert len(store.query_records(conn, keyword="%")) == 0          # 通配符按字面量
+    # 中文路面词在 record 行里一个字都没有：不带配置侧的工况 id 就是搜不到，
+    # 带了就命中（keyword 的 OR 组里多了 condition_id IN (...)）
+    assert len(store.query_records(conn, keyword="干沥青")) == 0
+    assert len(store.query_records(
+        conn, keyword="干沥青",
+        keyword_condition_ids=["abs_full_brake_dry_asphalt_100kph"])) == 1
+    assert len(store.query_records(
+        conn, keyword="干沥青",
+        keyword_condition_ids=["abs_full_brake_split_80kph"])) == 1
+    # 它不是新的 AND：功能范围照样生效
+    assert store.query_records(conn, keyword="干沥青",
+                               condition_ids=["abs_full_brake_dry_asphalt_100kph"],
+                               keyword_condition_ids=["abs_full_brake_split_80kph"]) == []
     assert len(store.query_records(
         conn, condition_ids=["abs_full_brake_split_80kph"])) == 1
     assert store.query_records(conn, condition_ids=[]) == []

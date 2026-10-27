@@ -137,6 +137,28 @@ def test_query_keyword_escapes_like_wildcards(cfg, db):
     assert records_query(svc, cfg, file_id="4.1.1%")["count"] == 0
 
 
+def test_query_keyword_covers_condition_semantics(cfg, db):
+    """「ABS 干沥青」里的路面只写在 conditions.yaml，不在任何 record 行里。
+
+    实测困扰：模型按 function_key=abs + keyword=干沥青 发查询，库里一个字都
+    匹配不上，回一句「没有记录」——可数据其实就在库里（4.1.1）。keyword 现在
+    先在配置侧换成工况 id，再进 SQL 的同一个 OR 组。
+    """
+    svc = _svc(cfg, db)
+    dry = records_query(svc, cfg, function_key="abs", keyword="干沥青")
+    assert dry["ok"] and dry["count"] == 2
+    assert {r["condition_id"] for r in dry["records"]} == {"abs_full_brake_dry_asphalt_100kph"}
+    # 归一化：中英、空格、连字符、大小写的差异不该成为漏检理由
+    assert records_query(svc, cfg, keyword="wet asphalt")["count"] == 2
+    assert records_query(svc, cfg, keyword="WET-ASPHALT")["count"] == 2
+    # 其它过滤条件仍是 AND：keyword 命中工况不能把车型约束绕过去
+    assert records_query(svc, cfg, keyword="干沥青", vehicle="carA")["count"] == 1
+    # 与功能范围求交：TCS 也有干沥青工况，但本库里没有它的记录
+    assert records_query(svc, cfg, function_key="tcs", keyword="干沥青")["count"] == 0
+    # 速度这类参数词同样能落到工况上
+    assert records_query(svc, cfg, keyword="60kph")["count"] == 2
+
+
 def test_compare_groups_by_condition(cfg, db):
     res = records_compare(_svc(cfg, db), cfg, condition_id="abs_full_brake_dry_asphalt_100kph")
     assert res["ok"] and res["record_count"] == 2

@@ -164,6 +164,15 @@ def _slot_key(cond: ConditionConfig) -> tuple:
     return (cond.maneuver, cond.surface_code, params)
 
 
+def _norm_text(value: str) -> str:
+    """自由文本归一：大小写、空格、下划线、连字符、常见括号/标点都不作为差异。
+
+    「湿沥青」「wet asphalt」「WET_ASPHALT」在搜索时必须等价——记录库里的
+    文件名是采集侧起的，配置里的是人写的，两边不可能一字不差。
+    """
+    return re.sub(r"[\s_\-/()（）:：，,、]+", "", (value or "").lower())
+
+
 def _norm_scalar(v: Any) -> str:
     """数值归一：100 / 100.0 / "100" 视为同一个值，避免伪唯一。"""
     if isinstance(v, bool):
@@ -209,6 +218,28 @@ class AppConfigs:
     def match_file_id(self, filename: str) -> Optional[str]:
         """按文件名前缀取编号；不认编号的文件返回 None（导入时跳过）。"""
         return self.file_ids.match(filename) if self.file_ids is not None else None
+
+    def conditions_by_text(self, text: str) -> List[str]:
+        """工况 id 里「语义上含这个词」的那些：编号/名称/路面/动作/功能名都算。
+
+        记录库表里只存 `condition_id`，「干沥青」「湿滑」这类中文描述只存在于配置，
+        所以按关键词搜库时必须先在这里换成工况 id 集合，否则用户说一句「ABS 干沥青」
+        就什么都搜不到（库里既没这个字符串，也不是文件名）。
+        归一化后做包含匹配：大小写、空格、下划线、中英混排的差异都不该成为漏检理由。
+        """
+        needle = _norm_text(text)
+        if not needle:
+            return []
+        hits: List[str] = []
+        for cid, cond in self.conditions.items():
+            fn = self.functions.get(cond.function)
+            haystack = _norm_text(" ".join([
+                cid, cond.name or "", cond.maneuver or "", cond.surface_code or "",
+                cond.function or "", (fn.name if fn else "")
+            ]))
+            if needle in haystack:
+                hits.append(cid)
+        return hits
 
     def conditions_of(self, function_key: str) -> List[ConditionConfig]:
         return [self.conditions[c] for c in self.conditions_by_function.get(function_key, [])]

@@ -78,7 +78,7 @@ tr:hover td{background:#0f1a2c}
         <input v-model.trim="filter.file_id" placeholder="如 4.1（包含即可）">
       </label>
       <label>关键词
-        <input v-model.trim="filter.keyword" placeholder="编号/车型/文件名片段">
+        <input v-model.trim="filter.keyword" placeholder="编号/车型/文件名片段，或路面·工况（干沥青）">
       </label>
       <button @click="loadRecords" :disabled="loading">查询</button>
       <button class="ghost" @click="loadCompare" :disabled="loading">横向对比</button>

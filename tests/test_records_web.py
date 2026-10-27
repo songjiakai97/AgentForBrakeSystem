@@ -77,6 +77,11 @@ def test_records_list_filters(client, records_db):
     kw = client.get("/api/records", params={"keyword": "20260801"}).json()
     assert kw["count"] == 2, "keyword 应跨文件名匹配"
 
+    # 路面这类中文词只存在于 conditions.yaml：页面必须与对话里的 query_records
+    # 同口径（先换成工况 id 再筛），否则同样的话在两个入口一个能搜一个不能
+    surf = client.get("/api/records", params={"keyword": "干沥青"}).json()
+    assert surf["count"] == 2, "keyword 应经配置侧解析到工况"
+
 
 def test_record_detail_lazy_then_cached(client, records_db):
     rid = records_db["ids"]["carA"]

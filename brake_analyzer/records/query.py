@@ -91,7 +91,9 @@ def records_query(
     """按编号/关键词/工况/车型查记录 + 指标汇总；未命中时给出库里有哪些可查。
 
     编号与车型按「包含」匹配（说「4.1」「carB」都能查到）；keyword 再跨
-    编号/车型/文件名做一次模糊搜索，用户只记得文件名片段时也能定位。
+    编号/车型/文件名/工况语义做一次模糊搜索——路面、动作这类中文词只在配置里
+    （conditions.yaml 的 name/surface_code/maneuver），先换成工况 id 再进 SQL，
+    否则「ABS 干沥青」这种说法在库里一个字都匹配不上，只会回一句「没有记录」。
     """
     if function_key and cfg.function(function_key) is None:
         return {"ok": False, "hint": f"未知功能 {function_key}"}
@@ -101,9 +103,13 @@ def records_query(
                 "condition_ids": list(cfg.conditions)[:8]}
     conn = service.connect()
     try:
+        # keyword 同时送到配置侧解析一遍：路面/动作这类中文词只存在于
+        # conditions.yaml（「干沥青」不在任何 record 行里），不换成工况 id 就搜不到
+        kw_conds = cfg.conditions_by_text(keyword) if keyword else None
         rows = store.query_records(conn, file_id=file_id, condition_id=condition_id,
                                    condition_ids=cond_ids, vehicle=vehicle,
                                    keyword=keyword,
+                                   keyword_condition_ids=kw_conds,
                                    limit=min(max(1, int(limit or 20)), 50))
         items = [_record_view(conn, cfg, r) for r in rows]
         result: Dict[str, Any] = {
@@ -113,8 +119,8 @@ def records_query(
             "db_stats": store.status_counts(conn),
         }
         if not items:
-            result["hint"] = ("库里没有匹配的记录；编号/车型可以只写片段，"
-                              "也可以换关键词（文件名片段也行）")
+            result["hint"] = ("库里没有匹配的记录；编号/车型/关键词都可以只写片段，"
+                              "关键词也能写路面或工况名（如「干沥青」「60kph」）")
             result["vehicles"] = store.distinct(conn, "vehicle")
             result["file_ids"] = store.distinct(conn, "file_id")
         return result

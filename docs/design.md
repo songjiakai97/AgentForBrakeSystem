@@ -2383,6 +2383,19 @@ import_batch(batch_id PK, started_at, root, config_fingerprint, 各计数, note)
 `keyword` 跨 编号/车型/文件名/相对路径 做 OR，用于记不清归类时的模糊搜索。
 `condition_id` 仍要求精确（它来自配置，模糊匹配会让对比跨工况）。
 
+**keyword 还能匹配工况的中文语义。** 库里只存 `condition_id`，路面/动作/速度这些词
+只写在 `configs/conditions.yaml` 里，所以「查询 carB 的 ABS 干沥青数据」按字面 LIKE
+必然落空（编号和文件名里没有「干沥青」）。现在查询前先在配置侧展开：
+`AppConfigs.conditions_by_text(keyword)` 把关键词与 `工况id + 工况名 + maneuver +
+surface_code + function + 功能名` 做归一化包含比对（`_norm_text` 去掉空格/`_`/`-`/`/`
+/括号/冒号/逗号并转小写，所以 `干沥青`、`wet asphalt`、`WET-ASPHALT` 都能对上），
+命中的 id 作为 `keyword_condition_ids` 并进 keyword 那一组 OR 条件。
+并进 OR 而不是另起 AND 是为了不放宽结果：`function_key`/`vehicle` 仍是 AND 约束，
+所以 `function_key=tcs + keyword=干沥青` 不会借 ABS 的工况命中；
+同一关键词同时展开出多个工况 id 时取并集。
+对话工具（`records/query.py`）与 `/api/records` 页面走同一套展开，两边口径一致；
+搜不到时的提示也改成说明「关键词可以只写片段，也能写路面或工况名」。
+
 「查询并展示」由模型两步完成：`query_records` 拿 `record_id` → `read_record` 读取。
 `read_record` 复用 `analysis_result` 卡片（记录的分析结果与上传文件同构），
 只在 `data` 上多带 `source=record` + `record_id`；前端据此把曲线请求从
@@ -2395,14 +2408,16 @@ import_batch(batch_id PK, started_at, root, config_fingerprint, 各计数, note)
 不描述曲线。指标汇总口径：同一文件多个事件样本取均值，同时给 `min/max/n`；
 状态取最差的一档（平均正常但单样本超限不能被读成正常）。
 
-系统提示里要求：条件不明确时先问编号/车型/工况，不要跨工况拼对比。
+系统提示里要求：用户说到的车型、功能、路面都要落成参数（车型→`vehicle`，
+功能→`function_key`，路面/动作/速度→`keyword`），一个都别丢——漏掉任何一个都是
+「查不到」的来源；剩下的条件不明确时先问编号/车型/工况，不要跨工况拼对比。
 
 ### 17.6 Web 接口与页面
 
 | 接口 | 说明 |
 | --- | --- |
 | `GET /api/records/meta` | 筛选项（车型/功能/工况/编号/指标）+ 库内状态 |
-| `GET /api/records` | 清单（只读元数据，不解析；编号/车型/关键词按包含匹配） |
+| `GET /api/records` | 清单（只读元数据，不解析；编号/车型/关键词按包含匹配，关键词同样带工况语义展开，与对话工具同口径） |
 | `GET /api/records/{id}` | 详情：必要时惰性分析，返回结果卡片（含 ok_range）+ 窗口 |
 | `GET /api/records/{id}?refresh=true` | 强制重算 |
 | `GET /api/records/{id}/timeseries` | 整段曲线 + 窗口高亮，只画该功能 `signals` |
