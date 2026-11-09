@@ -179,7 +179,7 @@ brake-agent/
 │   ├── pipeline.py
 │   └── schemas.py
 ├── scripts/
-│   ├── generate_demo_data.py   # MF4 demo：合成物理剖面
+│   ├── generate_demo_mf4.py   # MF4 demo：合成物理剖面
 │   └── generate_demo_blf.py    # BLF demo：cantools 建 DBC + python-can 写 BLF（复用同一剖面）
 ├── web/
 │   ├── main.py
@@ -2128,7 +2128,7 @@ python -m uvicorn web.main:app --port 8000
 Demo 数据（`tests/data/` 不入库，克隆后首次 `pytest` 由 `tests/conftest.py` 自动生成）：
 
 ```bash
-python scripts/generate_demo_data.py      # → tests/data/mf4（22 个 MF4）
+python scripts/generate_demo_mf4.py      # → tests/data/mf4（22 个 MF4）
 python scripts/generate_demo_blf.py       # → configs/dbc/brake_demo.dbc + tests/data/blf（6 个 BLF）
 python scripts/generate_demo_blf.py --period 0.02   # 改发送周期（默认 10 ms，与 MF4 栅格一致）
 ```

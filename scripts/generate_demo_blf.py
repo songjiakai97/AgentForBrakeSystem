@@ -243,7 +243,7 @@ def write_blf(out_path: str, data: dict, db: Database,
 
 def generate_all(out_dir: str = DEFAULT_OUT, dbc_path: str = DBC_PATH,
                  period_s: float = PERIOD_S) -> List[str]:
-    from scripts.generate_demo_data import gen_abs_run, gen_tcs_run
+    from scripts.generate_demo_mf4 import gen_abs_run, gen_tcs_run
 
     write_dbc(dbc_path)
     db = cantools.database.load_file(dbc_path)

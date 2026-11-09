@@ -15,7 +15,7 @@ BLF_DIR = os.path.join(ROOT, "tests", "data", "blf")
 
 def ensure_demo_data():
     if not os.path.isdir(MF4_DIR) or not any(f.endswith(".mf4") for f in os.listdir(MF4_DIR)):
-        from scripts.generate_demo_data import generate_all
+        from scripts.generate_demo_mf4 import generate_all
 
         generate_all(MF4_DIR)
 

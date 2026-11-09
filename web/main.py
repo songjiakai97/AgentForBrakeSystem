@@ -149,7 +149,7 @@ def _ensure_demo_data():
     sys.path.insert(0, ROOT)
     jobs = [
         (os.path.join(ROOT, "tests", "data", "mf4"), ".mf4",
-         "scripts.generate_demo_data"),
+         "scripts.generate_demo_mf4"),
         # BLF 侧依赖 can/cantools；缺库或生成失败都只是没有样例，不影响服务
         (os.path.join(ROOT, "tests", "data", "blf"), ".blf",
          "scripts.generate_demo_blf"),
