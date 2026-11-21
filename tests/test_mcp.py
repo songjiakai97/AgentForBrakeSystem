@@ -596,7 +596,7 @@ def test_external_note_only_when_tools_mounted():
 
 def test_engine_without_mcp_is_unchanged():
     """默认（未配置 mcp.yaml）路径：规格与接入前逐字一致。"""
-    from brake_analyzer.llm.prompts import build_tool_specs
+    from brake_analyzer.agent.registry import build_tool_specs
 
     eng = _engine(ToolThenAnswerLlm("x", {}))
     cfg = eng.cfg

@@ -216,7 +216,14 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
 
   <div class="main" v-if="view==='chat'">
     <div class="topbar">
-      <span class="badge" :class="meta.engine">{{meta.engine==='llm' ? ('LLM: '+(meta.model||'')) : '离线模式（规则链路）'}}</span>
+      <span class="badge" :class="meta.engine"
+            :title="meta.engine==='llm'
+                    ? (meta.llm_reachable === false ? '模型端点当前不可达（LM Studio 没启动？）——发消息会失败并回退离线' : '端点实测可达')
+                    : '离线模式（规则链路）'">
+        {{meta.engine==='llm'
+          ? (('LLM: '+(meta.model||'')) + (meta.llm_reachable === false ? ' · 不可达' : ''))
+          : '离线模式（规则链路）'}}
+      </span>
       <!-- 外部工具是"这轮能用什么"的一部分：不显示就等于用户不知道 Agent 为什么会换算。
            配了却没连上也必须露出来（灰底"未连上"），否则就是静默少能力 -->
       <span v-if="meta.mcp && meta.mcp.tools" class="badge mcp"
@@ -358,32 +365,7 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
               </div>
               <div v-else class="verdict"><div class="v" style="border-color:var(--ok)">全部指标达标，无规则命中</div></div>
             </div>
-            <div v-if="m.data.llm_suggestion" class="suggest">
-              <h4>LLM 标定建议（区分于规则结论）</h4>
-              <div class="md" v-html="md(m.data.llm_suggestion.summary)"></div>
-              <div v-for="(a,i) in (m.data.llm_suggestion.calibration_actions||[])" :key="i" class="act">
-                {{a.param}} → <b>{{a.direction}}</b>（{{a.metric}}）：{{a.expected_effect}} <span style="color:var(--muted)">风险: {{a.risk}}</span>
-              </div>
-              <!-- 标定建议闭环：反馈（采纳/验证结果）回灌给 LLM，生成下一步动作 -->
-              <div v-if="!m.data.llm_suggestion.feedback" class="fbRow">
-                <span style="color:var(--muted)">试过之后：</span>
-                <button class="btnMini" @click="sendFeedback(m,'accepted')">已采纳</button>
-                <button class="btnMini" @click="sendFeedback(m,'verified')">验证有效</button>
-                <button class="btnMini" @click="sendFeedback(m,'ineffective')">验证无效</button>
-              </div>
-              <div v-else class="ctxLegend" style="margin-top:6px">
-                反馈：<b style="color:var(--text)">{{FB_CN[m.data.llm_suggestion.feedback.status]}}</b>
-                <span v-if="m.data.llm_suggestion.feedback.note"> · {{m.data.llm_suggestion.feedback.note}}</span>
-              </div>
-              <div v-if="m.data.llm_suggestion.followup" class="fbFollow">
-                <h4 style="margin-top:8px">基于反馈的下一步建议</h4>
-                <div class="md" v-html="md(m.data.llm_suggestion.followup.summary)"></div>
-                <div v-for="(a,i) in (m.data.llm_suggestion.followup.calibration_actions||[])" :key="'f'+i" class="act">
-                  {{a.param}} → <b>{{a.direction}}</b>（{{a.metric}}）：{{a.expected_effect}} <span style="color:var(--muted)">风险: {{a.risk}}</span>
-                </div>
-                <div v-if="!(m.data.llm_suggestion.followup.calibration_actions||[]).length" style="color:var(--muted);font-size:12px">暂无追加动作</div>
-              </div>
-            </div>
+            <!-- 标定建议不再挂卡片：合并为一次请求后落成独立的「标定建议」文本消息（用户定版） -->
           </div>
         </div>
 

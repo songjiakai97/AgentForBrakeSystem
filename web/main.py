@@ -93,7 +93,9 @@ except ConfigError as e:
     raise RuntimeError(f"BLF 配置加载失败，服务拒绝启动：{e}")
 
 TRACES = TraceStore(cap=int(os.getenv("TRACE_STORE_MAX", "500")))
-STORE = Store()
+# 会话持久化目录（JSONL 追加日志，启动重放）：SESSION_DIR 可改；默认入 data/（不入库）
+STORE = Store(persist_dir=os.getenv("SESSION_DIR",
+                                    os.path.join(ROOT, "data", "sessions")))
 KB = KnowledgeBase(KB_DIR)
 LLM = LlmClient(traces=TRACES)
 # 语义通道（RAG + 工况召回）统一开关：ENABLE_RAG=false 或 embedding 不可用时，
@@ -236,6 +238,9 @@ def api_sample_download(name: str):
 def api_meta():
     return {
         "llm_available": LLM.available,
+        # 实测可达（models 列表，缓存 30s）：available 只说明配置齐了，
+        # LM Studio 没启动时用户应该在页面头部就看到，而不是发消息才失败
+        "llm_reachable": LLM.check_reachable(),
         "model": LLM.model if LLM.available else None,
         "engine": "llm" if LLM.available else "offline",
         "allowed_upload_ext": sorted(ALLOWED_EXT),
@@ -669,6 +674,7 @@ def api_select(cid: str, body: SelectIn):
         STORE.mark_panels_consumed(chat, chosen=fn.name)
         chat.selected_function = fn.key
         chat.selected_condition = None
+        STORE.note_selection(chat)
         from brake_analyzer.agent.tools import recommend_targets
 
         rec = recommend_targets(CFG, fn.name, 8, function_key=fn.key)
@@ -697,6 +703,7 @@ def api_select(cid: str, body: SelectIn):
             if bad:
                 raise HTTPException(400, f"档位 {bad} 不在功能 {fn.key} 允许列表 {fn.profiles}")
         STORE.mark_panels_consumed(chat, chosen=chosen)
+        STORE.note_selection(chat)
         added, _digests = ENGINE._analyze(chat, cond.id, profile)
         return {"messages": [m.to_dict() for m in added]}
 

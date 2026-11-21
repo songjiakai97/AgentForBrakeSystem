@@ -1,5 +1,6 @@
 """会话内存模型（design.md §7.1）。仅内存存储，服务重启即丢失。"""
 
+import json
 import os
 import threading
 import time
@@ -124,13 +125,130 @@ class Store:
     # analyses 很小可全部保留。超出即把最久未用的 signals 置 None（用时重载）
     SIGNALS_LRU_CAP = 5
 
-    def __init__(self, upload_dir: str = "/tmp/brake-agent-uploads"):
+    def __init__(self, upload_dir: str = "/tmp/brake-agent-uploads",
+                 persist_dir: Optional[str] = None):
         self.upload_dir = upload_dir
         os.makedirs(upload_dir, exist_ok=True)
         self.chats: Dict[str, Chat] = {}
         self.sessions: Dict[str, Session] = {}
         self._lock = threading.RLock()
         self._sig_lru: List[str] = []      # 最近加载过信号的 file_id，最旧在前
+        # JSONL 追加日志（§7.1b）：None = 纯内存（测试默认）；给出时启动重放恢复。
+        # 信号缓存与 analyses 活对象不持久化——重启后卡片文字仍在，图表/反馈需重跑
+        self.persist_dir = persist_dir
+        if persist_dir:
+            os.makedirs(persist_dir, exist_ok=True)
+            self._load_all()
+
+    # ---------------- JSONL 追加日志 ----------------
+    def _journal(self, chat: Chat, op: str, **payload) -> None:
+        """追加一行操作日志（调用方都已持锁）。追加失败不影响内存状态。"""
+        if not self.persist_dir:
+            return
+        path = os.path.join(self.persist_dir, chat.chat_id + ".jsonl")
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"op": op, "ts": time.time(), **payload},
+                                   ensure_ascii=False, default=str) + "\n")
+        except OSError:
+            pass
+
+    def journal_step(self, chat: Chat, msg) -> None:
+        """_step_on 写时替换后的快照：items 与 content 一起进日志。"""
+        self._journal(chat, "step", mid=msg.message_id,
+                      items=(msg.data or {}).get("items", []), content=msg.content)
+
+    def journal_seal(self, chat: Chat, msg) -> None:
+        self._journal(chat, "seal", mid=msg.message_id)
+
+    def note_selection(self, chat: Chat) -> None:
+        """selected_function/condition/profile 变更后调用（engine / api_select）。"""
+        with self._lock:
+            chat.touch()
+            self._journal(chat, "sel", f=chat.selected_function,
+                          c=chat.selected_condition, p=chat.selected_profile)
+
+    @staticmethod
+    def _steps_text(rows: List[dict]) -> str:
+        return " · ".join(r.get("label", "") for r in rows[-6:]) or "执行步骤"
+
+    def _apply_op(self, chat: Chat, op: dict) -> None:
+        kind = op.get("op")
+        if kind == "create":
+            chat.title = op.get("title") or chat.title
+        elif kind == "msg":
+            d = op.get("data") or {}
+            chat.messages.append(Message(
+                message_id=d.get("message_id", "ms_replayed"),
+                role=d.get("role", "assistant"), kind=d.get("kind", "text"),
+                content=d.get("content", ""), data=d.get("data"),
+                meta=d.get("meta") or {}, ts=d.get("ts") or time.time()))
+            if d.get("kind") == "text" and d.get("role") == "user" and chat.title == "新对话":
+                chat.title = (d.get("content") or "").strip()[:24] or chat.title
+        elif kind == "file":
+            d = op.get("data") or {}
+            entry = FileEntry(file_id=d.get("file_id", "fx_replayed"),
+                              name=d.get("name", ""), path=d.get("path", ""),
+                              size=d.get("size", 0),
+                              uploaded_at=d.get("uploaded_at") or time.time(),
+                              batch_id=d.get("batch_id", ""),
+                              source=d.get("source", "upload"))
+            chat.files.append(entry)
+            self.sessions.setdefault(entry.file_id, Session(file_id=entry.file_id))
+        elif kind == "rmfile":
+            fid = op.get("file_id")
+            chat.files = [f for f in chat.files if f.file_id != fid]
+            self.sessions.pop(fid, None)
+        elif kind == "sel":
+            chat.selected_function = op.get("f")
+            chat.selected_condition = op.get("c")
+            chat.selected_profile = op.get("p")
+        elif kind == "panels":
+            for m in chat.messages:
+                if m.kind == "target_options":
+                    m.meta["consumed"] = True
+            latest = [m for m in chat.messages if m.kind == "target_options"]
+            if latest and op.get("chosen") is not None:
+                latest[-1].meta["chosen"] = op.get("chosen")
+        elif kind == "step":
+            for m in reversed(chat.messages):
+                if m.message_id == op.get("mid"):
+                    m.data = {**(m.data or {}), "items": op.get("items", [])}
+                    m.content = op.get("content") or self._steps_text(op.get("items", []))
+                    break
+        elif kind == "seal":
+            for m in reversed(chat.messages):
+                if m.message_id == op.get("mid"):
+                    m.meta["sealed"] = True
+                    break
+
+    def _load_all(self) -> None:
+        """重放持久化目录里的全部会话日志；损坏的尾行（崩溃截断）跳过。"""
+        for fname in sorted(os.listdir(self.persist_dir)):
+            if not fname.endswith(".jsonl"):
+                continue
+            chat_id = fname[:-len(".jsonl")]
+            ops = []
+            with open(os.path.join(self.persist_dir, fname), encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ops.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        break               # 崩溃截断的尾行，之前的有效
+            if not ops:
+                continue
+            chat = Chat(chat_id=chat_id)
+            for op in ops:
+                try:
+                    self._apply_op(chat, op)
+                except Exception:
+                    continue                # 单行坏了不拖垮整个会话恢复
+            chat.created_at = ops[0].get("ts") or chat.created_at
+            chat.updated_at = ops[-1].get("ts") or chat.updated_at
+            self.chats[chat_id] = chat
 
     def note_signals_loaded(self, file_id: str) -> None:
         """engine 每次加载信号后调用：维护 LRU，超限淘汰最旧文件的信号缓存。"""
@@ -149,6 +267,7 @@ class Store:
             cid = "ch_" + uuid.uuid4().hex[:8]
             chat = Chat(chat_id=cid, title=title or "新对话")
             self.chats[cid] = chat
+            self._journal(chat, "create", title=chat.title)
             return chat
 
     def get_chat(self, cid: str) -> Optional[Chat]:
@@ -168,6 +287,11 @@ class Store:
             chat = self.chats.pop(cid, None)
             if chat is None:
                 return False
+            if self.persist_dir:
+                try:
+                    os.remove(os.path.join(self.persist_dir, cid + ".jsonl"))
+                except OSError:
+                    pass
             for f in chat.files:
                 self.sessions.pop(f.file_id, None)
                 try:
@@ -198,6 +322,7 @@ class Store:
             chat.files.append(entry)
             self.sessions[fid] = Session(file_id=fid)
             chat.touch()
+            self._journal(chat, "file", data=entry.to_dict())
             return entry
 
     def remove_file(self, chat: Chat, file_id: str) -> bool:
@@ -220,6 +345,7 @@ class Store:
             except OSError:
                 pass
             chat.touch()
+            self._journal(chat, "rmfile", file_id=file_id)
             return True
 
     def session(self, file_id: str) -> Session:
@@ -246,6 +372,7 @@ class Store:
         if chosen is not None and latest_open is not None:
             latest_open.meta["chosen"] = chosen
         chat.touch()
+        self._journal(chat, "panels", chosen=chosen)
         return n
 
     # ---------------- message ----------------
@@ -260,4 +387,5 @@ class Store:
         if kind == "text" and role == "user" and chat.title == "新对话":
             chat.title = content.strip()[:24] or chat.title
         chat.touch()
+        self._journal(chat, "msg", data=msg.to_dict())
         return msg

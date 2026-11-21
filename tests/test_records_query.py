@@ -7,7 +7,7 @@ import pytest
 
 from brake_analyzer.agent.engine import ChatEngine
 from brake_analyzer.configs import load_configs
-from brake_analyzer.llm.prompts import build_tool_specs
+from brake_analyzer.agent.registry import build_tool_specs
 from brake_analyzer.records import store
 from brake_analyzer.records.query import records_compare, records_query
 from brake_analyzer.records.service import RecordService

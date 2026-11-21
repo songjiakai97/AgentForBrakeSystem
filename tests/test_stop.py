@@ -499,14 +499,14 @@ class MultiToolLlm:
 
 def test_stop_takes_effect_between_tool_calls(tmp_path):
     """工具执行是「没有 delta 的真空区」：每个工具开始前必须自检，否则停止要等整批跑完。"""
-    from brake_analyzer.agent import engine as engine_mod
+    from brake_analyzer.agent import registry as registry_mod
 
     ev = threading.Event()
     llm = MultiToolLlm()
     eng = _engine(llm)
     calls = []
-    orig_list = engine_mod.list_conditions
-    orig_rec = engine_mod.recommend_targets
+    orig_list = registry_mod.list_conditions
+    orig_rec = registry_mod.recommend_targets
 
     def spy_list(*a, **kw):
         calls.append("list_conditions")
@@ -517,14 +517,14 @@ def test_stop_takes_effect_between_tool_calls(tmp_path):
         calls.append("recommend_targets")
         return orig_rec(*a, **kw)
 
-    engine_mod.list_conditions = spy_list
-    engine_mod.recommend_targets = spy_rec
+    registry_mod.list_conditions = spy_list
+    registry_mod.recommend_targets = spy_rec
     try:
         chat = eng.store.create_chat()
         events = list(eng.events(chat, "看下有哪些工况", stop_event=ev))
     finally:
-        engine_mod.list_conditions = orig_list
-        engine_mod.recommend_targets = orig_rec
+        registry_mod.list_conditions = orig_list
+        registry_mod.recommend_targets = orig_rec
 
     assert calls == ["list_conditions"], f"第二个工具不该再执行：{calls}"
     assert events[-1]["event"] == "done"
@@ -555,12 +555,15 @@ def test_non_streaming_subrequests_honour_stop(tmp_path):
 
     llm = SpyLlm()
     eng = _engine(llm)
-    # 直接打 _maybe_suggest / 摘要回调：它们拿不到 stop_event 形参，靠线程局部标记
+    # 直接打 _merged_suggest / 摘要回调：它们拿不到 stop_event 形参，靠线程局部标记
     eng._tls.stop_event = ev
     try:
         res = _fake_result()
-        eng._maybe_suggest(res, eng.cfg.condition("abs_full_brake_dry_asphalt_100kph"))
+        cond = eng.cfg.condition("abs_full_brake_dry_asphalt_100kph")
+        added: list = []
+        eng._merged_suggest([(res, cond)], None, added)
         assert res.degraded is True, "已停止仍要照常去请求建议"
+        assert added == [], "已停止不应产出建议消息"
         assert llm.json_calls == 0
         assert eng._summarize_with_llm("早期对话", 200) == "", "摘要应退化为抽取式"
         assert llm.chat_calls == 0
@@ -570,9 +573,31 @@ def test_non_streaming_subrequests_honour_stop(tmp_path):
     # 没按停止时照旧会去请求（否则上面两条断言可能是空过的）
     llm2 = SpyLlm()
     eng2 = _engine(llm2)
-    eng2._maybe_suggest(_fake_result(),
-                        eng2.cfg.condition("abs_full_brake_dry_asphalt_100kph"))
+    cond2 = eng2.cfg.condition("abs_full_brake_dry_asphalt_100kph")
+    added2: list = []
+    eng2._merged_suggest([(_fake_result(), cond2)], None, added2)
     assert llm2.json_calls == 1, "用例前提失效：正常路径本来就会调建议"
+
+    # 成功路径：总建议落成一条独立文本消息（用户定版：不进结果卡片）
+    class SuggestLlm(SpyLlm):
+        def complete_json(self, system, user, **kw):
+            self.json_calls += 1
+            return {"summary": "制动距离超限", "calibration_actions": [
+                {"param": "Cp_FA", "direction": "increase",
+                 "metric": "brake_distance", "expected_effect": "缩短制动距离",
+                 "risk": "抱死风险上升"}]}
+
+    llm3 = SuggestLlm()
+    eng3 = _engine(llm3)
+    chat3 = eng3.store.create_chat()
+    added3: list = []
+    eng3._merged_suggest([(_fake_result(),
+                           eng3.cfg.condition("abs_full_brake_dry_asphalt_100kph")),
+                          (_fake_result(), eng3.cfg.condition("abs_full_brake_dry_asphalt_100kph"))],
+                         chat3, added3)
+    assert llm3.json_calls == 1, "多份分析应合并为一次请求"
+    assert added3 and added3[0].kind == "text"
+    assert "标定建议" in added3[0].content and "Cp_FA" in added3[0].content
 
 
 def _fake_result():

@@ -76,6 +76,8 @@ function render(){
         <span class="chev">${open2?'▾':'▸'}</span>
         <b>R${t.round}</b>
         <span class="${t.error?'err':''}">[${t.error?('错误: '+t.error):t.finish_reason}]</span>
+        ${t.usage?`<span class="t">in ${t.usage.prompt_tokens??'?'} / out ${t.usage.completion_tokens??'?'} tok · ${t.usage.elapsed_ms??'?'}ms</span>`:''}
+        ${t.reply&&t.reply.bad_args&&t.reply.bad_args.length?`<span class="err">参数JSON×${t.reply.bad_args.length}</span>`:''}
         <span class="t">${esc((t.user_text||'').slice(0,60))}</span></div>`;
       const det=!open2 ? '' : `<div class="detail" onclick="event.stopPropagation()">
         <div class="k">user_text</div><pre>${esc(t.user_text)}</pre>

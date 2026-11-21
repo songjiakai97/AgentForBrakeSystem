@@ -18,7 +18,7 @@ from brake_analyzer.configs import load_configs
 from brake_analyzer.llm.client import LlmReply
 from brake_analyzer.llm.context import ContextBudget
 from brake_analyzer.llm.kb import KnowledgeBase
-from brake_analyzer.llm.prompts import build_tool_specs
+from brake_analyzer.agent.registry import build_tool_specs
 from brake_analyzer.loaders.base import SignalData
 from brake_analyzer.report.charts import render_sample_chart
 from brake_analyzer.report.generator import collect_analyses, generate_report

@@ -43,6 +43,24 @@ class LlmReply:
     finish_reason: str = "stop"
     error: Optional[str] = None
     reasoning: str = ""    # 思维链（部分兼容端点提供 reasoning_content）
+    # tool_calls 里 arguments JSON 解析失败的 id 集合：引擎据此不执行该调用，
+    # 改为把「参数解析失败」回喂给模型自纠，而不是拿空参数去跑工具
+    bad_args: List[str] = field(default_factory=list)
+    # 本轮 token 用量（端点提供时）：{prompt_tokens, completion_tokens, total_tokens, elapsed_ms}
+    usage: Optional[dict] = None
+
+
+def _usage_of(usage_obj, t0: float) -> dict:
+    """usage 对象（或 None）→ trace 用量字典；至少给出耗时。"""
+    out = {"elapsed_ms": int((time.time() - t0) * 1000)}
+    if usage_obj is not None:
+        out.update({"prompt_tokens": getattr(usage_obj, "prompt_tokens", None)
+                    if not isinstance(usage_obj, dict) else usage_obj.get("prompt_tokens"),
+                    "completion_tokens": getattr(usage_obj, "completion_tokens", None)
+                    if not isinstance(usage_obj, dict) else usage_obj.get("completion_tokens"),
+                    "total_tokens": getattr(usage_obj, "total_tokens", None)
+                    if not isinstance(usage_obj, dict) else usage_obj.get("total_tokens")})
+    return out
 
 
 class TraceStore:
@@ -91,6 +109,10 @@ class LlmClient:
         self.embed_api_key = os.getenv("OPENAI_EMBED_API_KEY", "").strip() or self.api_key
         self.embed_model = os.getenv("OPENAI_EMBED_MODEL", "").strip()
         self._embed_client = None
+        # 端点可达性实测缓存：available 只是"配置齐了"，端点挂没挂要 ping 过才知道。
+        # 结果缓存 30s——meta 页轮询每次都 ping 会把小端点打爆
+        self._reach_cached = False
+        self._reach_until = 0.0
         if self.available:
             kwargs = {"api_key": self.api_key}
             if self.base_url:
@@ -99,6 +121,22 @@ class LlmClient:
                 self._client = OpenAI(**kwargs)
             except Exception:
                 self.available = False
+
+    def check_reachable(self, force: bool = False) -> bool:
+        """实测端点可达性（models 列表），结果缓存 30s；未配置直接 False 不发请求。"""
+        if not self.available:
+            return False
+        now = time.time()
+        if not force and now < self._reach_until:
+            return self._reach_cached
+        try:
+            list(self._client.models.list())
+            ok = True
+        except Exception:
+            ok = False
+        self._reach_cached = ok
+        self._reach_until = now + 30.0
+        return ok
 
     # ------------------------------------------------------------ embedding
     @property
@@ -154,22 +192,26 @@ class LlmClient:
             msg = resp.choices[0].message
             finish = resp.choices[0].finish_reason or "stop"
             tool_calls = []
+            bad_args = []
             for tc in msg.tool_calls or []:
                 try:
                     args = json.loads(tc.function.arguments or "{}")
                 except Exception:
                     args = {}
+                    bad_args.append(tc.id)
                 tool_calls.append({"id": tc.id, "name": tc.function.name, "arguments": args})
             reasoning = (getattr(msg, "reasoning_content", None)
                          or getattr(msg, "reasoning", None) or "")
             reply = LlmReply(content=msg.content or "", tool_calls=tool_calls,
-                             finish_reason=finish, reasoning=reasoning)
+                             finish_reason=finish, reasoning=reasoning,
+                             bad_args=bad_args, usage=_usage_of(getattr(resp, "usage", None), t0))
         except Exception as e:
             self._trace(messages, None, [], chat_id, user_text, round_no, error=str(e))
             return LlmReply(error=f"llm_error: {e}")
         self._trace(
             messages,
-            {"content": reply.content, "tool_calls": reply.tool_calls},
+            {"content": reply.content, "tool_calls": reply.tool_calls,
+             "usage": reply.usage, "bad_args": reply.bad_args},
             tool_calls, chat_id, user_text, round_no, finish=finish,
         )
         return reply
@@ -195,6 +237,7 @@ class LlmClient:
             yield {"type": "finish", "reply": LlmReply(error="llm_unavailable")}
             return
         try:
+            t0 = time.time()
             stream = self._client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -202,6 +245,10 @@ class LlmClient:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=True,
+                # 末块带 usage：每轮 token 用量进 trace，调上下文预算的实证依据。
+                # 个别兼容端点不认 stream_options 会 400——LLM_STREAM_USAGE=0 可关。
+                **({"stream_options": {"include_usage": True}}
+                   if os.getenv("LLM_STREAM_USAGE", "1").strip() == "1" else {}),
                 # read 超时按「两个块之间的最大间隔」计，不限制总时长：块与块之间
                 # 长期静默（端点挂住）时让这一轮有界失败，而不是永远等下去——
                 # 那时停止标记也无从自检，用户只会看到「点了停止没反应」。
@@ -217,8 +264,15 @@ class LlmClient:
         calls: dict = {}          # index -> {id,name,arguments}
         finish = "stop"
         stopped = False
+        stream_usage: Optional[dict] = None
         try:
             for chunk in stream:
+                # usage 块没有 choices，先收下来再 continue
+                u = getattr(chunk, "usage", None)
+                if u is not None:
+                    stream_usage = {"prompt_tokens": getattr(u, "prompt_tokens", None),
+                                    "completion_tokens": getattr(u, "completion_tokens", None),
+                                    "total_tokens": getattr(u, "total_tokens", None)}
                 # 每个块都是一次自检机会：工具参数、思维链空白期、首 token 之前都覆盖到
                 if stop_event is not None and stop_event.is_set():
                     stopped = True
@@ -275,6 +329,7 @@ class LlmClient:
             return
 
         tool_calls = []
+        bad_args = []
         for i in sorted(calls):
             slot = calls[i]
             if not slot["name"]:
@@ -283,12 +338,16 @@ class LlmClient:
                 args = json.loads(slot["args"] or "{}")
             except Exception:
                 args = {}
+                bad_args.append(slot["id"] or f"call_{i}")
             tool_calls.append({"id": slot["id"] or f"call_{i}",
                                "name": slot["name"], "arguments": args})
+        usage = _usage_of(stream_usage, t0)
         reply = LlmReply(content="".join(content_parts), tool_calls=tool_calls,
-                         finish_reason=finish, reasoning="".join(reasoning_parts))
+                         finish_reason=finish, reasoning="".join(reasoning_parts),
+                         bad_args=bad_args, usage=usage)
         self._trace(messages,
-                    {"content": reply.content, "tool_calls": reply.tool_calls},
+                    {"content": reply.content, "tool_calls": reply.tool_calls,
+                     "usage": reply.usage, "bad_args": reply.bad_args},
                     tool_calls, chat_id, user_text, round_no, finish=finish)
         yield {"type": "finish", "reply": reply}
 
@@ -306,6 +365,12 @@ class LlmClient:
             "reply": reply,
             "tools": tool_execs,
         }
+        # usage / bad_args 提到顶层：/debug 的行内展示直接读，不用钻 reply
+        if isinstance(reply, dict):
+            if reply.get("usage"):
+                t["usage"] = reply["usage"]
+            if reply.get("bad_args"):
+                t["bad_args"] = reply["bad_args"]
         if error:
             t["error"] = error
         self.traces.add(t)

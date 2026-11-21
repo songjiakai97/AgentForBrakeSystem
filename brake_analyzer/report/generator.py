@@ -191,10 +191,14 @@ def _order_analyses(analyses: List[dict], cfg: AppConfigs) -> List[dict]:
 def _condition_blocks(d: dict, cfg: AppConfigs, cond, tpl: DocxTemplate,
                       signals_of: Optional[Callable], chart_dir: str,
                       warnings: List[str], only: Optional[List[str]],
-                      show_lead: bool) -> Tuple[List[dict], int]:
+                      show_lead: bool,
+                      stop_check: Optional[Callable[[], bool]] = None
+                      ) -> Tuple[List[dict], int]:
     """一份分析（单文件）→ 逐样本块：前导行(可选) + 两列表 + 居中时序图(可选)。
 
     show_lead=False（条件内唯一文件且单样本）时前导行隐去，即用户草图的最小形态。
+    stop_check 每个样本开始前自检：用户已按停止时立刻收尾（前序块保留），
+    不把几十张图硬画完——工具内部的停止检查点（engine 循环只覆盖到工具之间）。
     """
     blocks: List[dict] = []
     n_charts = 0
@@ -202,6 +206,9 @@ def _condition_blocks(d: dict, cfg: AppConfigs, cond, tpl: DocxTemplate,
     cname = (cond.name if cond is not None
              else d.get("condition_name") or d.get("condition_id") or "")
     for s in samples:
+        if stop_check is not None and stop_check():
+            warnings.append(f"{cname}：用户已停止，剩余样本未出图")
+            break
         if n_charts >= MAX_CHARTS_PER_ANALYSIS:
             warnings.append(f"{cname}：事件样本多于 {MAX_CHARTS_PER_ANALYSIS} 个，其余未出图")
             break
@@ -250,6 +257,7 @@ def build_context(
     signals_of: Optional[Callable[[str], Optional[dict]]],
     warnings: List[str],
     progress: Optional[Callable[[str, str], None]],
+    stop_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[dict, int]:
     """分析结果列表 → 模板上下文（契约见 scripts/make_report_template.py docstring）。
 
@@ -379,6 +387,7 @@ def generate_report(
     title: str = "制动数据分析报告",
     chat_title: str = "",
     progress: Optional[Callable[[str, str], None]] = None,
+    stop_check: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """分析结果列表 → docx 报告。返回 {ok, path, file, analyses, charts, warnings}。
 
@@ -387,6 +396,7 @@ def generate_report(
     图表信号（functions.yaml）与分组（signals.yaml chart_layout）全以它为准。
     signals_of(file_id) → 该文件的 SignalData 字典；None/缺失则该样本跳过出图。
     progress(label, detail) 是慢操作心跳（渲染图表逐张回调），调用方接 _progress。
+    stop_check() 非零即停：出图循环逐样本自检，用户停止后立即收尾不硬画完。
     """
     if not analyses:
         raise ValueError("没有可写入报告的分析结果（会话里还没有完成过任何分析）")

@@ -1,10 +1,11 @@
 """Prompt 组装（design.md §6.8 / §6.9 / §11.4）。"""
 
+import copy
 import json
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from ..configs import AppConfigs
-from ..schemas import AnalysisResult, ConditionConfig, FunctionConfig
+from ..schemas import FunctionConfig
 
 SYSTEM_CHAT = """你是制动系统测试数据分析与标定指导助手，服务于台架/实车测试数据的分析与标定决策。
 
@@ -72,332 +73,11 @@ EXTERNAL_TOOL_NOTE = (
 
 
 def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> List[dict]:
-    """工具规格：维度取值与工况 id 用配置生成的 enum 约束（§13）。
+    """兼容入口：工具规格已收敛进 agent.registry.TOOLS（一个工具一个条目，
+    规格/执行器/标签/命中不再分居五处）。本函数只做转发，勿在此加新工具。"""
+    from ..agent.registry import build_tool_specs as _build
 
-    - 常驻成本由「维度数」决定，不由「工况数」决定：maneuver/surface_code 的取值域
-      通常十几个以内，工况清单不进 system prompt。
-    - scope_function 已知时，condition_id 直接限定为该功能下的工况 id，非法 id
-      在结构上不可能出现；未知时退化为自由字符串。
-    """
-    vocab = cfg.vocab()
-    fn_keys = list(cfg.functions)
-    # number 同时覆盖整数与小数（整数是 number 的子集），避免个别兼容端点拒绝 type 数组
-    param_props = {k: {"type": "number", "description": f"工况参数 {k}"}
-                   for k in vocab["param_keys"]}
-    cond_schema = ({"type": "string", "enum": cfg.scope_conditions(scope_function)}
-                   if scope_function and cfg.scope_conditions(scope_function)
-                   else {"type": "string",
-                         "description": "工况 id，必须是 resolve_condition 命中的那条"})
-    # 档位：resolved 只保证工况唯一，不保证档位唯一。这里只描述、不设为 required ——
-    # 设为必填会逼模型编一个档位，正确做法是先问用户，未选档时由引擎守卫弹面板（§6.9）
-    scope_fn = cfg.function(scope_function) if scope_function else None
-    profile_desc = ("档位标签，可选。多维档位用竖线拼接、每维各取一个标签，"
-                    "如 4WD|DTCS（不是从全部标签里挑一个）")
-    if scope_fn is not None and scope_fn.profiles:
-        if scope_fn.profile_dims:
-            dims_txt = "，".join(
-                f"第{i + 1}维 {'/'.join(d)}" for i, d in enumerate(scope_fn.profile_dims))
-            combo = "|".join(d[0] for d in scope_fn.profile_dims)
-            profile_desc = (
-                f"该功能声明了 {len(scope_fn.profile_dims)} 个档位维度：{dims_txt}。"
-                f"取值是「每维各选一个」再用竖线拼接，例如 {combo}；"
-                "维度之间不是互斥候选，不要把 4 个标签当成 4 选 1 列给用户。"
-                "用户没说选哪个时不要自己定，按维度分别向用户确认；"
-                "未带档位调用时引擎不会执行分析，而是给用户弹档位面板")
-        else:
-            profile_desc = ("该功能声明了档位，取值 " + "|".join(scope_fn.profiles)
-                            + "（多维度用竖线拼接如 4WD|DTCS）。用户没说选哪个时不要自己定，"
-                            "先向用户确认；未带档位调用时引擎不会执行分析，"
-                            "而是给用户弹档位面板")
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": "resolve_condition",
-                "description": (
-                    "按 §2.2 唯一键（maneuver+surface_code+params）精确定位工况。"
-                    "命中唯一返回 hop=resolved，信息不足返回 hop=condition/function 并给候选——"
-                    "此时必须交用户确认，不得自行选择。"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "function_key": {
-                            "type": "string", "enum": fn_keys,
-                            "description": "已判定的功能；不确定时可省略",
-                        },
-                        "maneuver": {
-                            "type": "string", "enum": vocab["maneuver"],
-                            "description": "测试动作",
-                        },
-                        "surface_code": {
-                            "type": "string", "enum": vocab["surface_code"],
-                            "description": "路面/附着条件（匀质路面）；用户说的若是"
-                                           "对开、对接这类组合路面，不要挑一个凑唯一命中",
-                        },
-                        "params": {
-                            "type": "object",
-                            "properties": param_props,
-                            "description": "工况参数，键取自参数名（如 v0_kph），值按描述填",
-                        },
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_conditions",
-                "description": (
-                    "取某功能下的全部工况（含唯一键属性），仅本轮可见，用完即弃。"
-                    "在描述无法填满唯一键、或用户询问「这个功能下测了哪些」时调用。"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {"function_key": {"type": "string", "enum": fn_keys}},
-                    "required": ["function_key"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "run_analysis_on_files",
-                "description": (
-                    "对会话内已上传数据文件执行指定工况分析。仅在目标工况已确定后调用。"
-                    "默认只分析「本轮默认对象」那批（即最近一次上传的文件）；"
-                    "需要对比历史文件或用户点名了某几份时，用 file_indexes 按编号指定。"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "condition_id": cond_schema,
-                        "profile": {
-                            "type": "string",
-                            "description": profile_desc,
-                        },
-                        "file_indexes": {
-                            "type": "array",
-                            "items": {"type": "integer"},
-                            "description": (
-                                "要分析的文件编号（取自本轮消息「会话数据文件」清单的编号，1 起）。"
-                                "省略即分析最近一次上传的那批；只在用户明确要求对比多份时填写。"
-                            ),
-                        },
-                    },
-                    "required": ["condition_id"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "recommend_targets",
-                "description": "规则打分兜底：无法结构化解析时，用原话取功能/工况候选。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "用户意图原话或要点"},
-                        "max_items": {"type": "integer", "description": "最多返回候选数，1~15"},
-                    },
-                    "required": ["query"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "search_manual",
-                "description": (
-                    "检索标定手册/知识库（语义+关键词混合）。用户问判定标准、超限成因、"
-                    "标定方向、工况流程等知识性问题时调用；查具体参数值优先用 get_param。"
-                    "回答时引用结果里的节 id。没有命中也如实说明，不要编手册内容。"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": (
-                            "检索要点，**不要照抄用户整句**。提炼主题词/参数名/工况词，"
-                            "用空格分隔。例：用户问「干沥青工况下后轴最小保压滑移率是多少」"
-                            "→ query 传「干沥青 后轴 最小保压滑移率」；疑问词（是什么/多少/"
-                            "有哪些/怎么）会稀释关键词打分、降低召回精度。"
-                            "对话中已确认的工况、功能名等上下文要一并带上作主题词。")},
-                        "condition": {"type": "string",
-                                      "description": "工况词（如 洒水玄武岩）。查询明确针对"
-                                                     "某个工况时填写，避免同名内容跨工况串扰"},
-                        "top_k": {"type": "integer", "description": "返回条数，默认 5"},
-                    },
-                    "required": ["query"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_param",
-                "description": (
-                    "按参数名精确查询手册表格中的参数定义/初始值/当前值/单位。"
-                    "「某参数是多少/当前值是什么」类问题首选本工具，值必须原样引用。"
-                    "参数名按手册写法给（如 Cp_FA、Opt_Instabil_Lambda_HA），"
-                    "只记得片段就传片段，结果会标 match=partial，引用前先确认。"
-                    "同一参数在多个工况下各有一行时全部返回并带 section——"
-                    "按用户说的工况挑，不明确就把各工况的值都列出来。"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string",
-                                 "description": "参数名或其中的一段（如 Cp_FA、Lambda_HA）"},
-                    },
-                    "required": ["name"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "generate_report",
-                "description": (
-                    "把本会话已完成的分析结果汇总生成一份 Word（docx）分析报告："
-                    "总览 + 每份分析的指标表（指标/限值/结果/判定）、规则结论、"
-                    "标定建议与事件窗口时序图。用户要报告/导出 Word/汇总成文档时调用。"
-                    "报告数值全部取自已落库的分析结果，不要先编内容再生成；"
-                    "会话里还没有任何分析结果时，先分析再出报告。"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "condition_ids": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": (
-                                "可选：只把指定工况的分析写进报告（工况 id）。"
-                                "省略即收录会话内全部分析结果"
-                            ),
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "报告标题，可选；默认「制动数据分析报告」",
-                        },
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_files",
-                "description": (
-                    "查看会话内已上传数据文件清单（编号/名称/大小/是否本轮默认范围）。"
-                    "带 file_index 时加载该文件并返回信号通道名——用户问「采了哪些通道/"
-                    "有没有 xx 信号」时用。不带参数不加载信号，纯清单很快。"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_index": {
-                            "type": "integer",
-                            "description": "要查看通道的文件编号（1 起，取自文件清单）。"
-                                           "省略时只返回清单不加载信号",
-                        },
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "query_records",
-                "description": (
-                    "查询试验记录库（服务器上的历史/竞品数据）：按编号、关键词、工况、车型"
-                    "过滤，返回每条记录的元数据与已算好的指标汇总。编号/车型/关键词都是"
-                    "「包含即可」，用户只记得片段（如「4.1」「carB」）时也能查到。"
-                    "keyword 除了编号/车型/文件名，还匹配工况的中文语义（路面、动作、速度，"
-                    "如「干沥青」「60kph」）——用户描述的是工况而不是文件名时就用它。"
-                    "只读——未分析的记录不会在这里触发计算，只标 analysis_status。用户问"
-                    "「测过哪些/某编号是什么/有没有某车型的数据」时调用。"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_id": {
-                            "type": "string",
-                            "description": "试验编号，可只给片段（如 4.1）；用户说编号时优先用这个",
-                        },
-                        "keyword": {
-                            "type": "string",
-                            "description": "模糊关键词，跨 编号/车型/文件名/工况语义 匹配；"
-                                           "用户只记得文件名、说不清归哪一类，或只描述路面/"
-                                           "动作/速度（如「干沥青」「60kph」）时用它",
-                        },
-                        "condition_id": cond_schema,
-                        "vehicle": {
-                            "type": "string",
-                            "description": "车型代号，可只给片段（如 carB）",
-                        },
-                        "function_key": {"type": "string", "enum": fn_keys},
-                        "limit": {"type": "integer", "description": "最多返回条数，1~50"},
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "read_record",
-                "description": (
-                    "读取一条试验记录的原始数据并展示曲线（整段过程 + 事件窗口高亮）："
-                    "未分析的记录会先惰性分析。返回窗口、指标实测值与规则结论。"
-                    "用户要看某条记录的数据/曲线时用；record_id 必须先用 query_records "
-                    "查到。一次只读一条，看多条时分别调用（同一轮最多 3 条）。"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "record_id": {
-                            "type": "string",
-                            "description": "记录 id（rec_ 开头），来自 query_records 的结果",
-                        },
-                        "force": {
-                            "type": "boolean",
-                            "description": "强制重算（用户要求重新解析时置 true）；默认用缓存",
-                        },
-                    },
-                    "required": ["record_id"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "compare_records",
-                "description": (
-                    "同一工况下横向对比不同车型/不同批次的客观指标（制动距离、加速时间、"
-                    "横摆等）。只比已分析的记录；未分析的会列在 not_analyzed 里，"
-                    "让用户点开后再比。用户问「A 车和 B 车哪个制动距离短/差多少」时调用。"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "condition_id": cond_schema,
-                        "function_key": {"type": "string", "enum": fn_keys},
-                        "vehicles": {
-                            "type": "array", "items": {"type": "string"},
-                            "description": "限定对比的车型代号；省略即全部车型",
-                        },
-                        "metric": {
-                            "type": "string", "enum": list(cfg.metrics),
-                            "description": "只比这一个指标；省略则返回全部指标",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "每个工况最多取几条记录，默认 30",
-                        },
-                    },
-                },
-            },
-        },
-    ]
+    return _build(cfg, scope_function)
 
 
 def function_catalog_text(cfg: AppConfigs, include_conditions: bool = False) -> str:
@@ -628,6 +308,60 @@ def digest_from_analysis(d: dict) -> dict:
     return out
 
 
+def _walk_lists(obj: Any, out: Optional[List] = None) -> List:
+    """深度优先收集所有 list 对象（返回的是原对象引用，可原地改）。"""
+    if out is None:
+        out = []
+    if isinstance(obj, list):
+        out.append(obj)
+        for x in obj:
+            _walk_lists(x, out)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _walk_lists(v, out)
+    return out
+
+
+def clip_payload(payload: Any, limit: int = TOOL_PAYLOAD_CLIP_CHARS) -> str:
+    """工具应答 → 合法 JSON 文本；超限时降级裁剪，绝不硬截字符。
+
+    硬截 [:limit] 会产出半截 JSON——模型既读不到尾部也解析不出结构（与
+    _kb_payload/digest_payload 做预算的动机相同，但那两处只覆盖了自己的
+    工具；本函数是所有工具应答的最后一道闸）。降级顺序：反复把序列化后
+    最长的 list 砍半并附截断说明；收敛不了再整体换成错误说明信封。
+    返回值保证是合法 JSON 文本。
+    """
+    text = json.dumps(payload, ensure_ascii=False, default=str)
+    if len(text) <= limit:
+        return text
+    p = copy.deepcopy(payload)
+    note = ""
+    for _ in range(10):
+        lists = _walk_lists(p)
+        if not lists:
+            break
+        target = max(lists, key=lambda l: len(json.dumps(l, ensure_ascii=False, default=str)))
+        if len(target) <= 1:
+            break
+        keep = max(1, len(target) // 2)
+        note = f"结果过长已截断：仅保留前 {keep}/{len(target)} 条"
+        del target[keep:]
+        text = json.dumps(p, ensure_ascii=False, default=str)
+        if len(text) <= limit - len(note) - 32:
+            if p.get("note"):
+                note = str(p["note"]) + "；" + note
+            p["note"] = note
+            text = json.dumps(p, ensure_ascii=False, default=str)
+            if len(text) <= limit:
+                return text
+            break
+    # 裁剪收敛失败（无数组可砍/仍超限）：给小信封，绝不交坏 JSON
+    return json.dumps(
+        {"ok": False,
+         "note": "工具结果超出单轮预算且无法裁剪到可读大小，请缩小查询范围后重试"},
+        ensure_ascii=False)
+
+
 def digest_payload(digests: List[dict],
                    limit: int = TOOL_PAYLOAD_CLIP_CHARS) -> List[dict]:
     """把多份数值摘要收进工具应答，保证序列化后不超过 limit。
@@ -681,56 +415,24 @@ def digest_line(d: dict) -> str:
 
 
 
-def suggestion_prompt(
-    cfg: AppConfigs,
-    fn: FunctionConfig,
-    cond: ConditionConfig,
-    result: AnalysisResult,
-    kb_snippets: List[str],
-) -> Optional[str]:
-    """规则结论 → LLM 标定建议的用户消息；无异常/缺失时返回 None（无需建议）。"""
-    problems = []
-    for s in result.samples:
-        for m in s.metrics:
-            if m.status in ("abnormal", "missing"):
-                tmpl = cfg.metrics.get(m.key.rsplit(".", 1)[1])
-                tp = tmpl.tuning_params if tmpl else []
-                problems.append({
-                    "run": s.run_index,
-                    "metric": m.name,
-                    "metric_key": m.key.rsplit(".", 1)[1],
-                    "status": m.status,
-                    "value": m.value,
-                    "unit": m.unit,
-                    "ok_range": m.ok_range,
-                    "profile": m.profile,
-                    "tuning_params": tp,
-                    "verdicts": [
-                        {"rule_id": v.rule_id, "message": v.message,
-                         "direction": v.direction, "severity": v.severity}
-                        for v in s.verdicts if v.metric_key == m.key
-                    ],
-                })
-    if not problems:
-        return None
-    payload = {
-        "function": f"{fn.key}（{fn.name}）",
-        "condition": f"{cond.id}（{cond.name}）",
-        "profile": result.profile,
-        "problems": problems,
-    }
+def merged_suggestion_prompt(payload_items: List[dict], kb_snippets: List[str]) -> str:
+    """多份分析的异常/缺失 → 一次标定建议请求的用户消息（合并请求，§6.9）。
+
+    本地小模型下逐文件串行等待是延迟大头：多文件合并成一次请求，建议由
+    引擎落成一条总建议消息。payload_items 由引擎的 _problems_of 抽取。
+    """
     parts = [
-        "以下是一次分析的异常/缺失指标与规则结论（JSON）：",
-        json.dumps(payload, ensure_ascii=False, indent=1),
+        "以下是本次会话中若干份分析的异常/缺失指标与规则结论（JSON）：",
+        json.dumps({"analyses": payload_items}, ensure_ascii=False, indent=1),
     ]
     if kb_snippets:
         parts.append("规范依据（标定手册摘录，只能作为硬约束引用）：")
         parts.extend(kb_snippets)
-        parts.append("历史案例（仅供参考，注意与本车差异）：见上，若无则忽略。")
     parts.append(
-        "请输出结构化 JSON：{\"summary\": \"一句话结论\", \"calibration_actions\": "
+        "请输出结构化 JSON：{\"summary\": \"一句话总结\", \"calibration_actions\": "
         "[{\"param\": \"<必须取自该指标 tuning_params>\", \"direction\": \"increase|decrease|investigate\", "
         "\"expected_effect\": \"...\", \"risk\": \"...\", \"metric\": \"<关联 metric_key>\"}]}。"
-        "只处理 abnormal/missing 指标；missing 指标优先给数据质量动作。"
+        "只处理 abnormal/missing 指标；missing 指标优先给数据质量动作；"
+        "多份分析合并为一套建议，summary 说明覆盖了哪些工况。"
     )
     return "\n".join(parts)
