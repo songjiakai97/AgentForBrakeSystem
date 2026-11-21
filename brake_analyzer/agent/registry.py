@@ -116,6 +116,16 @@ def _spec_run_analysis(c: SpecCtx) -> dict:
                 "type": "object",
                 "properties": {
                     "condition_id": c.cond_schema,
+                    "condition_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "批量分析：工况 id 列表。长度必须等于所选文件数"
+                            "（逐文件对齐工况——多文件不同工况时用）或为 1"
+                            "（全部文件同一工况）；每个 id 须已通过 "
+                            "resolve_condition 确认或来自用户明确指定。"
+                        ),
+                    },
                     "profile": {
                         "type": "string",
                         "description": c.profile_desc,
@@ -127,6 +137,10 @@ def _spec_run_analysis(c: SpecCtx) -> dict:
                             "要分析的文件编号（取自本轮消息「会话数据文件」清单的编号，1 起）。"
                             "省略即分析最近一次上传的那批；只在用户明确要求对比多份时填写。"
                         ),
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "强制重算（默认同文件同工况同档位命中缓存时跳过重算）",
                     },
                 },
                 "required": ["condition_id"],
@@ -264,6 +278,14 @@ def _spec_query_records(c: SpecCtx) -> dict:
                         "description": "车型代号，可只给片段（如 carB）",
                     },
                     "function_key": {"type": "string", "enum": c.fn_keys},
+                    "recorded_from": {
+                        "type": "string",
+                        "description": "试验日期下限（ISO，如 2026-03-01）；看趋势时用",
+                    },
+                    "recorded_to": {
+                        "type": "string",
+                        "description": "试验日期上限（ISO，如 2026-04-30）",
+                    },
                     "limit": {"type": "integer", "description": "最多返回条数，1~50"},
                 },
             },
@@ -360,6 +382,15 @@ def _spec_generate_report(c: SpecCtx) -> dict:
                         "type": "string",
                         "description": "报告标题，可选；默认「制动数据分析报告」",
                     },
+                    "charts": {
+                        "type": "string",
+                        "enum": ["all", "abnormal_only", "none"],
+                        "description": (
+                            "出图策略：all=每个事件样本都出时序图（默认）；"
+                            "abnormal_only=只给含异常/缺失指标的样本出图（样本多时"
+                            "报告更聚焦）；none=只出表格不出图"
+                        ),
+                    },
                 },
             },
         },
@@ -410,9 +441,13 @@ def _ex_list_files(eng, chat, args, ctx) -> dict:
 
 
 def _ex_run_analysis(eng, chat, args, ctx) -> Any:
+    ids = args.get("condition_ids") or [args["condition_id"]]
+    if not isinstance(ids, list):
+        ids = [ids]
     return eng._analyze(
-        chat, args.get("condition_id"), args.get("profile"), ctx["stop_event"],
+        chat, ids, args.get("profile"), ctx["stop_event"],
         file_indexes=args.get("file_indexes"),
+        force=bool(args.get("force")),
     )
 
 
@@ -433,6 +468,7 @@ def _ex_generate_report(eng, chat, args, ctx) -> Any:
         chat,
         condition_ids=args.get("condition_ids"),
         title=args.get("title") or "",
+        charts=args.get("charts") or "all",
     )
 
 

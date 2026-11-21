@@ -43,6 +43,9 @@ class Session:
     file_id: str
     signals: Optional[Dict[str, SignalData]] = None
     analyses: Dict[str, object] = field(default_factory=dict)   # key: cond|profile → AnalysisResult
+    # (file_id, condition_id, profile) → AnalysisResult：逐文件缓存索引，
+    # 供 _analyze 缓存复用（同文件同工况重复调用不重算）。纯内存，重启即清
+    results: Dict[tuple, object] = field(default_factory=dict)
 
     def analyze_key(self, condition_id: str, profile: Optional[str]) -> str:
         return f"{condition_id}|{profile or ''}"

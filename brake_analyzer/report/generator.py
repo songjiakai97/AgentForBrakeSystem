@@ -191,7 +191,7 @@ def _order_analyses(analyses: List[dict], cfg: AppConfigs) -> List[dict]:
 def _condition_blocks(d: dict, cfg: AppConfigs, cond, tpl: DocxTemplate,
                       signals_of: Optional[Callable], chart_dir: str,
                       warnings: List[str], only: Optional[List[str]],
-                      show_lead: bool,
+                      show_lead: bool, charts: str = "all",
                       stop_check: Optional[Callable[[], bool]] = None
                       ) -> Tuple[List[dict], int]:
     """一份分析（单文件）→ 逐样本块：前导行(可选) + 两列表 + 居中时序图(可选)。
@@ -216,7 +216,13 @@ def _condition_blocks(d: dict, cfg: AppConfigs, cond, tpl: DocxTemplate,
         win = _valid_window(s.get("window"))
         rows = _metric_rows(d, s, cfg, cond)
         image, caption = None, ""
-        if win is not None:
+        # 出图策略（用户定版）：abnormal_only 只给含异常/缺失指标的样本出图，
+        # none 只出表格；all 维持现状。MAX_CHARTS 兜底上限不变
+        want_chart = (charts != "none"
+                      and (charts == "all" or any(
+                          m.get("status") in ("abnormal", "missing")
+                          for m in s.get("metrics", []))))
+        if win is not None and want_chart:
             signals = signals_of(d.get("file_id")) if signals_of else None
             if not signals:
                 warnings.append(f"{cname} run{run}：信号不可用，未出图")
@@ -258,6 +264,7 @@ def build_context(
     warnings: List[str],
     progress: Optional[Callable[[str, str], None]],
     stop_check: Optional[Callable[[], bool]] = None,
+    charts: str = "all",
 ) -> Tuple[dict, int]:
     """分析结果列表 → 模板上下文（契约见 scripts/make_report_template.py docstring）。
 
@@ -307,7 +314,8 @@ def build_context(
                 except Exception:
                     pass          # 心跳失败不影响报告本身
             blocks, n = _condition_blocks(d, cfg, cond, tpl, signals_of,
-                                          chart_dir, warnings, only, show_lead)
+                                          chart_dir, warnings, only, show_lead,
+                                          charts=charts, stop_check=stop_check)
             cond_blocks.extend(blocks)
             chart_total += n
             if len(items) > 1:
@@ -388,6 +396,7 @@ def generate_report(
     chat_title: str = "",
     progress: Optional[Callable[[str, str], None]] = None,
     stop_check: Optional[Callable[[], bool]] = None,
+    charts: str = "all",
 ) -> dict:
     """分析结果列表 → docx 报告。返回 {ok, path, file, analyses, charts, warnings}。
 
@@ -397,6 +406,8 @@ def generate_report(
     signals_of(file_id) → 该文件的 SignalData 字典；None/缺失则该样本跳过出图。
     progress(label, detail) 是慢操作心跳（渲染图表逐张回调），调用方接 _progress。
     stop_check() 非零即停：出图循环逐样本自检，用户停止后立即收尾不硬画完。
+    charts 出图策略：all（默认）/ abnormal_only（只画含异常或缺失指标的样本）/
+    none（只出表格）。
     """
     if not analyses:
         raise ValueError("没有可写入报告的分析结果（会话里还没有完成过任何分析）")
@@ -423,7 +434,8 @@ def generate_report(
             analyses, cfg=cfg, title=title, chat_title=chat_title,
             generated_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             tpl=tpl, chart_dir=chart_dir, signals_of=signals_of,
-            warnings=warnings, progress=progress)
+            warnings=warnings, progress=progress, stop_check=stop_check,
+            charts=charts)
         tpl.render(context)
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         tpl.save(out_path)

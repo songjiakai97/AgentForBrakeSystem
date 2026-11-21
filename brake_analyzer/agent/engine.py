@@ -52,6 +52,10 @@ log = logging.getLogger(__name__)
 # 用户总能得到答复，而不是被静默兑底成答非所问的离线路由。
 MAX_TOOL_ROUNDS = max(4, int(os.getenv("AGENT_MAX_TOOL_ROUNDS", "10")))
 
+# 合并建议请求的手册片段上限：多份分析的片段去重合并后可能撑爆 prompt，
+# kb_ref 精确引用排在语义补充之前，截断时优先保精确
+KB_SNIPPET_MAX = 6
+
 
 class ChatEngine:
     def __init__(self, cfg: AppConfigs, llm: LlmClient, kb: KnowledgeBase, store,
@@ -417,6 +421,9 @@ class ChatEngine:
                     preview_buf.clear()
 
                 bad_arg_ids = set(reply.bad_args or [])
+                # 单轮内重复调用去重：9B 模型实测会在一轮里连发同参数调用，
+                # 重算慢且堆重复卡片——回喂「已执行过」让模型前进
+                seen_calls = set()
                 for tc in reply.tool_calls:
                     name, args = tc["name"], tc["arguments"]
                     # 工具执行没有 delta，是停止检查点之间的真空区：每个工具开始前自检。
@@ -442,6 +449,21 @@ class ChatEngine:
                                         "请重新输出该工具调用，arguments 必须是完整合法的 JSON",
                             })})
                         continue
+                    call_key = (name, json.dumps(args, ensure_ascii=False,
+                                                 sort_keys=True, default=str))
+                    if call_key in seen_calls:
+                        state["claimed"] = True
+                        yield self._mevent(self._step_on(chat, [(
+                            f"{name} 重复调用", "与此前调用完全相同，未重复执行", "warn")]))
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc["id"],
+                            "content": clip_payload({
+                                "ok": True, "duplicate": True,
+                                "note": "该调用与本轮此前完全相同，结果已给出，请勿重复调用；"
+                                        "如需重算请改参数（如 force=true）",
+                            })})
+                        continue
+                    seen_calls.add(call_key)
                     arg_s = json.dumps(args, ensure_ascii=False)[:160]
                     yield self._mevent(self._step_on(chat, [(f"调用工具 {name}", f"参数: {arg_s}", "run")]))
                     spec = TOOLS.get(name)
@@ -505,6 +527,12 @@ class ChatEngine:
                                         r: MISSING_REASON_LEGEND.get(r, r) for r in legend}
                                 if failed:
                                     payload["failed"] = failed
+                            elif any(getattr(m, "meta", {}).get("cached_only")
+                                     for m in msgs):
+                                payload = {
+                                    "ok": True,
+                                    "note": "该分析此前已完成，结果见已有卡片，未重复计算",
+                                }
                             else:
                                 payload = {
                                     "ok": False,
@@ -659,23 +687,37 @@ class ChatEngine:
         return self._loaders[ext]
 
     # ------------------------------------------------------------ 分析
-    def _analyze(self, chat, condition_id: str, profile: Optional[str],
-                 stop_event=None, file_indexes: Optional[List[int]] = None
-                 ) -> Tuple[List, List[dict]]:
+    def _analyze(self, chat, condition_id, profile: Optional[str],
+                 stop_event=None, file_indexes: Optional[List[int]] = None,
+                 force: bool = False) -> Tuple[List, List[dict]]:
         """执行分析并落库可见消息。
 
-        返回 (消息列表, 数值摘要列表)。摘要与结果卡片同源，既拼进卡片正文
-        （跨轮追问时由 history 回灌），也直接回灌给 LLM 当轮 tool 应答 ——
-        否则模型只拿到"分析已完成"，正文会退化成让用户自己看图（§6.9）。
+        condition_id 接受单个工况 id 或列表（批量）：列表长度必须等于所选文件数
+        （逐文件对齐工况——多文件不同工况的一次调用方案）或为 1（全部文件同一
+        工况），否则拒绝。返回 (消息列表, 数值摘要列表)。摘要与结果卡片同源，既
+        拼进卡片正文（跨轮追问时由 history 回灌），也直接回灌给 LLM 当轮 tool
+        应答——否则模型只拿到"分析已完成"，正文会退化成让用户自己看图（§6.9）。
 
         分析范围默认只取「最近一次上传的那批文件」（§8.2）：用户新传数据后说的
         「分析」指的是新那份，把会话里的历史文件一起重跑，结论就混了上一趟的数据。
         file_indexes 是模型按 prompt 里编号显式点名的文件（1 起），供「对比全部文件」
         这类明确要求使用；点不名的编号忽略，不让模型凭空造范围。
+
+        缓存复用：同 (文件, 工况, 档位) 已有结果时跳过重算（9B 模型实测会在单轮内
+        重复发起同参数分析），卡片不重复落；`force=True` 逃生口。每文件分析前做
+        两类前置体检：信号覆盖（缺哪些通道、影响哪些指标）与数据质量（采样间隙/
+        量程异常），文件名编号与工况不符时弱校验提示。
         """
-        cond = self.cfg.condition(condition_id or "")
-        if cond is None:
-            return [self._msg(chat, "error", f"未知道况：{condition_id}")], []
+        ids = [c for c in ((condition_id if isinstance(condition_id, list)
+                            else [condition_id]) or []) if c]
+        conds: List = []
+        for cid in ids:
+            c = self.cfg.condition(cid)
+            if c is None:
+                return [self._msg(chat, "error", f"未知道况：{cid}")], []
+            conds.append(c)
+        if not conds:
+            return [self._msg(chat, "error", "未指定工况（condition_id / condition_ids）。")], []
         if not chat.files:
             return [self._msg(chat, "error",
                               "会话内还没有数据文件，请先上传 .mf4/.blf 文件再分析。")], []
@@ -683,29 +725,39 @@ class ChatEngine:
         if not targets:
             return [self._msg(chat, "error",
                               "没有选中任何数据文件（file_indexes 与本会话文件对不上）。")], []
+        # 长度约束（用户定版）：len(工况) == len(文件)（逐文件对齐）或 == 1（全部同工况）
+        if len(conds) not in (1, len(targets)):
+            return [self._msg(chat, "error",
+                              f"condition_ids 长度 {len(conds)} 与文件数 {len(targets)} 不匹配："
+                              "必须为 1（全部同工况）或与文件数一致（逐文件对齐）。")], []
 
-        chat.selected_function = cond.function
-        chat.selected_condition = cond.id
+        main_cond = conds[0]
+        chat.selected_function = main_cond.function
+        chat.selected_condition = main_cond.id
         chat.selected_profile = profile
         self.store.note_selection(chat)
 
         # 新一轮动作（点选面板/工具调用）另起一个步骤块
         self._seal_steps(chat)
         skipped = len(chat.files) - len(targets)
+        cond_label = main_cond.name if len(conds) == 1 else \
+            "逐文件对齐：" + "、".join(c.name for c in conds)
         step_msg = self._step_on(chat, [
-            (f"run_analysis_on_files：{cond.name}",
+            (f"run_analysis_on_files：{main_cond.name}",
              f"文件 {len(targets)} 个"
              + (f"（会话内另有 {skipped} 个非本轮范围，未重跑）" if skipped else "")
-             + f" · 工况 {cond.id}"
+             + f" · 工况 {cond_label}"
              + (f" · 档位 {profile}" if profile else ""), "run")])
         added: List = [step_msg]
 
         results: List[AnalysisResult] = []
         errors: List[str] = []
         warns: List[str] = []
+        reused: List[str] = []
         sugg_targets: List[Tuple[AnalysisResult, object]] = []
         stopped_early = False
         for i, f in enumerate(targets):
+            cond = conds[i] if len(conds) == len(targets) else conds[0]
             # 工具阶段是整轮最慢的一段，且期间没有 delta 可供上层检查停止：
             # 每个文件开始前自检，已完成的文件结果照常保留落库
             if self._stopped(stop_event):
@@ -719,6 +771,13 @@ class ChatEngine:
                 chat, f"分析 {f.name}（{i + 1}/{len(targets)}）",
                 "首次分析该文件需先加载信号，可能较慢" if first_load else "",
                 "run")
+            # 缓存复用：同 (文件, 工况, 档位) 已有结果时跳过重算——9B 模型实测
+            # 会在单轮内重复发起同参数分析，重算既慢又会在对话里堆重复卡片
+            cache_key = (f.file_id, cond.id, profile or "")
+            cached = sess.results.get(cache_key)
+            if cached is not None and not force:
+                reused.append(f"{f.name}（{cond.name}）")
+                continue
             try:
                 if sess.signals is None:
                     loader = self._loader_for(f.path)
@@ -732,12 +791,21 @@ class ChatEngine:
                     # 走步骤行的 warn 状态——它们不是"分析失败"，结果照常可用
                     for w in getattr(loader, "load_warnings", None) or []:
                         warns.append(f"{f.name}: {w}")
+                # 前置体检：信号覆盖 + 数据质量（只提示不改变结论，warns 通道）
+                cov = self._coverage_warn(cond, sess.signals)
+                if cov:
+                    warns.append(f"{f.name}: {cov}")
+                warns.extend(f"{f.name}: {w}" for w in self._quality_warns(sess.signals))
+                mismatch = self._file_id_mismatch(f.name, cond)
+                if mismatch:
+                    warns.append(mismatch)
                 res = analyze_signals(
                     sess.signals, cond.id, self.cfg,
                     file_id=f.file_id, file_name=f.name, profile=profile,
                 )
                 sugg_targets.append((res, cond))
                 sess.analyses[sess.analyze_key(cond.id, profile)] = res
+                sess.results[cache_key] = res
                 results.append(res)
             except NoDataError as e:
                 errors.append(f"{f.name}: {e}")
@@ -747,6 +815,8 @@ class ChatEngine:
 
         valid = sum(1 for r in results for s in r.samples if s.window is not None)
         detail = f"样本窗口 {valid} 个 · 失败 {len(errors)} 份"
+        if reused:
+            detail += f" · 缓存复用 {len(reused)} 份"
         if warns:
             detail += f" · 提示 {len(warns)} 条"
         step2 = self._step_on(chat, [
@@ -771,6 +841,13 @@ class ChatEngine:
                                    meta={"stopped": True}))
         elif not results and not errors:
             added.append(self._msg(chat, "error", "没有可分析的文件。"))
+        if reused and not results:
+            # 全部命中缓存：不再重复出卡片/建议，给模型一个明确的回执（meta 供
+            # 分发层识别，回灌 payload 走「已缓存」而不是「没有结果」）
+            added.append(self._msg(chat, "text",
+                                   f"该分析此前已完成（{'；'.join(reused)}），"
+                                   "结果见上方卡片，未重复计算；如需重算请说明理由或传 force。",
+                                   meta={"cached_only": True}))
         # 标定建议合并为一次请求、一条总建议消息（用户定版：不进结果卡片）。
         # 无 LLM 时降级标记，行为与旧逐文件版本一致
         if sugg_targets and self.llm.available:
@@ -779,6 +856,71 @@ class ChatEngine:
             for res, _cond in sugg_targets:
                 res.degraded = True
         return added, digests
+
+    def _coverage_warn(self, cond, signals: dict) -> Optional[str]:
+        """信号覆盖前置体检：该工况需要的通道缺失时，一句话说清影响面。"""
+        needed = set()
+        for k in cond.enabled_metrics:
+            t = self.cfg.metrics.get(k)
+            if t:
+                needed.update(t.inputs)
+        fn = self.cfg.function(cond.function)
+        if fn is not None:
+            from ..events.segment import SEGMENTER_SIGNALS
+
+            needed.update(SEGMENTER_SIGNALS.get(fn.segmenter, []))
+        missing = sorted(n for n in needed
+                         if n not in signals or not len(signals[n].ts))
+        if not missing:
+            return None
+        return (f"缺 {len(missing)} 个通道（{'、'.join(missing[:5])}"
+                + ("等" if len(missing) > 5 else "")
+                + f"）：相关指标将判 missing")
+
+    def _quality_warns(self, signals: dict) -> List[str]:
+        """数据质量体检：采样间隙与典型通道的量程异常（启发式，只提示）。"""
+        import numpy as np
+
+        warns: List[str] = []
+        for name, sig in signals.items():
+            if not len(sig.ts):
+                continue
+            ts = np.asarray(sig.ts, dtype=float)
+            if ts.size > 4:
+                gaps = np.diff(ts)
+                med = float(np.median(gaps))
+                if med > 0:
+                    thresh = max(2.0 * med, 0.05)
+                    bad = int(np.sum(gaps > thresh))
+                    if bad:
+                        warns.append(f"{name}：{bad} 处采样间隙（>{thresh * 1000:.0f}ms）")
+            vals = np.asarray(sig.values, dtype=float)
+            vals = vals[~np.isnan(vals)]
+            if not vals.size:
+                continue
+            if name.startswith("wheelSpeed") and (vals.max() > 300 or vals.min() < -1):
+                warns.append(f"{name}：量程异常（{vals.min():.0f}~{vals.max():.0f} km/h）")
+            elif name == "Ax" and (vals.max() > 15 or vals.min() < -15):
+                warns.append(f"{name}：量程异常（{vals.min():.1f}~{vals.max():.1f} m/s²）")
+        return warns[:4]
+
+    def _file_id_mismatch(self, f_name: str, cond) -> Optional[str]:
+        """逐文件工况弱校验：文件名编号指向别的工况时提示（不阻止分析）。
+
+        9B 实测踩中：混批文件被同一工况整批套用，TCS 文件被按 ABS 分析还产出了
+        「异常」结论——文件名编号（file_ids）与工况不符是最廉价的提醒信号。
+        """
+        idx = self.cfg.file_ids
+        if idx is None:
+            return None
+        fid = idx.match(f_name)
+        if fid is None:
+            return None
+        cid = idx.condition_id(fid)
+        if cid and cid != cond.id:
+            return (f"{f_name}：文件名编号 {fid} 指向 {cid}，"
+                    f"与当前工况 {cond.id} 不符，请确认")
+        return None
 
     # ------------------------------------------------------------ 知识/文件工具
     # 步骤标签/命中明细已收敛进 agent.registry.TOOLS（一个工具一个条目，五处挂点
@@ -923,7 +1065,7 @@ class ChatEngine:
             return {"ok": False, "hint": "记录库未启用（未配置 RECORDS_DB）"}
         allowed = {
             "records_query": {"file_id", "condition_id", "vehicle", "function_key",
-                              "keyword", "limit"},
+                              "keyword", "recorded_from", "recorded_to", "limit"},
             "records_compare": {"condition_id", "function_key", "vehicles", "metric",
                                 "limit"},
         }.get(getattr(fn, "__name__", ""), set())
@@ -1006,7 +1148,8 @@ class ChatEngine:
         note = "；".join(facts)
         return {"ok": True, "transient": True, "files": rows, **({"note": note} if note else {})}
 
-    def _report_tool(self, chat, condition_ids=None, title: str = "") -> Tuple[dict, object]:
+    def _report_tool(self, chat, condition_ids=None, title: str = "",
+                     charts: str = "all") -> Tuple[dict, object]:
         """generate_report 工具：会话内已落库的分析结果 → docx 报告。
 
         返回 (payload, report_msg)：payload 回灌 LLM（只给文件名/份数/告警，不带
@@ -1047,6 +1190,7 @@ class ChatEngine:
                 signals_of=signals_of,
                 title=title or "制动数据分析报告",
                 chat_title=chat.title,
+                charts=charts if charts in ("all", "abnormal_only", "none") else "all",
                 progress=lambda label, detail="": self._progress(chat, label, detail, "run"),
                 stop_check=lambda: self._stopped(self._tls_stop),
             )
@@ -1123,9 +1267,17 @@ class ChatEngine:
         串行等待）；合并后 1/N。建议落成独立文本消息、不再挂进结果卡片；
         res.llm_suggestion 仍写回（反馈 API 兼容）。失败/停止 → degraded 标记，
         不阻塞本轮——卡片与规则结论都已落库。
+
+        本版新增：
+        - 恢复历史案例注入（合并重构时丢失的 _case_hint，跨分析去重）；
+        - 手册片段上限 KB_SNIPPET_MAX（kb_ref 精确引用排在前面，优先保留）；
+        - 建议按性质分组：数据质量动作（missing 指标）/ 标定动作分开列；
+        - 建议-验证自动对比：同工况有上一轮建议时，头部先给指标变化对账；
+        - 尾部邀请反馈（卡片移除后反馈的入口只剩这条消息）。
         """
         payload_items: List[dict] = []
         snippets: List[str] = []
+        case_lines: List[str] = []
         involved: List[AnalysisResult] = []
         for res, cond in targets:
             problems = self._problems_of(res)
@@ -1144,7 +1296,17 @@ class ChatEngine:
             for snip in self._kb_snippets(res, fn, query=query, condition=cond.name):
                 if snip not in snippets:      # 多份分析共用手册片段，去重
                     snippets.append(snip)
+            hint = self._case_hint(res, fn)
+            if hint and hint not in case_lines:
+                case_lines.append(hint)
+        # 手册片段上限：kb_ref 精确引用排在语义补充之前，截断时优先保精确
+        if len(snippets) > KB_SNIPPET_MAX:
+            snippets = snippets[:KB_SNIPPET_MAX]
+            self._progress(chat, "手册片段过多", f"仅保留前 {KB_SNIPPET_MAX} 条", "warn")
         if not payload_items:
+            # 全部达标：没有新建议，但可能要给上一轮建议一个复查对比
+            if chat is not None:
+                self._suggest_compare_if_any(chat, targets, added)
             return
         if self._stopped(self._tls_stop):
             # 用户已经按了停止：这是「停下来还要再等一次 LLM」的阻塞请求，直接跳过
@@ -1155,6 +1317,8 @@ class ChatEngine:
         system = (
             "你是制动标定助手。基于给定的多份分析的异常指标、规则结论与知识库片段，"
             "只输出结构化 JSON。可标定量必须取自各指标的 tuning_params。"
+            + ("\n历史案例（参考，注意与本车差异）：\n" + "\n".join(case_lines)
+               if case_lines else "")
         )
         # _merged_suggest 拿不到 stop_event 形参，从线程局部取（同 _summarize_with_llm）；
         # 直调（/select、测试）时 chat 为 None，_progress 自身对 None/无 emit 都是 no-op
@@ -1170,17 +1334,88 @@ class ChatEngine:
         for res in involved:
             res.llm_suggestion = dict(sug)     # 各 res 独立副本：反馈互不串扰
         # 总建议 = 一条独立文本消息（用户定版：不进卡片）
-        lines = [f"**标定建议**（覆盖 {len(payload_items)} 份分析，区分于规则结论）",
-                 sug.get("summary") or ""]
+        compare = self._suggest_compare_block(chat, involved)
+        lines = [f"**标定建议**（覆盖 {len(payload_items)} 份分析，区分于规则结论）"]
+        lines.extend(compare)
+        lines.append(sug.get("summary") or "")
+        # 动作按性质分组：missing 指标关联的是数据质量动作，abnormal 才是标定动作
+        missing_keys = {p["metric_key"] for it in payload_items
+                        for p in it["problems"] if p["status"] == "missing"}
         actions = sug.get("calibration_actions") or []
-        for i, a in enumerate(actions, start=1):
-            lines.append(
-                f"{i}. `{a.get('param')}` → **{a.get('direction')}**"
-                f"（{a.get('metric') or '-'}）：{a.get('expected_effect') or '-'}"
-                f"　风险：{a.get('risk') or '-'}")
+        quality = [a for a in actions if (a.get("metric") or "") in missing_keys]
+        calib = [a for a in actions if (a.get("metric") or "") not in missing_keys]
+        if quality:
+            lines.append("**数据质量动作**（先补数据，否则指标不可信）：")
+            for i, a in enumerate(quality, start=1):
+                lines.append(f"{i}. `{a.get('param')}` → **{a.get('direction')}**"
+                             f"（{a.get('metric') or '-'}）：{a.get('expected_effect') or '-'}"
+                             f"　风险：{a.get('risk') or '-'}")
+        if calib:
+            lines.append("**标定动作**：")
+            for i, a in enumerate(calib, start=1):
+                lines.append(f"{i}. `{a.get('param')}` → **{a.get('direction')}**"
+                             f"（{a.get('metric') or '-'}）：{a.get('expected_effect') or '-'}"
+                             f"　风险：{a.get('risk') or '-'}")
         if not actions:
             lines.append("无需要追加的标定动作。")
-        added.append(self._msg(chat, "text", "\n".join(lines)))
+        lines.append("——验证后把结果告诉我（采纳 / 验证有效 / 验证无效），我会据此更新建议。")
+        track = {}
+        for res in involved:
+            track[res.condition_id] = self._metric_values(res)
+        msg = self._msg(chat, "text", "\n".join(lines),
+                        meta={"suggestion_track": track})
+        added.append(msg)
+
+    def _metric_values(self, res: AnalysisResult) -> Dict[str, Optional[float]]:
+        """分析的指标实测值（按指标名），建议-验证对比的数据源。"""
+        out: Dict[str, Optional[float]] = {}
+        for s in res.samples:
+            for m in s.metrics:
+                out.setdefault(m.name, m.value)
+        return out
+
+    def _suggest_compare_block(self, chat, involved: List[AnalysisResult]) -> List[str]:
+        """同工况存在上一轮建议时，生成「指标 旧值 → 新值（改善 x%）」对账行。"""
+        if chat is None:
+            return []
+        out: List[str] = []
+        for res in involved:
+            cid = res.condition_id
+            prev = None
+            for m in reversed(chat.messages):
+                tr = (m.meta or {}).get("suggestion_track") or {}
+                if tr.get(cid):
+                    prev = tr[cid]
+                    break
+            if not prev:
+                continue
+            cur = self._metric_values(res)
+            rows = []
+            for name, new_v in cur.items():
+                old_v = prev.get(name)
+                if old_v is None or new_v is None or name not in prev:
+                    continue
+                delta = new_v - old_v
+                pct = (delta / abs(old_v) * 100) if old_v else 0.0
+                rows.append(f"{name} {old_v:.3f} → {new_v:.3f}（{pct:+.1f}%）")
+            if rows:
+                out.append(f"与上一轮建议对比（{cid}）：" + "；".join(rows))
+        return out
+
+    def _suggest_compare_if_any(self, chat, targets, added: List) -> None:
+        """本轮全部达标、没有新建议时：若存在上一轮建议，单独落一条复查对比。"""
+        if chat is None:
+            return
+        involved = [res for res, _cond in targets]
+        block = self._suggest_compare_block(chat, involved)
+        if not block:
+            return
+        track = {res.condition_id: self._metric_values(res) for res in involved}
+        lines = ["**上一轮建议复查**（本轮全部达标，无需新建议）"]
+        lines.extend(block)
+        msg = self._msg(chat, "text", "\n".join(lines),
+                        meta={"suggestion_track": track})
+        added.append(msg)
 
     def _kb_snippets(self, res: AnalysisResult, fn, query: str = "",
                      condition: Optional[str] = None) -> List[str]:

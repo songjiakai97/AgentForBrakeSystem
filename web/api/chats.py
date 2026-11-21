@@ -372,6 +372,23 @@ def api_analysis_timeseries(analysis_id: str, signal: Optional[str] = Query(None
 
 
 # ---------------------------------------------------------------- 报告下载（§18）
+@router.get("/api/reports/{cid}")
+def api_report_list(cid: str):
+    """列出某会话已生成的报告（名字/大小/生成时间），供前端报告卡片带历史。"""
+    _chat_or_404(cid)
+    d = os.path.join(REPORT_DIR, cid)
+    out = []
+    if os.path.isdir(d):
+        for name in sorted(os.listdir(d), reverse=True):
+            path = os.path.join(d, name)
+            if os.path.isfile(path) and name.endswith(".docx"):
+                out.append({"file": name,
+                            "size": os.path.getsize(path),
+                            "created_at": os.path.getmtime(path),
+                            "download": f"/api/reports/{cid}/{name}"})
+    return {"reports": out}
+
+
 @router.get("/api/reports/{cid}/{name}")
 def api_report_download(cid: str, name: str):
     """下载某会话生成的分析报告。文件名由服务端生成（无用户可控成分），

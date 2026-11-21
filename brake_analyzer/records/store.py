@@ -440,6 +440,8 @@ def query_records(
     vehicle: Optional[str] = None,
     keyword: Optional[str] = None,
     keyword_condition_ids: Optional[List[str]] = None,
+    recorded_from: Optional[str] = None,
+    recorded_to: Optional[str] = None,
     limit: int = 200,
 ) -> List[sqlite3.Row]:
     """按编号/工况/车型过滤；功能维度的工况集合由调用方从配置算好传进来。
@@ -478,6 +480,14 @@ def query_records(
             vals.extend(keyword_condition_ids)
         where.append("(" + " OR ".join(ors) + ")")
         args.extend(vals)
+    # 试验日期范围（recorded_at 是 ISO 文本，字典序即时间序）；空值记录
+    # 在有日期过滤时被排除（没有日期就没法参与时间趋势）
+    if recorded_from:
+        where.append("recorded_at >= ?")
+        args.append(recorded_from)
+    if recorded_to:
+        where.append("recorded_at <= ?")
+        args.append(recorded_to)
     sql = "SELECT * FROM record"
     if where:
         sql += " WHERE " + " AND ".join(where)

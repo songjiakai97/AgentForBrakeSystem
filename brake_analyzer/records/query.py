@@ -86,6 +86,8 @@ def records_query(
     vehicle: Optional[str] = None,
     function_key: Optional[str] = None,
     keyword: Optional[str] = None,
+    recorded_from: Optional[str] = None,
+    recorded_to: Optional[str] = None,
     limit: int = 20,
 ) -> dict:
     """按编号/关键词/工况/车型查记录 + 指标汇总；未命中时给出库里有哪些可查。
@@ -110,6 +112,8 @@ def records_query(
                                    condition_ids=cond_ids, vehicle=vehicle,
                                    keyword=keyword,
                                    keyword_condition_ids=kw_conds,
+                                   recorded_from=recorded_from,
+                                   recorded_to=recorded_to,
                                    limit=min(max(1, int(limit or 20)), 50))
         items = [_record_view(conn, cfg, r) for r in rows]
         result: Dict[str, Any] = {
@@ -166,6 +170,53 @@ def read_payload(card: dict, status: str) -> dict:
     return payload
 
 
+def _group_stats(group_sample: List[dict], cond) -> dict:
+    """组内每指标的统计摘要（min/max/mean/最优/最差车型）。
+
+    最优方向按 ok_range 启发式：上限型（[null, hi]）取最小者，下限型（[lo, null]）
+    取最大者，区间型不标最优（没有自然方向）。判定状态随每行 metrics 已带，
+    这里只补跨记录的横向汇总——「哪个车最好」从模型自己算变成一次可引用。
+    """
+    # 收集每指标的跨记录值
+    vals: Dict[str, List[float]] = {}
+    by_vehicle: Dict[str, Dict[str, str]] = {}
+    for r in group_sample:
+        for key, item in (r.get("metrics") or {}).items():
+            v = item.get("value")
+            if v is None:
+                continue
+            vals.setdefault(key, []).append(v)
+            by_vehicle.setdefault(key, {})[r.get("vehicle") or r["record_id"]] = v
+    # 指标名（展示用）与 ok_range（方向启发式）
+    names = {k: it.get("name", k) for r in group_sample
+             for k, it in (r.get("metrics") or {}).items()}
+    stats: Dict[str, dict] = {}
+    for key, vs in vals.items():
+        entry: Dict[str, Any] = {
+            "name": names.get(key, key), "n": len(vs),
+            "min": round(min(vs), 3), "max": round(max(vs), 3),
+            "mean": round(sum(vs) / len(vs), 3),
+        }
+        # 方向启发式：该指标在工况配置里的任一 ok_range 判方向
+        direction = None
+        for e in cond.metrics or []:
+            if e.get("key") == key and e.get("ok_range"):
+                lo, hi = (list(e["ok_range"]) + [None, None])[:2]
+                if hi is not None and lo is None:
+                    direction = "min"
+                elif lo is not None and hi is None:
+                    direction = "max"
+                break
+        if direction in ("min", "max") and len(by_vehicle[key]) > 1:
+            pick = min if direction == "min" else max
+            best_v = pick(by_vehicle[key].values())
+            best = [veh for veh, x in by_vehicle[key].items() if x == best_v]
+            entry["best_vehicle"] = best[0]
+            entry["direction"] = ("越小越好" if direction == "min" else "越大越好")
+        stats[key] = entry
+    return {"stats": stats} if stats else {}
+
+
 def records_compare(
     service: RecordService,
     cfg: AppConfigs,
@@ -187,6 +238,8 @@ def records_compare(
     `file_id` / `keyword` / `keyword_condition_ids` 与列表页的筛选同口径：
     页面上的筛选条件不传进来，就会出现「我搜的是这几条，对比表里却是全库」的错位。
     对比仍然是「同一工况内、按车型/试验横着比」，筛的只是范围。
+    每组附带 stats 统计摘要（min/max/mean/最优车型，方向按 ok_range 启发式），
+    每行 metrics 已带判定状态——「哪个车最好/谁不达标」一次查询即可引用。
     """
     if condition_id:
         conds = [cfg.condition(condition_id)]
@@ -242,6 +295,7 @@ def records_compare(
                     "function": cond.function,
                     "file_ids": list(cond.file_ids),
                     "records": sample,
+                    **_group_stats(sample, cond),
                 })
         result: Dict[str, Any] = {
             "ok": True,
