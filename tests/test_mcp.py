@@ -618,11 +618,12 @@ def test_mcp_endpoints_report_without_leaking_secrets():
                          env={"TOKEN": "super-secret"},
                          headers={"Authorization": "Bearer abc"})
     import web.main as m
+    from web import state as wst
 
     hub = McpHub([spec])
     hub._make_client = lambda s: Client(srv)
-    orig_hub, orig_engine_hub = m.MCP_HUB, m.ENGINE.mcp
-    m.MCP_HUB = hub
+    orig_hub, orig_engine_hub = wst.MCP_HUB, m.ENGINE.mcp
+    wst.MCP_HUB = hub
     m.ENGINE.mcp = hub
     try:
         # with 语句才会跑 startup/shutdown 钩子：顺带验证 _connect_mcp 真挂了后台连接、
@@ -649,4 +650,4 @@ def test_mcp_endpoints_report_without_leaking_secrets():
             assert client.post("/api/mcp/reconnect").json()["statuses"] == {"units": "ok"}
     finally:
         hub.shutdown()
-        m.MCP_HUB, m.ENGINE.mcp = orig_hub, orig_engine_hub
+        wst.MCP_HUB, m.ENGINE.mcp = orig_hub, orig_engine_hub

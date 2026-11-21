@@ -1,3 +1,4 @@
+from web import state as wst
 """记录库 Web 接口（§17.6）：清单、惰性分析、图表、横向对比。"""
 
 import importlib.util
@@ -5,6 +6,8 @@ import os
 import shutil
 
 import pytest
+from brake_analyzer.records import store as record_store
+from brake_analyzer.records.service import RecordService
 from fastapi.testclient import TestClient
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -39,19 +42,19 @@ def records_db(tmp_path):
         dest.parent.mkdir(parents=True)
         shutil.copy(os.path.join(MF4_DIR, "abs_dry100_normal.mf4"), dest)
     db_path = str(tmp_path / "records.db")
-    imp.run_import(str(root), db_path, web.CFG)
+    imp.run_import(str(root), db_path, wst.CFG)
 
-    old_service, old_db = web.RECORDS, web.RECORDS_DB
-    web.RECORDS = web.RecordService(web.CFG, db_path, blf_cfg=web.BLF_CFG)
-    web.RECORDS_DB = db_path
-    conn = web.RECORDS.connect()
+    old_service, old_db = wst.RECORDS, wst.RECORDS_DB
+    wst.RECORDS = RecordService(wst.CFG, db_path, blf_cfg=wst.BLF_CFG)
+    wst.RECORDS_DB = db_path
+    conn = wst.RECORDS.connect()
     rows = {r["vehicle"]: r["record_id"]
-            for r in web.record_store.query_records(conn)}
+            for r in record_store.query_records(conn)}
     conn.close()
     try:
         yield {"db": db_path, "ids": rows}
     finally:
-        web.RECORDS, web.RECORDS_DB = old_service, old_db
+        wst.RECORDS, wst.RECORDS_DB = old_service, old_db
 
 
 def test_records_meta(client, records_db):

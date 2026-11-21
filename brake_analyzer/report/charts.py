@@ -1,4 +1,4 @@
-"""报告时序图：信号时序 → matplotlib 静态 PNG（design.md §14）。
+"""报告时序图：信号时序 → matplotlib 静态 PNG（design.md §18）。
 
 方案 A（对话定版）：报告是静态文档，ECharts 的交互在 docx 里无意义；
 matplotlib 是唯一 pip 装完即跑、不引入外部进程（无头浏览器 / kaleido）的路径。

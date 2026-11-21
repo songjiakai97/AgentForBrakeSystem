@@ -2463,3 +2463,52 @@ surface_code + function + 功能名` 做归一化包含比对（`_norm_text` 去
 - 配置改了不用重建库：指纹变化后首次查询/查看会自动重算；
 - 删库重导即可彻底重算；`meta.schema_version` 保留给后续迁移；
 - 导入脚本只登记，不做解析，因此可以放心对大盘目录跑（`--dry-run` 先看清单）。
+
+## 18. 分析报告生成（2026-11-21）
+
+对话工具 `generate_report`（第 11 个内置工具，见 §6.9 / agent/registry.py）：把会话内
+已落库的分析结果（chat.messages 的 kind=analysis_result 完整 data）写成 Word 报告。
+
+### 18.1 版式（用户定版）
+
+- 编号/顺序全按 config：小节标题 = conditions.yaml 的 `file_ids`（4.1.1）+ `name`，
+  顺序 = functions.yaml 功能序 × conditions.yaml 文件序；同工况多文件合并进同一
+  编号小节，文件进块前导行（单文件单样本时前导行消失，即最小形态）；
+- 客观指标两列表：第 1 列 = 该工况 conditions.yaml 声明的 metrics 清单与顺序
+  （名称/unit 取 metrics.yaml，ok_range 按 profile 走 §10.4 pick 解析；对称限值
+  [-5,5] 显示 ±5），第 2 列 = 实测结果（超限/无值带短注，达标素值）；结果缺的
+  config 指标补「无值（未算出）」行，不静默丢指标；
+- 时序图：每个事件样本一张、紧跟其表居中；口径与网页端完全一致——只画
+  functions.yaml 该功能的 signals，按 signals.yaml chart_layout 分组，
+  matplotlib hspace=0 紧贴、强制 Agg 后端（无头安全）；
+- 规则结论/标定建议不打散进工况小节，收进「3 规则结论与标定建议汇总」章
+  （标定建议已合并为一次 LLM 请求、一条总建议文本消息，见 §6.9a）。
+
+### 18.2 实现
+
+- 模板：scripts/make_report_template.py 程序化产出 brake_analyzer/report/
+  report_template.docx（入库），运行期 docxtpl 只读填充；改样式重跑脚本；
+  docxtpl 陷阱：{%tr %} 标记行与循环体行必须分行；跨样本循环内 run 号要从
+  当前样本取；
+- 下载：GET /api/reports/{cid}/{name}；删除会话级联清 reports/<cid>/；
+- 慢操作：图表逐张渲染带 _progress 心跳与停止检查点（工具内部自检）。
+
+### 18.3 依赖 harness 的配套变更（同批）
+
+- 工具注册表 agent/registry.py：规格/执行器/步骤标签/命中明细/结果分发收敛为
+  ToolSpec 条目，加工具只改一处；
+- 工具应答裁剪 clip_payload（json-aware），替换硬字符截断；
+- 工具参数 JSON 解析失败回喂模型自纠（不再静默空参数）；
+- 工具轮数上限 AGENT_MAX_TOOL_ROUNDS（默认 10），耗尽走软收尾轮（禁工具出结论），
+  不兜底离线；离线回退有可见步骤行；
+- LLM 健康实测 check_reachable（缓存 30s）进 /api/meta 与前端顶栏；
+- trace 记录每轮 usage（in/out tokens、耗时）与坏参数数，/debug 行内展示；
+- 会话持久化：JSONL 追加日志（SESSION_DIR，默认 data/sessions/），启动重放；
+  信号缓存与 analyses 活对象不持久化（重启后图表/反馈需重跑）；
+- web 层拆分：state.py（单例装配）+ web/api/{meta,kb,chats,records,debug}.py。
+
+### 18.4 扩展项（未做）
+
+- 记录库 × 报告联动：以 records 查询结果为数据源出历史对比报告
+  （config 编号体系已就位，时序图需惰性解析路径）；
+- read_record 等惰性解析工具内部的停止检查点（当前只覆盖到工具之间）。

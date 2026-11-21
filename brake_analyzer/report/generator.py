@@ -1,4 +1,4 @@
-"""报告生成器（design.md §14）：已落库的分析结果 → docxtpl 填充 → docx。
+"""报告生成器（design.md §18）：已落库的分析结果 → docxtpl 填充 → docx。
 
 报告版式（用户定版 2026-11-21，第二轮：全部口径以 config 为准）：
 - 编号与工况标题：conditions.yaml 的 file_ids（如 4.1.1）+ name，编号即章节路径，

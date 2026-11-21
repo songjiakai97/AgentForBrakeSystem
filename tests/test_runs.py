@@ -8,6 +8,7 @@ import warnings
 warnings.filterwarnings("ignore", module="asammdf")
 
 import pytest
+from web import state as wst
 from fastapi.testclient import TestClient
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,14 +46,16 @@ def client():
 def slow(client):
     """把慢引擎换进 web.main.ENGINE（RUNS.start 取的就是它），测完还原。"""
     import web.main as m
+    from web import state as wst
+    from web import state as wst
 
     fake = SlowEngine(m.STORE)
-    original = m.ENGINE
-    m.ENGINE = fake
+    original = wst.ENGINE
+    wst.ENGINE = fake
     try:
         yield m, fake, client
     finally:
-        m.ENGINE = original
+        wst.ENGINE = original
 
 
 def _wait_active(m, client, cid, want_running=True, tries=40):
@@ -116,7 +119,7 @@ def test_subscriber_disconnect_does_not_kill_run(slow):
     """
     m, fake, client = slow
     chat = m.STORE.create_chat("sub")
-    run, started = m.RUNS.start(m.ENGINE, chat, "随便看看")
+    run, started = m.RUNS.start(wst.ENGINE, chat, "随便看看")
     assert started
     assert fake.started.wait(3)
 
@@ -142,7 +145,7 @@ def test_replay_and_incremental_resume(slow):
     """跑完的一轮：整轮回放带单调 seq，after 参数可增量续传不重复。"""
     m, fake, client = slow
     cid = m.STORE.create_chat("replay").chat_id
-    run, started = m.RUNS.start(m.ENGINE, m.STORE.get_chat(cid), "随便看看")
+    run, started = m.RUNS.start(wst.ENGINE, m.STORE.get_chat(cid), "随便看看")
     assert started and fake.started.wait(3)
     fake.release.set()
     assert _wait_active(m, client, cid, want_running=False) is None
@@ -167,10 +170,11 @@ def test_refresh_then_recover_over_http(client):
     import httpx
 
     import web.main as m
+    from web import state as wst
 
     fake = SlowEngine(m.STORE)
-    original = m.ENGINE
-    m.ENGINE = fake
+    original = wst.ENGINE
+    wst.ENGINE = fake
     server = None
     try:
         port = _free_port()
@@ -202,7 +206,7 @@ def test_refresh_then_recover_over_http(client):
             body = c.get(f"/api/runs/{run['run_id']}/stream?after=-1").text
             assert "解析目标中" in body and "结论：完成" in body and "event: done" in body
     finally:
-        m.ENGINE = original
+        wst.ENGINE = original
         if server is not None:
             server.should_exit = True
             server.thread.join(timeout=8)
@@ -212,7 +216,7 @@ def test_conflict_while_running(slow):
     """一轮未完时同会话再提问/点选返回 409：避免两个 writer 交叉写同一份消息。"""
     m, fake, client = slow
     cid = m.STORE.create_chat("busy").chat_id
-    run, started = m.RUNS.start(m.ENGINE, m.STORE.get_chat(cid), "第一轮")
+    run, started = m.RUNS.start(wst.ENGINE, m.STORE.get_chat(cid), "第一轮")
     assert started
     assert fake.started.wait(3)
 
@@ -231,7 +235,7 @@ def test_conflict_while_running(slow):
     assert sel.status_code == 409
 
     # 重复 stream 请求本身是幂等的加入（返回同一 run），不新建轮
-    assert m.RUNS.start(m.ENGINE, m.STORE.get_chat(cid), "第二轮")[1] is False
+    assert m.RUNS.start(wst.ENGINE, m.STORE.get_chat(cid), "第二轮")[1] is False
     assert m.RUNS.active_for(cid).run_id == run.run_id
 
     fake.release.set()
@@ -247,7 +251,7 @@ def test_engine_error_is_visible(slow):
             yield {"event": "delta", "data": {"channel": "meta", "text": "", "engine": "offline"}}
             raise RuntimeError("引擎炸了")
 
-    m.ENGINE = Boom()
+    wst.ENGINE = Boom()
     cid = m.STORE.create_chat("boom").chat_id
     r = client.post(f"/api/chats/{cid}/messages", json={"text": "触发异常"})
     assert r.status_code == 500, r.text          # 本轮失败要能明确报错，而不是静默半截
@@ -294,14 +298,15 @@ class StoppableEngine:
 def stoppable(client):
     """把可停止的假引擎换进 web.main.ENGINE（RUNS.start 取的就是它），测完还原。"""
     import web.main as m
+    from web import state as wst
 
-    original = m.ENGINE
+    original = wst.ENGINE
     fake = StoppableEngine(m.STORE)
-    m.ENGINE = fake
+    wst.ENGINE = fake
     try:
         yield m, client, fake
     finally:
-        m.ENGINE = original
+        wst.ENGINE = original
 
 
 def _wait_finished(run, tries=60):
@@ -316,7 +321,7 @@ def test_stop_endpoint_stops_running_run(stoppable):
     """POST /api/runs/{id}/stop：置标记 → 引擎收尾 → 状态 stopped，会话不再占用。"""
     m, client, fake = stoppable
     cid = m.STORE.create_chat("stop").chat_id
-    run, started = m.RUNS.start(m.ENGINE, m.STORE.get_chat(cid), "随便看看")
+    run, started = m.RUNS.start(wst.ENGINE, m.STORE.get_chat(cid), "随便看看")
     assert started and run.stop_requested is False
     assert fake.started.wait(3)
 
@@ -342,12 +347,12 @@ def test_stopped_session_is_free_again(stoppable):
     """停止的意义之一是不再锁会话：紧接着的追问不该 409。"""
     m, client, fake = stoppable
     cid = m.STORE.create_chat("stop-free").chat_id
-    run, started = m.RUNS.start(m.ENGINE, m.STORE.get_chat(cid), "随便看看")
+    run, started = m.RUNS.start(wst.ENGINE, m.STORE.get_chat(cid), "随便看看")
     assert started and fake.started.wait(3)
     client.post(f"/api/runs/{run.run_id}/stop")
     assert _wait_finished(run) == "stopped"
 
-    m.ENGINE = StoppableEngine(m.STORE, timeout=0.2)   # 第二轮不等停止，只为确认不 409
+    wst.ENGINE = StoppableEngine(m.STORE, timeout=0.2)   # 第二轮不等停止，只为确认不 409
     dup = client.post(f"/api/chats/{cid}/messages", json={"text": "停止后还能追问"})
     assert dup.status_code == 200, dup.text
 
@@ -356,7 +361,7 @@ def test_stop_finished_run_is_harmless(stoppable):
     """已结束的一轮停不了：只回状态，不报错，也不把 done 改成别的。"""
     m, client, fake = stoppable
     cid = m.STORE.create_chat("stop-done").chat_id
-    run, started = m.RUNS.start(m.ENGINE, m.STORE.get_chat(cid), "随便看看")
+    run, started = m.RUNS.start(wst.ENGINE, m.STORE.get_chat(cid), "随便看看")
     assert started and fake.started.wait(3)
     client.post(f"/api/runs/{run.run_id}/stop")   # 先置标记，让这一轮按停止收尾
     assert _wait_finished(run) == "stopped"
@@ -374,6 +379,7 @@ def test_stop_unknown_run_is_404(client):
 def test_stopped_run_is_not_a_failure_for_non_stream_api(client):
     """非流式入口把停止当正常收尾：只有 error 才 500，否则前端会看到"失败"假象。"""
     import web.main as m
+    from web import state as wst
 
     class SelfStopping(StoppableEngine):
         def events(self, chat, text, stop_event=None, emit=None):
@@ -383,12 +389,12 @@ def test_stopped_run_is_not_a_failure_for_non_stream_api(client):
             stop_event.set()                   # 等价于用户在流式途中按了停止
             yield from super().events(chat, text, stop_event)
 
-    original = m.ENGINE
-    m.ENGINE = SelfStopping(m.STORE)
+    original = wst.ENGINE
+    wst.ENGINE = SelfStopping(m.STORE)
     try:
         cid = m.STORE.create_chat("stop-post").chat_id
         r = client.post(f"/api/chats/{cid}/messages", json={"text": "随便看看"})
         assert r.status_code == 200, r.text
         assert any("停止" in (x["content"] or "") for x in r.json()["messages"])
     finally:
-        m.ENGINE = original
+        wst.ENGINE = original
