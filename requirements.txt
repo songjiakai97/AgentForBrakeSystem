@@ -2,6 +2,10 @@
 # 知识摄入（docx→md 转换引擎，§11.6）
 markitdown[docx]
 
+# 报告生成（docx 模板填充 + 时序图渲染，§14）
+docxtpl
+matplotlib
+
 # core
 # chardet 钉在 5.x：7.x 的编译二进制（.pyd）在部分 Windows 环境加载失败（DLL 错误）
 chardet>=5,<6
@@ -19,8 +23,8 @@ python-multipart
 python-dotenv
 httpx
 
-# llm（可选，无 Key 环境不装也能跑通）
-# openai
+# llm（OpenAI Compatible 客户端；当前环境接本地 LM Studio，为必装依赖）
+openai
 
 # RAG 向量检索（语义通道；缺失时自动退回关键词打分）
 sqlite-vec

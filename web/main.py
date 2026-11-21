@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import os
+import shutil
 import time
 import uuid
 import warnings
@@ -14,7 +15,9 @@ import warnings
 warnings.filterwarnings("ignore", module="asammdf")
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query  # noqa: E402
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse  # noqa: E402
+from fastapi.responses import (  # noqa: E402
+    FileResponse, HTMLResponse, JSONResponse, StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 from typing import List, Optional  # noqa: E402
@@ -47,6 +50,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = os.path.join(ROOT, "configs")
 KB_DIR = os.path.join(ROOT, "knowledge")
 FRONTEND = os.path.join(ROOT, "web", "frontend")
+# 报告输出根目录：generate_report 工具写 <REPORT_DIR>/<chat_id>/report_*.docx，
+# 下载走 GET /api/reports/{cid}/{name}，删除会话时整棵子目录级联清掉
+REPORT_DIR = os.path.join(ROOT, "reports")
 # BLF 需要 DBC 解码，给前端做能力提示（缺库时不阻止启动，只在分析该文件时报错）
 try:
     import can as _can           # noqa: F401
@@ -123,7 +129,7 @@ RECORDS_DB = os.getenv("RECORDS_DB", os.path.join(ROOT, "data", "records.db"))
 RECORDS = RecordService(CFG, RECORDS_DB, blf_cfg=BLF_CFG)
 
 ENGINE = ChatEngine(CFG, LLM, KB, STORE, budget=BUDGET, blf_cfg=BLF_CFG, mcp=MCP_HUB,
-                    cond_index=COND_INDEX, records=RECORDS)
+                    cond_index=COND_INDEX, records=RECORDS, report_dir=REPORT_DIR)
 # 一轮 = 一个后台任务：与 HTTP 连接解耦，刷新/断网不再丢本轮回复
 RUNS = RunManager()
 
@@ -222,8 +228,6 @@ def api_sample_download(name: str):
     path = os.path.join(SAMPLE_DIRS.get(fmt, ""), base) if fmt in SAMPLE_DIRS else ""
     if not path or not os.path.isfile(path):
         raise HTTPException(404, "样例不存在")
-    from fastapi.responses import FileResponse
-
     return FileResponse(path, filename=base, media_type="application/octet-stream")
 
 
@@ -492,6 +496,8 @@ def api_delete_chat(cid: str):
     _chat_or_404(cid)
     TRACES.remove_chat(cid)
     STORE.delete_chat(cid)
+    # 该会话生成的报告文件一并清掉（upload 文件由 Store.delete_chat 级联删，报告不在其中）
+    shutil.rmtree(os.path.join(REPORT_DIR, cid), ignore_errors=True)
     latest = STORE.latest_chat()
     return {"deleted": cid, "next_chat": latest.chat_id if latest else None}
 
@@ -973,6 +979,22 @@ def api_record_timeseries(record_id: str, signal: Optional[str] = Query(None)):
         title=f"{row['vehicle']} · {row['file_name']}",
     )
     return payload
+
+
+# ---------------------------------------------------------------- 报告下载（§14）
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+@app.get("/api/reports/{cid}/{name}")
+def api_report_download(cid: str, name: str):
+    """下载某会话生成的分析报告。文件名由服务端生成（无用户可控成分），
+    basename 是纵深防御：路径穿越在这里结构上走不通。"""
+    _chat_or_404(cid)
+    base = os.path.basename(name)
+    path = os.path.join(REPORT_DIR, cid, base)
+    if not os.path.isfile(path) or not base.endswith(".docx"):
+        raise HTTPException(404, "报告不存在（可能已被删除或未生成）")
+    return FileResponse(path, filename=base, media_type=DOCX_MIME)
 
 
 # ---------------------------------------------------------------- debug

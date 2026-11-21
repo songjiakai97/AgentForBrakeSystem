@@ -387,6 +387,25 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
           </div>
         </div>
 
+        <!-- 报告：generate_report 工具的下载卡片；文件是服务端生成的 docx，a 标签直接下载 -->
+        <div v-else-if="m.kind==='report'" class="acard">
+          <div class="head"><b>📄 分析报告</b>
+            <span class="chip ok">{{m.data.analysis_count}} 份分析</span>
+            <span v-if="m.data.chart_count" class="chip info">{{m.data.chart_count}} 张时序图</span>
+            <span v-if="(m.data.warnings||[]).length" class="chip missing">{{m.data.warnings.length}} 条告警</span>
+          </div>
+          <div class="runrow" style="border-top:none;padding:6px 2px">
+            <div class="meta">
+              <a :href="m.data.download" class="btnMini" style="text-decoration:none;font-size:12px;padding:5px 12px"
+                 :download="m.data.file">⬇ 下载 {{m.data.file}}</a>
+              <span style="color:var(--muted);font-size:12px">{{m.content}}</span>
+            </div>
+            <div v-if="(m.data.warnings||[]).length" class="detail" style="margin-top:6px">
+              <div v-for="(w,wi) in m.data.warnings" :key="wi" style="color:var(--miss);font-size:12px">· {{w}}</div>
+            </div>
+          </div>
+        </div>
+
         <div v-else class="bubble">{{m.content}}</div>
       </div>
 

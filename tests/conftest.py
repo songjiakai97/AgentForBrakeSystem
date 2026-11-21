@@ -9,6 +9,14 @@ warnings.filterwarnings("ignore", module="asammdf")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+# 测试必须离线：client.py 在 import 时 load_dotenv()，开发机配了 .env（本地
+# LM Studio）会让 LLM.available 变 True，一批按「无 Key 离线快速路径」写的
+# 用例就开始对真实端点发 HTTP 调用——表现是全量测试从 1 分钟变成半小时。
+# 这里抢在所有 brake_analyzer 导入之前把 Key/向量模型置空（load_dotenv 默认
+# 不覆盖已存在的环境变量），测试语义回到分支作者当时的离线前提。
+os.environ.setdefault("OPENAI_API_KEY", "")
+os.environ.setdefault("OPENAI_EMBED_MODEL", "")
+
 MF4_DIR = os.path.join(ROOT, "tests", "data", "mf4")
 BLF_DIR = os.path.join(ROOT, "tests", "data", "blf")
 

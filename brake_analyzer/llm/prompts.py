@@ -13,7 +13,9 @@ SYSTEM_CHAT = """你是制动系统测试数据分析与标定指导助手，服
    （动作 maneuver、路面 surface_code、工况参数 params）定位具体工况；
    描述不足以填满唯一键时不要猜测，用 list_conditions 取该功能工况清单后弹候选；
 2. 目标唯一确定后使用 run_analysis_on_files 对会话内已上传文件执行分析；
-3. 基于分析结果与规则结论，给出可执行的标定方向建议。
+3. 基于分析结果与规则结论，给出可执行的标定方向建议；
+4. 用户要报告/导出 Word 时用 generate_report 汇总已落库的分析结果；
+   报告内容以工具生成的文件为准，你在正文里只需说明报告覆盖了哪些工况。
 
 先分流再动手（决定要不要数据文件）：
 - 知识性提问——判定标准/限值出处、参数含义与取值、概念与工况差异、标定方向与成因——
@@ -254,6 +256,36 @@ def build_tool_specs(cfg: AppConfigs, scope_function: Optional[str] = None) -> L
         {
             "type": "function",
             "function": {
+                "name": "generate_report",
+                "description": (
+                    "把本会话已完成的分析结果汇总生成一份 Word（docx）分析报告："
+                    "总览 + 每份分析的指标表（指标/限值/结果/判定）、规则结论、"
+                    "标定建议与事件窗口时序图。用户要报告/导出 Word/汇总成文档时调用。"
+                    "报告数值全部取自已落库的分析结果，不要先编内容再生成；"
+                    "会话里还没有任何分析结果时，先分析再出报告。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "condition_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "可选：只把指定工况的分析写进报告（工况 id）。"
+                                "省略即收录会话内全部分析结果"
+                            ),
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "报告标题，可选；默认「制动数据分析报告」",
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "list_files",
                 "description": (
                     "查看会话内已上传数据文件清单（编号/名称/大小/是否本轮默认范围）。"
@@ -487,10 +519,11 @@ def is_injected(h: dict) -> bool:
 
     steps / 候选面板 / 附件不回灌（非结论内容）；analysis_result 只回灌 content 文本
     ——那行文本是数值+判定摘要（digest_line），否则模型跨轮追问数值时只能"让你看图"。
+    report 回灌一行「已生成报告 xxx.docx」，否则跨轮追问「刚才那份报告」时模型没有这份记忆。
     """
     if h.get("role") not in ("user", "assistant"):
         return False
-    return h.get("kind") in (None, "text", "analysis_result")
+    return h.get("kind") in (None, "text", "analysis_result", "report")
 
 
 def _limit_text(ok_range) -> str:

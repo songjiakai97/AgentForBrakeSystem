@@ -16,6 +16,8 @@ import logging
 import os
 import re
 import threading
+import time
+import uuid
 from typing import Dict, List, Optional, Tuple
 
 from ..agent.tools import list_conditions, recommend_targets, resolve_condition
@@ -39,6 +41,7 @@ from ..llm.prompts import (
 from ..mcp_bridge import NO_HUB
 from ..pipeline import NoDataError, analyze_signals
 from ..records.query import read_payload, records_compare, records_query
+from ..report.generator import DEFAULT_TEMPLATE, collect_analyses, generate_report
 from ..schemas import AnalysisResult
 
 log = logging.getLogger(__name__)
@@ -47,10 +50,13 @@ log = logging.getLogger(__name__)
 class ChatEngine:
     def __init__(self, cfg: AppConfigs, llm: LlmClient, kb: KnowledgeBase, store,
                  budget: Optional[ContextBudget] = None, blf_cfg=None, mcp=None,
-                 cond_index=None, records=None):
+                 cond_index=None, records=None, report_dir: Optional[str] = None):
         self.cfg = cfg
         # 试验记录库服务（§17.5）；None → 记录工具明确回复「未启用」，不静默失败
         self.records = records
+        # 报告输出根目录（generate_report 工具写 reports/<chat_id>/…）；
+        # None 时 generate_report 按"报告功能未配置"报错，其余工具不受影响
+        self.report_dir = report_dir
         self.llm = llm
         self.kb = kb
         self.store = store
@@ -312,6 +318,11 @@ class ChatEngine:
             "read_record": lambda args: self._read_record_tool(chat, args, read_budget),
             "compare_records": lambda args: self._record_tool(
                 records_compare, args, chat.selected_function),
+            "generate_report": lambda args: self._report_tool(
+                chat,
+                condition_ids=args.get("condition_ids"),
+                title=args.get("title") or "",
+            ),
         }
         # 工具规格由配置生成（维度/工况 id 作 enum），已选定功能时进一步收窄取值域
         tool_specs = build_tool_specs(self.cfg, scope_function=chat.selected_function)
@@ -489,6 +500,18 @@ class ChatEngine:
                             yield self._mevent(self._step_on(chat, [(
                                 f"{name} 读取记录并展示曲线", detail[:300],
                                 "ok" if ok else "warn")]))
+                        elif name == "generate_report":
+                            # 返回 (payload, report_msg)：下载卡片必须作为 message 事件
+                            # 推给前端（只落库不发事件的话，刷新前界面看不到）；
+                            # payload 单独回灌 LLM——docx 全文不进上下文
+                            payload, report_msg = result if isinstance(result, tuple) \
+                                else (result or {}, None)
+                            if report_msg is not None:
+                                state["claimed"] = True
+                                yield self._mevent(report_msg)
+                            label, detail, status = self._tool_step_label(name, payload)
+                            yield self._mevent(self._step_on(
+                                chat, [{"label": label, "detail": detail, "status": status}]))
                         else:
                             payload = result
                             res = result if isinstance(result, dict) else {}
@@ -773,6 +796,13 @@ class ChatEngine:
             groups = res.get("groups", []) or []
             return (f"{name} → {res.get('record_count', 0)} 条记录",
                     f"{len(groups)} 个工况", status)
+        if name == "generate_report":
+            if res.get("ok") is False:      # 未配置/无结果/生成失败：把 note 摊开
+                return (f"{name} 失败", str(res.get("note", ""))[:160], "warn")
+            warn = len(res.get("warnings") or [])
+            return (f"{name} → 报告已生成",
+                    f"{res.get('analyses')} 份分析 · 图 {res.get('charts')} 张"
+                    + (f" · 告警 {warn}" if warn else ""), status)
         return (f"{name} 完成", "", status)
 
     @staticmethod
@@ -1034,6 +1064,69 @@ class ChatEngine:
                  *(getattr(loader, "load_warnings", None) or [])]
         note = "；".join(facts)
         return {"ok": True, "transient": True, "files": rows, **({"note": note} if note else {})}
+
+    def _report_tool(self, chat, condition_ids=None, title: str = "") -> Tuple[dict, object]:
+        """generate_report 工具：会话内已落库的分析结果 → docx 报告。
+
+        返回 (payload, report_msg)：payload 回灌 LLM（只给文件名/份数/告警，不带
+        报告全文——数值模型已从分析结果拿过）；report_msg 是 kind=report 的下载
+        卡片消息，由调用方作为 message 事件推给前端。
+
+        失败一律转成 ok=False 的 payload 说明，不让异常炸成整轮 failed → 回退离线：
+        模型拿着可读的错误说明还能向用户解释，而不是突然改说离线那套话。
+        """
+        if not self.report_dir:
+            return ({"ok": False, "note": "报告功能未配置（报告输出目录缺失），无法生成"}, None)
+        analyses = collect_analyses(chat, condition_ids)
+        if not analyses:
+            note = ("会话里还没有已完成的分析结果：先用 run_analysis_on_files 分析，再生成报告"
+                    + (f"（也没有找到工况 {list(condition_ids)} 的分析）" if condition_ids else ""))
+            return ({"ok": False, "note": note}, None)
+
+        def signals_of(file_id: str):
+            """出图取信号：缓存被 LRU 淘汰时按原路径重载（与 _analyze 同一套路径）。"""
+            entry = next((f for f in chat.files if f.file_id == file_id), None)
+            if entry is None:
+                return None          # 文件已被移出会话：图跳过，进告警
+            sess = self.store.session(file_id)
+            if sess.signals is None:
+                self._progress(chat, f"加载信号：{entry.name}",
+                               "报告出图需要重新加载已淘汰的信号缓存，可能较慢", "run")
+                sess.signals = self._loader_for(entry.path).load(entry.path)
+                self.store.note_signals_loaded(file_id)
+            return sess.signals
+
+        fname = (f"report_{time.strftime('%Y%m%d_%H%M%S')}_"
+                 + uuid.uuid4().hex[:4] + ".docx")
+        try:
+            result = generate_report(
+                analyses, os.path.join(self.report_dir, chat.chat_id, fname),
+                self.cfg,
+                template_path=DEFAULT_TEMPLATE,
+                signals_of=signals_of,
+                title=title or "制动数据分析报告",
+                chat_title=chat.title,
+                progress=lambda label, detail="": self._progress(chat, label, detail, "run"),
+            )
+        except Exception as e:
+            log.exception("报告生成失败 %s", chat.chat_id)
+            return ({"ok": False,
+                     "note": f"报告生成失败 {type(e).__name__}: {e}；如实告知用户"}, None)
+
+        download = f"/api/reports/{chat.chat_id}/{fname}"
+        msg = self._msg(
+            chat, "report",
+            f"已生成分析报告 {result['file']}：{result['analyses']} 份分析"
+            + (f" · {result['charts']} 张时序图" if result["charts"] else "")
+            + (f" · {len(result['warnings'])} 条告警" if result["warnings"] else ""),
+            data={"file": result["file"], "download": download,
+                  "analysis_count": result["analyses"], "chart_count": result["charts"],
+                  "warnings": result["warnings"], "ts": time.time()})
+        payload = {"ok": True, "file": result["file"], "download": download,
+                   "analyses": result["analyses"], "charts": result["charts"]}
+        if result["warnings"]:
+            payload["warnings"] = result["warnings"]
+        return (payload, msg)
 
     @staticmethod
     def _pick_files(chat, file_indexes: Optional[List[int]]) -> List:
