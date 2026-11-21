@@ -171,7 +171,10 @@ brake-agent/
 │   ├── agent/
 │   │   ├── engine.py
 │   │   ├── tools.py
+│   │   ├── registry.py         # 工具注册表：规格/执行器/标签/命中一处（§18.3）
 │   │   └── cond_index.py       # 工况语义索引（§13.2 语义召回）
+│   ├── records/                # 试验记录库（§17）：store / service / query / naming
+│   ├── report/                 # 分析报告（§18）：generator + charts + 入库模板 docx
 │   ├── mcp_bridge/             # 外部 MCP 客户端（§6.11，可选能力）
 │   │   ├── config.py           #   configs/mcp.yaml 加载期校验
 │   │   ├── registry.py         #   命名 / schema / 结果压平（纯函数）
@@ -180,13 +183,19 @@ brake-agent/
 │   └── schemas.py
 ├── scripts/
 │   ├── generate_demo_mf4.py   # MF4 demo：合成物理剖面
-│   └── generate_demo_blf.py    # BLF demo：cantools 建 DBC + python-can 写 BLF（复用同一剖面）
+│   ├── generate_demo_blf.py    # BLF demo：cantools 建 DBC + python-can 写 BLF（复用同一剖面）
+│   ├── import_records.py      # 试验记录导入（§17）
+│   └── make_report_template.py # 程序化产出报告模板 docx（§18.2）
 ├── web/
-│   ├── main.py
+│   ├── main.py                # app 组装 + 生命周期事件（端点在 api/ 域模块）
+│   ├── state.py               # 单例装配与共享 helper
+│   ├── api/                   # meta / kb / chats / records / debug 五个域 router
 │   ├── runs.py                 # 一轮 = 后台任务 + 事件缓冲 + 协作式停止（§6.9）
-│   ├── store.py
+│   ├── store.py               # 会话内存模型 + JSONL 追加日志持久化（§7.1b）
 │   └── frontend/
 │       ├── index.html
+│       ├── records.html
+│       ├── chart.js
 │       └── debug.html
 └── tests/
     ├── data/                   # mf4/ 与 blf/ 均可再生，不入库
@@ -503,8 +512,7 @@ LLM 可选/降级。`AnalysisResult` 一次生成，Web 各视图共用。
 
 所有对话请求都经由 `agent/` 编排。
 
-工具集（内置七个，规格全部由配置生成，见 §13；外部 MCP 工具挂载后并列进同一份规格表，
-见 §6.11）：
+工具集（内置十一个：§6.9 本节七个 + §17 记录库三个 + §18 报告一个。规格、执行器、步骤标签、命中明细、结果分发全部收敛在 agent/registry.py 的 ToolSpec 条目里，加工具只改一处；外部 MCP 工具挂载后并列进同一份规格表，见 §6.11）：
 
 - `resolve_condition(function_key?, maneuver?, surface_code?, params?, query, evidence)`：
   按 §2.2 唯一键**结构化**定位工况。命中唯一返回 `hop=resolved`（`via=exact_key`）；
@@ -571,8 +579,9 @@ LLM 可选/降级。`AnalysisResult` 一次生成，Web 各视图共用。
   | ② **每个流式数据块** | `LlmClient.chat_stream` 的 chunk 循环 | 工具调用的参数是一个字符一个字符流回来的，**不产生 delta**；外层"每个 delta 自检"在这段完全没有检查点，于是要等整段工具参数（甚至整轮回答）跑完才停手 |
   | ③ 每个工具执行前 | `_run_llm_stream` 的 `for tc in reply.tool_calls` | 一次 `run_analysis_on_files` 是整轮最慢的一段（几十秒），中途没有 LLM 块可检查；命中时回执写明「{name} 未执行」 |
   | ④ `_analyze` 每个文件前 | 工具阶段内部 | 与 ③ 同理，粒度再细一档 |
-  | ⑤ 两个非流式子请求前 | `context.py` 摘要回调、`_maybe_suggest` | 它们不在流式循环里，拿不到 `stop_event` 参数——用 `threading.local`（`self._tls.stop_event`，由 `_run_stream` 进出时设置/清空）取，命中则摘要返回空串（退化成抽取式）、标定建议标 `degraded` 直接返回 |
+  | ⑤ 两个非流式子请求前 | `context.py` 摘要回调、`_merged_suggest` | 它们不在流式循环里，拿不到 `stop_event` 参数——用 `threading.local`（`self._tls.stop_event`，由 `_run_stream` 进出时设置/清空）取，命中则摘要返回空串（退化成抽取式）、标定建议标 `degraded` 直接返回 |
   | ⑥ 每次外部 MCP 调用前 | `McpHub.call`（把 `stop_event` 一路传进去） | 外部工具是一次**同步阻塞**的第三方调用，中间没有 LLM 块也没有文件循环，是 ③ 之后新出现的最长一段无检查点路径；命中时直接返回 `stopped` 载荷、**不发给 server**（§6.11） |
+| ⑦ 报告出图循环每样本前 | `generate_report` 的 `stop_check`（§18.2） | 出图一张一张慢渲染，工具内部自检命中即收尾（前序块保留、告警注明），不把几十张图硬画完 |
 
   另有两条兜底：**socket 挂住时没有任何检查点**（阻塞在读上，Python 不在我们手里），所以
   HTTP 必须有界——流式 `STREAM_READ_TIMEOUT_SEC=60`（按相邻两块的间隔计，不限总时长）、
@@ -593,7 +602,9 @@ LLM 可选/降级。`AnalysisResult` 一次生成，Web 各视图共用。
   `stop_event` 全程按参数传递、不存 `ChatEngine` 实例属性——`ENGINE` 是全局单例，
   多个会话同时在跑线程；`_tls` 只在同一线程内有效，且 `_run_stream` 退出时必须复位，
   否则线程池复用会把上一轮的标记带给下一轮。
-- 真 tool-calling：多轮循环，最多 6 轮。
+- 真 tool-calling：多轮循环，最多 10 轮（`AGENT_MAX_TOOL_ROUNDS` 可调）。耗尽不是失败：
+  追加一轮「禁止工具」的软收尾请求，让模型基于已有信息直接给结论（§18.3）——
+  不兜底离线（离线只会做工况推荐，答非所问；且离线模式仅为自动测试保留）。
 - 工具 `hop` 的落库规则：`function`/`condition`/`profile` → 落 `target_options` 面板；
   `catalog`（工况清单）与 `resolved` 只作为 `tool` 应答回灌模型，不弹面板；`error` 交还
   模型组织措辞。面板只出现在"信息不足"时，且候选层级由工具保证（`function` 的候选一律是
@@ -889,10 +900,11 @@ MATLAB 侧还要注意：`--matlab-root` / `--initialize-matlab-on-startup` /
 
 #### 与内置工具的关系
 
-外部工具与七个内置工具（resolve/list/recommend/run_analysis/search_manual/get_param/list_files）
-**并列在同一份 `tool_specs` 里**（`engine.py`），模型看到的是
+外部工具与十一个内置工具（resolve/list/recommend/run_analysis/search_manual/get_param/
+list_files/query_records/read_record/compare_records/generate_report）
+**并列在同一份 `tool_specs` 里**（agent/registry.py），模型看到的是
 一次 list，不需要知道哪些来自外部——分开列会让它以为有两套调用规则。执行时
-`exec_tools` 查不到且 `mcp.is_external(name)` 才走 hub，查不到又不是外部的仍是
+注册表 `TOOLS` 查不到且 `mcp.is_external(name)` 才走 hub，查不到又不是外部的仍是
 「未知工具」。挂载时向 `steps` 落一条「外部工具已挂载：N 个」并把名字列进 detail，
 前端折叠区可见（§8.3）；每次外部调用落一条 `名字 → 外部 MCP`（失败时带「（失败）」，
 `ok`/`warn` 两色）。没配 `mcp.yaml` 时 `NO_HUB` 的规格为空，编排路径与接入前逐字节一致
@@ -919,7 +931,10 @@ MATLAB 侧还要注意：`--matlab-root` / `--initialize-matlab-on-startup` /
   实现走 hash 路由（`/#/chat/{cid}`），服务端静态托管无需 history fallback。
 - `DELETE /api/chats/{cid}` 级联删除该 Chat 的全部内存对象：messages、files、
   每文件的 Session（含信号缓存与分析结果缓存）、关联 traces。
-- 仅内存存储，服务重启即全部丢失，不做持久化。
+- JSONL 追加日志持久化（§18.3）：消息/文件登记/选择/面板消费/步骤逐操作追加到
+  `SESSION_DIR`（默认 `data/sessions/`，不入库），启动时逐行重放恢复；崩溃截断的
+  尾行跳过；删除会话级联删日志。信号缓存与 analyses 活对象**不**持久化——重启后
+  卡片文字仍在，图表/反馈需重跑。`Store()` 不带 persist_dir 即纯内存（测试默认）。
 
 消息 kind：
 
@@ -967,6 +982,7 @@ MATLAB 侧还要注意：`--matlab-root` / `--initialize-matlab-on-startup` /
 | GET | `/records` | 记录库页面 |
 | GET | `/api/debug/traces` | 调试 trace 列表 |
 | GET | `/api/debug/traces/{tid}` | 单条 trace 详情 |
+| GET | `/api/reports/{cid}/{name}` | 下载某会话生成的分析报告 docx（§18.2） |
 | GET | `/debug` | 调试页 |
 
 `POST /api/chats/{cid}/select` 请求体：
@@ -1904,7 +1920,9 @@ learnings: <text>
 ## 12. 调试观测
 
 - 一次 LLM API 请求 = 一条 trace。
-- Trace 记录：`request`、`reply`、`tool_calls`、实际执行工具摘要。
+- Trace 记录：`request`、`reply`、`tool_calls`、实际执行工具摘要；`usage`（每轮
+  in/out tokens 与耗时，流式经 `include_usage`，`LLM_STREAM_USAGE=0` 可关）与
+  `bad_args`（参数 JSON 解析失败的调用数）提到顶层，/debug 行内展示。
 - 上下文压缩的摘要子请求同样落 trace，`round=0`、`user_text=context_summary`（§6.10），
   据此可区分主对话请求与摘要请求。
 - 用户中途停止的一轮也落 trace，`error="stopped"`（区别于 `llm_stream_error: ...`）——
