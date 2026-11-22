@@ -88,6 +88,7 @@ def records_query(
     keyword: Optional[str] = None,
     recorded_from: Optional[str] = None,
     recorded_to: Optional[str] = None,
+    sort: str = "default",
     limit: int = 20,
 ) -> dict:
     """按编号/关键词/工况/车型查记录 + 指标汇总；未命中时给出库里有哪些可查。
@@ -114,6 +115,7 @@ def records_query(
                                    keyword_condition_ids=kw_conds,
                                    recorded_from=recorded_from,
                                    recorded_to=recorded_to,
+                                   order=("time" if sort == "time" else "default"),
                                    limit=min(max(1, int(limit or 20)), 50))
         items = [_record_view(conn, cfg, r) for r in rows]
         result: Dict[str, Any] = {
@@ -177,16 +179,18 @@ def _group_stats(group_sample: List[dict], cond) -> dict:
     取最大者，区间型不标最优（没有自然方向）。判定状态随每行 metrics 已带，
     这里只补跨记录的横向汇总——「哪个车最好」从模型自己算变成一次可引用。
     """
-    # 收集每指标的跨记录值
+    # 收集每指标的跨记录值：按记录建键（趋势场景同一车型会有多条记录，
+    # 按车型建键会被折叠——最优者应定位到「哪一次试验」）
     vals: Dict[str, List[float]] = {}
-    by_vehicle: Dict[str, Dict[str, str]] = {}
+    by_record: Dict[str, Dict[str, dict]] = {}
     for r in group_sample:
         for key, item in (r.get("metrics") or {}).items():
             v = item.get("value")
             if v is None:
                 continue
             vals.setdefault(key, []).append(v)
-            by_vehicle.setdefault(key, {})[r.get("vehicle") or r["record_id"]] = v
+            by_record.setdefault(key, {})[r["record_id"]] = {
+                "vehicle": r.get("vehicle") or "", "value": v}
     # 指标名（展示用）与 ok_range（方向启发式）
     names = {k: it.get("name", k) for r in group_sample
              for k, it in (r.get("metrics") or {}).items()}
@@ -207,11 +211,12 @@ def _group_stats(group_sample: List[dict], cond) -> dict:
                 elif lo is not None and hi is None:
                     direction = "max"
                 break
-        if direction in ("min", "max") and len(by_vehicle[key]) > 1:
+        if direction in ("min", "max") and len(by_record[key]) > 1:
             pick = min if direction == "min" else max
-            best_v = pick(by_vehicle[key].values())
-            best = [veh for veh, x in by_vehicle[key].items() if x == best_v]
-            entry["best_vehicle"] = best[0]
+            best_v = pick(x["value"] for x in by_record[key].values())
+            best_rid = next(rid for rid, x in by_record[key].items() if x["value"] == best_v)
+            entry["best_vehicle"] = by_record[key][best_rid]["vehicle"] or best_rid
+            entry["best_record_id"] = best_rid
             entry["direction"] = ("越小越好" if direction == "min" else "越大越好")
         stats[key] = entry
     return {"stats": stats} if stats else {}
@@ -288,6 +293,8 @@ def records_compare(
                     "recorded_at": r["recorded_at"],
                     "metrics": summary,
                 })
+            sample.sort(key=lambda r: (r["recorded_at"] is None,
+                                       r["recorded_at"] or ""))
             if sample:
                 groups.append({
                     "condition_id": cond.id,

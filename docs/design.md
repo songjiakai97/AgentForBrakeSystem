@@ -2543,8 +2543,9 @@ surface_code + function + 功能名` 做归一化包含比对（`_norm_text` 去
 - **前置体检**：信号覆盖（缺哪些通道、影响哪些指标）与数据质量（采样间隙/
   量程异常）在分析前一次性报告；
 - **报告**：出图策略 `all/abnormal_only/none`（报告工具参数）；
-- **记录库**：compare 每组附统计摘要（min/max/mean/最优车型，方向按 ok_range
-  启发式）、记录清单支持试验日期范围过滤（recorded_at ISO 文本序）；
+- **记录库**：compare 每组附统计摘要（min/max/mean/最优试验，方向按 ok_range
+  启发式，同一车型多条记录也能定位到「哪一次」）、记录清单支持试验日期范围
+  过滤与按日期排序（sort=time 趋势视图，recorded_at ISO 文本序）；
 - **金标准回归**：demo 文件 × 标准工况的分析指标值固化（数值级护栏，物理计算
   漂移即失败，tests/test_golden_analysis.py）。
 

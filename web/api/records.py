@@ -82,6 +82,7 @@ def api_records(file_id: Optional[str] = Query(None),
                 keyword: Optional[str] = Query(None),
                 recorded_from: Optional[str] = Query(None),
                 recorded_to: Optional[str] = Query(None),
+                sort: str = Query("default"),
                 limit: int = Query(200, ge=1, le=500)):
     """记录清单：只读元数据，不触发解析。编号/车型/关键词按「包含」匹配。
 
@@ -97,6 +98,7 @@ def api_records(file_id: Optional[str] = Query(None),
                                                        if keyword else None),
                                 recorded_from=recorded_from,
                                 recorded_to=recorded_to,
+                                order=("time" if sort == "time" else "default"),
                                 limit=limit)
     for r in rows:
         cond = st.CFG.condition(r["condition_id"])

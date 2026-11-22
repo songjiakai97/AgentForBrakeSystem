@@ -377,3 +377,43 @@ def test_engine_loop_displays_record_card(cfg, db, tmp_path):
     # 卡片只带数值与窗口，原始序列不进卡片也不进上下文
     assert "chart_option" not in card.data
     assert not any("series" in (m.meta or {}) for m in chat.messages)
+
+
+def test_query_and_compare_trend_order_by_time(tmp_path, cfg):
+    """时间趋势：sort=time 时同车同工况按试验日期升序；compare 组内同样时间序。"""
+    imp = _load_script()
+    root = tmp_path / "data"
+    for rel, data in [
+        ("carA/4-ABS/4.1.1_20260901.blf", b"a"),   # 故意乱序：文件名序 ≠ 日期序
+        ("carA/4-ABS/4.1.1_20260715.blf", b"b"),
+        ("carA/4-ABS/4.1.1_20260801.blf", b"c"),
+    ]:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    db_path = str(tmp_path / "records.db")
+    imp.run_import(str(root), db_path, cfg)
+    svc = RecordService(cfg, db_path)
+    conn = store.connect(db_path)
+    rows = {r["file_name"]: r for r in store.query_records(conn)}
+    fp = store.config_fingerprint(CONFIG_DIR)
+    distances = {"4.1.1_20260715.blf": 44.0, "4.1.1_20260801.blf": 41.5,
+                 "4.1.1_20260901.blf": 39.2}
+    for fname, dist in distances.items():
+        store.save_analysis(conn, rows[fname]["record_id"],
+                            _analysis("abs_full_brake_dry_asphalt_100kph", dist), fp)
+    conn.close()
+
+    # 对话查询：sort=time 按日期升序（无日期的排最后，这里都有日期）
+    res = records_query(svc, cfg, file_id="4.1.1", sort="time")
+    dates = [r["recorded_at"] for r in res["records"]]
+    assert dates == sorted(dates), f"趋势序应为日期升序：{dates}"
+
+    # compare：同工况组内按试验日期排序（趋势对比的读取顺序）+ 统计摘要
+    cmp_res = records_compare(svc, cfg, condition_id="abs_full_brake_dry_asphalt_100kph")
+    sample_dates = [r["recorded_at"] for r in cmp_res["groups"][0]["records"]]
+    assert sample_dates == sorted(sample_dates)
+    stats = cmp_res["groups"][0]["stats"]["brake_distance"]
+    assert stats["min"] == 39.2 and stats["max"] == 44.0
+    assert stats["direction"] == "越小越好" and stats["best_vehicle"] == "carA"
+    assert stats["best_record_id"].startswith("rec_")

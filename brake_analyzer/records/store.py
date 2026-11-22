@@ -442,6 +442,7 @@ def query_records(
     keyword_condition_ids: Optional[List[str]] = None,
     recorded_from: Optional[str] = None,
     recorded_to: Optional[str] = None,
+    order: str = "default",
     limit: int = 200,
 ) -> List[sqlite3.Row]:
     """按编号/工况/车型过滤；功能维度的工况集合由调用方从配置算好传进来。
@@ -491,7 +492,12 @@ def query_records(
     sql = "SELECT * FROM record"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY vehicle, condition_id, file_name LIMIT ?"
+    # time 序：同车同工况按试验日期排（趋势视图），没有日期的排最后
+    if order == "time":
+        sql += " ORDER BY vehicle, condition_id, recorded_at IS NULL, recorded_at, file_name"
+    else:
+        sql += " ORDER BY vehicle, condition_id, file_name"
+    sql += " LIMIT ?"
     args.append(limit)
     return conn.execute(sql, args).fetchall()
 

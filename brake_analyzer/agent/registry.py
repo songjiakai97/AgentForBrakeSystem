@@ -286,6 +286,11 @@ def _spec_query_records(c: SpecCtx) -> dict:
                         "type": "string",
                         "description": "试验日期上限（ISO，如 2026-04-30）",
                     },
+                    "sort": {
+                        "type": "string",
+                        "enum": ["default", "time"],
+                        "description": "time=同车同工况按试验日期排序（看某车的历次趋势时用）",
+                    },
                     "limit": {"type": "integer", "description": "最多返回条数，1~50"},
                 },
             },
