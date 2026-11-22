@@ -207,3 +207,17 @@ def test_health_check_cache(monkeypatch):
     first_ts = llm._reach_until
     assert llm.check_reachable() is False      # 走缓存，不再发请求
     assert llm._reach_until == first_ts
+
+
+def test_store_persist_roundtrip_file_id_hint(tmp_path):
+    """编号识别字段随 JSONL 日志持久化，重启后恢复。"""
+    pd = str(tmp_path / "sessions")
+    st = Store(upload_dir=str(tmp_path / "up"), persist_dir=pd)
+    chat = st.create_chat()
+    st.add_file(chat, "4.1.1_20260801.mf4", b"x" * 8, batch_id="b1",
+                file_id_no="4.1.1", cond_hint="abs_full_brake_dry_asphalt_100kph")
+    st2 = Store(upload_dir=str(tmp_path / "up2"), persist_dir=pd)
+    back = st2.get_chat(chat.chat_id)
+    entry = back.files[0]
+    assert entry.file_id_no == "4.1.1"
+    assert entry.cond_hint == "abs_full_brake_dry_asphalt_100kph"

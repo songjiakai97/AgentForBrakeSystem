@@ -25,6 +25,11 @@ class FileEntry:
     # source=upload：文件已拷贝进 upload_dir，删除会话时一并删除；
     # source=local：只引用本机原路径（零拷贝），删除会话时绝不能动原文件
     source: str = "upload"
+    # 文件名编号识别（§18.6）：name 以试验编号开头（如 4.1.1_…）时，上传管线把
+    # 识别结果写在这里（编号 + 对应工况 id），供 attachment 消息、list_files 与
+    # 分析弱校验使用。识别不出来（文件名无编号）留空，不猜。
+    file_id_no: str = ""
+    cond_hint: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -34,6 +39,8 @@ class FileEntry:
             "uploaded_at": self.uploaded_at,
             "batch_id": self.batch_id,
             "source": self.source,
+            "file_id_no": self.file_id_no,
+            "cond_hint": self.cond_hint,
         }
 
 
@@ -195,7 +202,9 @@ class Store:
                               size=d.get("size", 0),
                               uploaded_at=d.get("uploaded_at") or time.time(),
                               batch_id=d.get("batch_id", ""),
-                              source=d.get("source", "upload"))
+                              source=d.get("source", "upload"),
+                              file_id_no=d.get("file_id_no", ""),
+                              cond_hint=d.get("cond_hint", ""))
             chat.files.append(entry)
             self.sessions.setdefault(entry.file_id, Session(file_id=entry.file_id))
         elif kind == "rmfile":
@@ -308,9 +317,12 @@ class Store:
     # ---------------- file / session ----------------
     def add_file(self, chat: Chat, name: str, content: bytes,
                  batch_id: str = "", source: str = "upload",
-                 local_path: str = "") -> FileEntry:
+                 local_path: str = "", file_id_no: str = "",
+                 cond_hint: str = "") -> FileEntry:
         """登记数据文件。source=upload 时 content 落盘到 upload_dir；
-        source=local 时零拷贝，直接引用本机原路径（local_path）。"""
+        source=local 时零拷贝，直接引用本机原路径（local_path）。
+        file_id_no / cond_hint：文件名编号识别结果（上传管线由 cfg.match_file_id
+        算好传入），随 JSONL 日志持久化。"""
         with self._lock:
             fid = "fx_" + uuid.uuid4().hex[:8]
             safe = f"{fid}_{os.path.basename(name)}"
@@ -321,7 +333,8 @@ class Store:
                 with open(path, "wb") as f:
                     f.write(content)
             entry = FileEntry(file_id=fid, name=os.path.basename(name), path=path,
-                              size=len(content), batch_id=batch_id, source=source)
+                              size=len(content), batch_id=batch_id, source=source,
+                              file_id_no=file_id_no, cond_hint=cond_hint)
             chat.files.append(entry)
             self.sessions[fid] = Session(file_id=fid)
             chat.touch()

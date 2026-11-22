@@ -1115,6 +1115,13 @@ class ChatEngine:
             r = {"index": i + 1, "name": f.name,
                  "size_mb": round(f.size / 1048576, 2),
                  "latest_batch": f.file_id in latest}
+            # 文件名编号识别（§18.6）：上传时由 cfg.match_file_id 写入；
+            # 有编号就带上疑似工况——模型据此判断该用哪个工况分析
+            if getattr(f, "file_id_no", ""):
+                r["file_id_no"] = f.file_id_no
+                cond = self.cfg.condition(getattr(f, "cond_hint", ""))
+                if cond is not None:
+                    r["suspected_condition"] = cond.id
             if channels is not None:
                 r["channels"] = channels
             return r

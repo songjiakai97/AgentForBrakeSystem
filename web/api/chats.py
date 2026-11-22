@@ -74,10 +74,16 @@ async def api_upload(cid: str, files: List[UploadFile] = File(...)):
         content = await uf.read()
         if len(content) > MAX_UPLOAD_BYTES:
             raise HTTPException(400, f"文件超过 {MAX_UPLOAD_BYTES // 1048576}MB 上限: {name}")
-        entry = st.STORE.add_file(chat, name, content, batch_id=batch_id)
+        fid_no = st.CFG.match_file_id(name) or ""
+        entry = st.STORE.add_file(chat, name, content, batch_id=batch_id,
+                                  file_id_no=fid_no,
+                                  cond_hint=(st.CFG.condition_by_file_id(fid_no).id
+                                             if fid_no else ""))
         out.append(entry.to_dict())
+        hint = (f" · 疑似工况 {fid_no} {st.CFG.condition_by_file_id(fid_no).name}"
+                if fid_no else "")
         st.STORE.add_message(chat, "assistant", "attachment",
-                          content=f"已接收文件 {name}（{os.path.splitext(name)[1].lstrip('.')}）",
+                          content=f"已接收文件 {name}（{os.path.splitext(name)[1].lstrip('.')}）{hint}",
                           data=entry.to_dict())
     return {"files": out}
 
@@ -102,10 +108,16 @@ def api_upload_by_path(cid: str, body: LocalFileIn):
     if size > MAX_UPLOAD_BYTES:
         raise HTTPException(400, f"文件超过 {MAX_UPLOAD_BYTES // 1048576}MB 上限: {name}")
     batch_id = "fb_" + uuid.uuid4().hex[:8]
+    fid_no = st.CFG.match_file_id(name) or ""
     entry = st.STORE.add_file(chat, name, b"", batch_id=batch_id,
-                           source="local", local_path=raw)
+                           source="local", local_path=raw,
+                           file_id_no=fid_no,
+                           cond_hint=(st.CFG.condition_by_file_id(fid_no).id
+                                      if fid_no else ""))
+    hint = (f" · 疑似工况 {fid_no} {st.CFG.condition_by_file_id(fid_no).name}"
+            if fid_no else "")
     st.STORE.add_message(chat, "assistant", "attachment",
-                      content=f"已引用本地文件 {name}（原路径，未拷贝）",
+                      content=f"已引用本地文件 {name}（原路径，未拷贝）{hint}",
                       data=entry.to_dict())
     return {"files": [entry.to_dict()]}
 

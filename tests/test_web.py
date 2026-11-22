@@ -617,3 +617,26 @@ def test_wait_notice_is_revocable():
         assert "_stopSilenceWatch(false)" in block(head), f"{head} 必须停表并撤提示"
     # 订阅到的 run 已结束（刷新/重连）同样不能再数静默
     assert re.search(r"data\.status!=='running'\)\{[^}]*_stopSilenceWatch\(false\)", src)
+
+
+def test_upload_filename_condition_hint(client):
+    """文件名以试验编号开头时：上传管线识别并写入登记与 attachment 提示（§18.6）。"""
+    chat = client.post("/api/chats").json()
+    cid = chat["chat_id"]
+    files = [
+        ("files", ("4.1.1_20260801.mf4", b"x" * 16, "application/octet-stream")),
+        ("files", ("no_id_here.mf4", b"y" * 16, "application/octet-stream")),
+    ]
+    r = client.post(f"/api/chats/{cid}/files", files=files)
+    assert r.status_code == 200, r.text
+    out = r.json()["files"]
+    assert out[0]["file_id_no"] == "4.1.1"
+    assert out[0]["cond_hint"] == "abs_full_brake_dry_asphalt_100kph"
+    assert out[1]["file_id_no"] == "" and out[1]["cond_hint"] == ""
+    # attachment 消息带「疑似工况」提示，供模型与用户直接看到
+    msgs = [m for m in client.get(f"/api/chats/{cid}").json()["messages"]
+            if m["kind"] == "attachment"]
+    hints = [m["content"] for m in msgs if "疑似工况" in m["content"]]
+    assert hints and "4.1.1" in hints[0] and "ABS" in hints[0]
+    assert not [m["content"] for m in msgs if "no_id_here" in m["content"]
+                and "疑似工况" in m["content"]]
