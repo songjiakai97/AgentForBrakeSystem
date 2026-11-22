@@ -33,18 +33,30 @@ def test_normalize_accepts_dashes():
     assert idx.condition_id("4-1-3-1") == "c"
 
 
-def test_prefix_match_allows_suffix_but_not_digits():
+def test_token_match_with_prefixes_and_guards():
+    """token 匹配口径（2026-11-22 定版）：车型前缀/日期前缀放行，长链后缀拒绝。"""
     idx = FileIdIndex({"4.1.1": "a", "4.1.10": "b"})
     assert idx.match("4.1.1_20260801_01.blf") == "4.1.1"
-    assert idx.match("4-1-1-01.blf") == "4.1.1"
+    assert idx.match("4-1-1-01.blf") == "4.1.1"          # int 归一：01 ≡ 1
     assert idx.match("4.1.1.blf") == "4.1.1"
+    # 车型前缀（非纯数字）放行——用户定版支持 SA3-4-1-1 这类命名
+    assert idx.match("SA3-4-1-1.blf") == "4.1.1"
+    assert idx.match("carA 4.1.1.blf") == "4.1.1"
+    # 8 位试验日期作前缀也放行
+    assert idx.match("20260801-4-1-1.blf") == "4.1.1"
     # 4.1.10 不能被 4.1.1 吃掉，反之亦然
     assert idx.match("4.1.10_x.blf") == "4.1.10"
     assert idx.match("4.1.10.blf") == "4.1.10"
-    # 不是开头的编号、或不认识的编号 → 不匹配
-    assert idx.match("pre_4.1.1.blf") is None
+    # 前邻是纯数字（非日期）→ 更长数字链的后缀，拒绝
+    assert idx.match("3-4-1-1.blf") is None
     assert idx.match("4.1.2.blf") is None
     assert idx.match("foo.blf") is None
+
+
+def test_token_match_prefix_fallback_to_parent():
+    """子编号未配置时回落父级（前缀兜底，与历史行为一致）。"""
+    idx = FileIdIndex({"4.1": "parent"})
+    assert idx.match("SA3-4-1-1.blf") == "4.1"
 
 
 def test_longest_match_wins_for_nested_ids():
