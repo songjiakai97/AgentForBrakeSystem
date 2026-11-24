@@ -1310,11 +1310,15 @@ class ChatEngine:
 
         fname = (f"report_{time.strftime('%Y%m%d_%H%M%S')}_"
                  + uuid.uuid4().hex[:4] + ".docx")
+        # 自定义模板：REPORT_TEMPLATE 指向自己的 docx（占位契约见
+        # scripts/make_report_template.py 文档串与 design.md §18.4）
+        template_path = (os.getenv("REPORT_TEMPLATE", "").strip()
+                         or DEFAULT_TEMPLATE)
         try:
             result = generate_report(
                 analyses, os.path.join(self.report_dir, chat.chat_id, fname),
                 self.cfg,
-                template_path=DEFAULT_TEMPLATE,
+                template_path=template_path,
                 signals_of=signals_of,
                 title=title or "制动数据分析报告",
                 chat_title=chat.title,

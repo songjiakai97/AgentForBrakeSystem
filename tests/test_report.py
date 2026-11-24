@@ -408,6 +408,37 @@ def test_report_tool_embeds_charts(tmp_path):
     assert not payload.get("warnings")
 
 
+def test_report_tool_honors_report_template_env(tmp_path, monkeypatch):
+    """REPORT_TEMPLATE 指向自定义模板时，输出用自定义版式（静态段落原样保留）。"""
+    custom = str(tmp_path / "custom.docx")
+    from brake_analyzer.report.generator import DEFAULT_TEMPLATE
+    doc = Document(DEFAULT_TEMPLATE)
+    doc.paragraphs[0].insert_paragraph_before("自定义封面")
+    doc.save(custom)
+    monkeypatch.setenv("REPORT_TEMPLATE", custom)
+
+    eng = _engine(tmp_path)
+    chat = eng.store.create_chat()
+    eng.store.add_message(chat, "assistant", "analysis_result",
+                          content="x", data=_analysis())
+    payload, msg = eng._report_tool(chat)
+    assert payload["ok"] is True
+    text = _docx_text(os.path.join(str(tmp_path), "reports",
+                                   chat.chat_id, payload["file"]))
+    assert "自定义封面" in text
+
+
+def test_template_tables_use_fixed_layout_and_repeat_header():
+    """内置模板的表格固定列宽（避免长英文键断词）且表头跨页重复。"""
+    import zipfile
+
+    path = os.path.join(ROOT, "brake_analyzer", "report", "report_template.docx")
+    with zipfile.ZipFile(path) as z:
+        xml = z.read("word/document.xml").decode("utf-8")
+    assert xml.count('w:type="fixed"') >= 4          # 4 张数据表都固定列宽
+    assert xml.count("<w:tblHeader") >= 4            # 表头行都跨页重复
+
+
 def test_report_tool_survives_failure(tmp_path):
     """模板缺失时工具报可读错误而不是把整轮炸成 failed。"""
     import brake_analyzer.agent.engine as eng_mod

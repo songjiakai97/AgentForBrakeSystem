@@ -2587,3 +2587,46 @@ surface_code + function + 功能名` 做归一化包含比对（`_norm_text` 去
 - 记录库 × 报告联动：以 records 查询结果为数据源出历史对比报告
   （config 编号体系已就位，时序图需惰性解析路径）；
 - read_record 等惰性解析工具内部的停止检查点（当前只覆盖到工具之间）。
+
+### 18.7 自定义报告模板（2026-11-24）
+
+模板就是一份普通 docx，用 docxtpl（Jinja2）占位符描述「哪里填什么」。运行期
+只做 `DocxTemplate(path).render(build_context(...))`，版式完全由模板决定。
+
+**切换模板**：`REPORT_TEMPLATE=/path/to/your.docx`（环境变量，与 OPENAI_* 同一
+读取方式）；未设置时用 `brake_analyzer/report/report_template.docx`。代码路径
+`generate_report(template_path=...)` 已预留，程序调用可直接传。
+
+**占位契约**（与 `generator.build_context` 一一对应，两边改任何一边都要同步）：
+
+| 变量 | 形状 | 用途 |
+|---|---|---|
+| `title` / `generated_at` / `chat_title` | str | 封面与元信息 |
+| `analyses_total` / `bad_total` | int | 份数 / 异常缺失总数 |
+| `files` | str[] | 附录数据文件清单（已带样本数） |
+| `analyses` | list | 总览行：`section_no condition_name profile profile_suffix file_name sample_count bad_count` |
+| `condition_sections` | list | 明细章：`title` + `blocks[]` |
+| `blocks` | list | 每个事件样本：`lead`、`rows[{metric,result}]`、`image`（InlineImage 或 None）、`caption` |
+| `has_findings` | bool | 第 3 章是否存在（规则结论或标定建议任一非空） |
+| `verdict_rows` | list | `cond rule metric message severity` |
+| `suggestion_rows` | list | `cond param direction metric effect risk feedback` |
+| `legend_lines` | str[] | 附录缺失成因图例 |
+
+**设计规则（踩过的坑）**：
+
+- 表格循环必须写成 4 行骨架：表头 / `{%tr for x in analyses %}` 独占一行 /
+  循环体 / `{%tr endfor %}` 独占一行。标记行与循环体行**不能同一行**——同行的
+  占位写会把 `endfor` 覆盖掉，Jinja 直接报错；也不能跨合并单元格。
+- 跨段落/跨表格的块用 `{%p for ... %}` / `{%p if ... %}` 独占一个段落，渲染后
+  该段落自动移除；不要和正文写在同一个段落里。
+- `{{ blk.image }}` 必须单独成段（居中最省事）：它是 docxtpl 的 InlineImage
+  对象，宽度由代码固定（`Mm(160)`），模板里不要再套文字/表格。
+- 占位符尽量保持在一个 run 里（整段输入或复制粘贴，别中途套格式），Word 会把
+  `{{ x }}` 拆成多个 run，Jinja 语法仍可用，但 `{%tr %}` 拆分时容易踩空。
+- 自定义模板可以随便加静态章节、页眉页脚、封面和目录，占位符之外的版式与
+  生成逻辑无关；`REPORT_TEMPLATE` 指过去即可。
+- 列宽建议写死（默认自动重排会把 `brake_distance` 这类长英文键拆行断词）；
+  表头行设 `tblHeader` 跨页重复。内置模板由 `scripts/make_report_template.py`
+  统一处理：页边距 2cm、固定列宽、表头浅灰底与跨页重复、表格字体 9pt。
+- 模板缺占位不会被发现——Jinja 的 Undefined 渲染成空字符串，只是相应章节
+  变空。改完模板先用一份已知分析结果跑一次报告，对照契约表核对章节。
