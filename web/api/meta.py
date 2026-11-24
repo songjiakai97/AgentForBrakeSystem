@@ -59,9 +59,6 @@ def api_sample_download(name: str):
 def api_meta():
     return {
         "llm_available": st.LLM.available,
-        # 实测可达（models 列表，缓存 30s）：available 只说明配置齐了，
-        # LM Studio 没启动时用户应该在页面头部就看到，而不是发消息才失败
-        "llm_reachable": st.LLM.check_reachable(),
         "model": st.LLM.model if st.LLM.available else None,
         "engine": "llm" if st.LLM.available else "offline",
         "allowed_upload_ext": sorted(ALLOWED_EXT),

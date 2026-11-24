@@ -109,10 +109,6 @@ class LlmClient:
         self.embed_api_key = os.getenv("OPENAI_EMBED_API_KEY", "").strip() or self.api_key
         self.embed_model = os.getenv("OPENAI_EMBED_MODEL", "").strip()
         self._embed_client = None
-        # 端点可达性实测缓存：available 只是"配置齐了"，端点挂没挂要 ping 过才知道。
-        # 结果缓存 30s——meta 页轮询每次都 ping 会把小端点打爆
-        self._reach_cached = False
-        self._reach_until = 0.0
         if self.available:
             kwargs = {"api_key": self.api_key}
             if self.base_url:
@@ -121,34 +117,6 @@ class LlmClient:
                 self._client = OpenAI(**kwargs)
             except Exception:
                 self.available = False
-
-    def check_reachable(self, force: bool = False) -> bool:
-        """实测端点可达性（models 列表），结果缓存 30s；未配置直接 False 不发请求。
-
-        「可达」= 端点活着，不等于 /models 一定实现：不少 OpenAI 兼容网关
-        （中转/自建代理）只实现 chat/completions，GET /models 返回 404/405，
-        但对话完全正常。旧实现把所有异常都判成不可达，顶栏就会出现「能聊却
-        显示不可达」。这里按错误类型区分：
-        - 连接/超时/DNS（无 status_code）→ 不可达；
-        - 401/403 → 鉴权不通，chat 同样会失败 → 不可达；
-        - 5xx → 服务端故障 → 不可达；
-        - 其余 4xx（404/405 = 未实现 models，400 = 参数被拒）→ 端点活着 → 可达。
-        """
-        if not self.available:
-            return False
-        now = time.time()
-        if not force and now < self._reach_until:
-            return self._reach_cached
-        try:
-            # 探活不该把 /api/meta 卡住：给硬超时且不重试
-            list(self._client.with_options(timeout=5.0, max_retries=0).models.list())
-            ok = True
-        except Exception as e:
-            status = getattr(e, "status_code", None)
-            ok = status is not None and status not in (401, 403) and status < 500
-        self._reach_cached = ok
-        self._reach_until = now + 30.0
-        return ok
 
     # ------------------------------------------------------------ embedding
     @property

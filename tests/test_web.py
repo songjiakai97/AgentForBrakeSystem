@@ -642,16 +642,16 @@ def test_upload_filename_condition_hint(client):
                 and "疑似工况" in m["content"]]
 
 
-def test_topbar_reachability_is_polled_and_suspected_candidates_are_tagged():
-    """顶栏「可达/不可达」必须轮询，候选面板要标出「文件名编号」。
+def test_suspected_candidates_are_tagged_without_reachability_badge():
+    """候选面板要标出「文件名编号」；顶栏不常驻展示 API 可达性。
 
-    可达性是带 30s 缓存的实测值：只读一次 meta，首屏在模型端点起来之前打开
-    就会把「不可达」冻结一整页（能正常对话却一直显示不可达）。
+    可达性探活会误报（只实现 chat/completions 的兼容网关没有 /models），
+    用户要的是「连不上时给提示」，不是页面常挂一个可能过期的状态灯：
+    失败提示由引擎在真实请求失败时给出（「LLM 请求失败，已回退离线路由」）。
     """
     path = os.path.join(ROOT, "web", "frontend", "index.html")
     with open(path, encoding="utf-8") as f:
         src = f.read()
-    assert "setInterval(() => this.refreshMeta(), 20000)" in src
-    assert "this._metaTimer" in src and "clearInterval(this._metaTimer)" in src
     # 两个面板（消息内候选 + 待选遮罩）都要显示疑似标记
     assert src.count('v-if="c.suspected"') == 2
+    assert "llm_reachable" not in src and "不可达" not in src

@@ -217,12 +217,8 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
   <div class="main" v-if="view==='chat'">
     <div class="topbar">
       <span class="badge" :class="meta.engine"
-            :title="meta.engine==='llm'
-                    ? (meta.llm_reachable === false ? '模型端点当前不可达（LM Studio 没启动？）——发消息会失败并回退离线' : '端点实测可达')
-                    : '离线模式（规则链路）'">
-        {{meta.engine==='llm'
-          ? (('LLM: '+(meta.model||'')) + (meta.llm_reachable === false ? ' · 不可达' : ''))
-          : '离线模式（规则链路）'}}
+            :title="meta.engine==='llm' ? '大模型对话可用' : '离线模式（规则链路）'">
+        {{meta.engine==='llm' ? ('LLM: '+(meta.model||'')) : '离线模式（规则链路）'}}
       </span>
       <!-- 外部工具是"这轮能用什么"的一部分：不显示就等于用户不知道 Agent 为什么会换算。
            配了却没连上也必须露出来（灰底"未连上"），否则就是静默少能力 -->
@@ -630,9 +626,6 @@ createApp({
   },
   async mounted(){
     try{ this.meta = await (await fetch('/api/meta')).json(); }catch(e){}
-    // 顶栏的「可达/不可达」是实测值且服务端缓存 30s：首屏多半比模型端点先就绪，
-    // 只读一次会把这个瞬时结论冻结一整页（端点后来起来了也一直显示不可达）
-    this._metaTimer = setInterval(() => this.refreshMeta(), 20000);
     this.pollMcp();
     await this.loadChats();
     const h = location.hash.match(/^#\/chat\/(\w+)/);
@@ -640,18 +633,8 @@ createApp({
     else if(this.chats.length) this.openChat(this.chats[0].chat_id);
     else await this.newChat();
   },
-  beforeUnmount(){
-    if(this._mcpTimer) clearTimeout(this._mcpTimer);
-    if(this._metaTimer) clearInterval(this._metaTimer);
-  },
+  beforeUnmount(){ if(this._mcpTimer) clearTimeout(this._mcpTimer); },
   methods:{
-    async refreshMeta(){
-      try{
-        const fresh = await (await fetch('/api/meta')).json();
-        // 合并而不是覆盖：MCP 轮询期间写进去的探测状态不能被一次 meta 刷新抹掉
-        this.meta = Object.assign({}, this.meta, fresh);
-      }catch(e){}
-    },
     // 外部 MCP 是后台连的（§6.11：web 启动不等第三方进程），首屏 meta 里 tools=0
     // 不代表"连不上"。不刷的话"还在连"会永远显示成"未连上"，那是个谎。
     // 每 3 秒读一次 GET /api/mcp 的 servers[].status，全部进入终态（ok/error/disabled）
