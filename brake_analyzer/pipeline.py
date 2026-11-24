@@ -31,7 +31,7 @@ def analyze_signals(
 ) -> AnalysisResult:
     cond = cfg.condition(condition_id)
     if cond is None:
-        raise NoDataError(f"未知道况: {condition_id}")
+        raise NoDataError(f"未知工况: {condition_id}")
     fn = cfg.function(cond.function)
     seg_name = cond.segmenter or fn.segmenter
     segmenter = SEGMENTERS.get(seg_name)

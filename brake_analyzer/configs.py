@@ -372,10 +372,14 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             placed.update(sigs)
             groups.append(ChartGroup(label=str(g.get("label") or sigs[0]),
                                      unit=str(g.get("unit") or ""), signals=sigs))
-        # 未编排的信号各自成组，保证图表不静默丢通道
+        # 未编排的信号各自成组，保证图表不静默丢通道。组名取登记表里的中文
+        # description：直接用逻辑名会让这根子图在一排中文标题里显得像漏配
+        # （实测用户把 distance_vbox 那一行当成 bug 报了上来）
         for name in registry:
             if name not in placed:
-                groups.append(ChartGroup(label=name, unit=str(registry[name].get("unit") or ""),
+                desc = str(registry[name].get("description") or "").strip()
+                groups.append(ChartGroup(label=desc or name,
+                                         unit=str(registry[name].get("unit") or ""),
                                          signals=[name]))
         cfg.chart_layout = groups
 

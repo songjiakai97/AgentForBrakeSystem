@@ -755,7 +755,7 @@ class ChatEngine:
         for cid in ids:
             c = self.cfg.condition(cid)
             if c is None:
-                return [self._msg(chat, "error", f"未知道况：{cid}")], []
+                return [self._msg(chat, "error", f"未知工况：{cid}")], []
             conds.append(c)
         if not conds:
             return [self._msg(chat, "error", "未指定工况（condition_id / condition_ids）。")], []

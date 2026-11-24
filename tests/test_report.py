@@ -173,6 +173,12 @@ def test_activation_signals_occupy_separate_rows():
     assert "ABS 激活" in labels and "TCS 激活" not in labels
 
 
+def test_distance_row_has_chinese_label():
+    """distance_vbox 单独一行且用中文组名（它不是车速，不能并进 km/h 那轴）。"""
+    rows = {g.label: g.signals for g in CFG.chart_layout}
+    assert rows["行驶距离"] == ["distance_vbox"]
+
+
 def test_report_chart_global_palette_and_legend_per_axis():
     """颜色跨子图连续循环（不每轴重置成第一个颜色），单信号行也出图例。"""
     from brake_analyzer.charts.html import _groups_from_layout

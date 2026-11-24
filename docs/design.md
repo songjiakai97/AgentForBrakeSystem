@@ -218,7 +218,9 @@ brake-agent/
   唯一出处；`signals_mf4.yaml` 只能声明 `signal_maps`，引用未登记的逻辑名即报错，条目里
   再写 `unit`/`description` 也直接报错（两处口径早晚漂移，宁可启动期失败）。
 - `chart_layout` 同样只在 `signals.yaml` 里读：分组引用未登记信号、同一信号重复分组都报错；
-  未编排的信号各自补一个单信号分组，保证图表不静默丢通道。不同功能的状态量（如
+  未编排的信号各自补一个单信号分组，保证图表不静默丢通道；这一行的组名取
+  `logical_signals` 的中文 `description`（缺描述才退回逻辑名）——一排中文子图标题里
+  突然出现裸的 `distance_vbox`，用户会当成漏配（2026-11-24 报障）。不同功能的状态量（如
   `ABS_Active` / `TCS_Active`）各自成行、不共轴：叠在一起会互相压住，且 `only` 过滤后
   整行消失，正好对应「一个功能只看自己那个激活信号」。
 - 搬运后残留的顶层段（如把 `chart_layout` 留在 `signals_mf4.yaml`）由 `_reject_unknown_sections`
@@ -2099,7 +2101,7 @@ embedding 不可用时 `resolve_condition` 行为与本节描述的纯唯一键�
 | `condition` | resolve / recommend | 某功能内多条候选、零命中兜底或语义候选（差距不足） | 弹工况面板（候选带分数） |
 | `catalog` | list_conditions | 工况清单，仅模型可见 | 不弹面板 |
 | `resolved` | resolve（唯一键 / 语义显著领先）/ recommend | 可直接分析（payload 带 via=exact_key/semantic 与 reason） | 直接分析（有 profiles 时先选档位） |
-| `error` | 两者 | 未知道况/功能 | 提示兜底 |
+| `error` | 两者 | 未知工况/功能 | 提示兜底 |
 
 ### 13.4 一次性内容的生命周期
 

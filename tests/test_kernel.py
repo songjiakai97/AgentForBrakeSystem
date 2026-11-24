@@ -147,6 +147,24 @@ def test_chart_layout_lives_in_registry_file(cfg):
     # 未编排的信号自动补为独立行，图表不静默丢通道
     placed = {s for g in cfg.chart_layout for s in g.signals}
     assert set(cfg.signal_registry) == placed
+    # 自动补的行用登记表里的中文描述做组名：一排中文标题里突然出现一根
+    # distance_vbox，用户会当成漏配（实测报障）
+    assert all(any("\u4e00" <= ch <= "\u9fff" for ch in g.label)
+               for g in cfg.chart_layout), [g.label for g in cfg.chart_layout]
+
+
+def test_uncharted_signal_falls_back_to_registry_description(tmp_path):
+    """没写进 chart_layout 的信号：组名取中文 description，不是裸逻辑名。"""
+    d = _copy_configs(tmp_path)
+    _patch_yaml(d, "signals.yaml",
+                lambda raw: raw.__setitem__(
+                    "chart_layout",
+                    [g for g in raw["chart_layout"]
+                     if "distance_vbox" not in (g.get("signals") or [])]))
+    cfg2 = load_configs(d)
+    row = next(g for g in cfg2.chart_layout if "distance_vbox" in g.signals)
+    assert row.label == cfg2.signal_registry["distance_vbox"]["description"]
+    assert row.label != "distance_vbox" and row.unit == "m"
 
 
 

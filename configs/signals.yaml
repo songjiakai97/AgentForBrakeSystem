@@ -33,6 +33,10 @@ chart_layout:
   - label: 车速 / 轮速
     unit: km/h
     signals: [speed_vbox, wheelSpeed_FL, wheelSpeed_FR, wheelSpeed_RL, wheelSpeed_RR]
+  # 距离是 vbox 的另一个观测量（制动距离的输入），单位 m，不能并进车速那一轴
+  - label: 行驶距离
+    unit: m
+    signals: [distance_vbox]
   - label: 纵向加速度
     unit: m/s2
     signals: [Ax]
