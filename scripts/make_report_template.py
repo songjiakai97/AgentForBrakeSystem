@@ -10,18 +10,19 @@
 - 标记行与循环体行必须分行：往循环体行填占位表达式若与标记同行，
   会把 endfor 标签覆盖掉，jinja 渲染直接报错。
 
-版式（用户定版 2026-11-21）：
-- 1 分析总览；2 分析结果明细（编号直接用 conditions.yaml 的 file_ids，如
-  4.1.1，一个工况一个小节）；3 规则结论与标定建议汇总（有内容才有该章）；附录。
-- 工况小节内 = 两列表「客观指标（名称+限值内联）| 结果」+ 居中时序图；
-  多文件/多样本时前导行（run · 窗口 · 文件）区分块，单文件单样本自动消失。
+版式（用户定版 2026-11-24）：
+- 只保留「工况小节」：按工况（conditions.yaml 的 file_ids，如 4.1.1）分节，
+  每节 = 标题 + 两列表「客观指标（名称+限值内联）| 结果」+ 空行 + 居中时序图。
+- 总览表、规则结论/标定建议汇总、附录均已移除；多文件/多样本时用前导行
+  （run · 窗口 · 文件）区分块，单文件单样本自动消失。
 
 用法：python scripts/make_report_template.py [--out 路径]
 
 自定义模板：运行期用环境变量 REPORT_TEMPLATE 指向自己的 docx 即可（版式自定，
 占位契约见本文件末尾与 docs/design.md §18.7）。
 
-模板上下文契约（generator.build_context 提供）：
+模板上下文契约（generator.build_context 提供；内置模板只用到前两段，其余留给
+自定义模板）：
   title / generated_at / chat_title / analyses_total / bad_total / files[]
   analyses[]（总览行）: index section_no condition_name profile profile_suffix
                         file_name sample_count bad_count
@@ -120,11 +121,7 @@ def _shade(cell, fill: str) -> None:
 def _fixed_widths(table, widths_cm: list) -> None:
     """固定列宽：Word 默认 auto-fit 会按内容重排，长英文键（brake_distance）
     被拆成两行甚至断词，表格看起来「很乱」。tblLayout=fixed + 每格宽度显式写死。"""
-    table.autofit = False
-    tblPr = table._tbl.tblPr
-    layout = OxmlElement("w:tblLayout")
-    layout.set(qn("w:type"), "fixed")
-    tblPr.append(layout)
+    table.autofit = False          # python-docx 会写入 tblLayout=fixed，不要再手工追加
     for i, w in enumerate(widths_cm):
         table.columns[i].width = Cm(w)
         for row in table.rows:
@@ -162,13 +159,6 @@ def _gray_par(doc: Document, text: str, size: float = 9.0) -> None:
     r.font.color.rgb = _GRAY
 
 
-def _bold_par(doc: Document, text: str, size: float = 10.5) -> None:
-    p = doc.add_paragraph()
-    r = p.add_run(text)
-    r.font.bold = True
-    r.font.size = Pt(size)
-
-
 def build(out_path: str) -> str:
     doc = Document()
 
@@ -194,22 +184,10 @@ def build(out_path: str) -> str:
     r.font.size = Pt(9)
     r.font.color.rgb = _GRAY
 
-    # ---- 1 分析总览 ----
-    doc.add_heading("1 分析总览", level=1)
-    tbl = _data_table(doc, ["章节", "工况", "档位", "数据文件", "样本", "异常/缺失"],
-                      [1.6, 4.8, 2.8, 4.4, 1.2, 1.8])
-    _cell_text(tbl.rows[1], 0, "{%tr for a in analyses %}")
-    body = tbl.rows[2]
-    for i, key in enumerate(["{{ a.section_no }}", "{{ a.condition_name }}",
-                             "{{ a.profile_suffix or '-' }}", "{{ a.file_name }}",
-                             "{{ a.sample_count }}", "{{ a.bad_count }}"]):
-        _cell_text(body, i, key)
-
-    # ---- 2 分析结果明细：编号 = conditions.yaml file_ids，一工况一小节 ----
-    doc.add_heading("2 分析结果明细", level=1)
+    # ---- 工况小节：编号 = conditions.yaml file_ids，一工况一节 ----
     p = doc.add_paragraph()
     p.add_run("{%p for a in condition_sections %}")
-    doc.add_heading("{{ a.title }}", level=2)
+    doc.add_heading("{{ a.title }}", level=1)
     p = doc.add_paragraph()
     p.add_run("{%p for blk in a.blocks %}")
     p = doc.add_paragraph()
@@ -224,6 +202,7 @@ def build(out_path: str) -> str:
     _cell_text(body, 1, "{{ r.result }}")
     p = doc.add_paragraph()
     p.add_run("{%p if blk.image %}")
+    doc.add_paragraph()                    # 表格与时序图之间留一个空行
     pic = doc.add_paragraph()
     pic.alignment = WD_ALIGN_PARAGRAPH.CENTER
     pic.add_run("{{ blk.image }}")
@@ -238,46 +217,6 @@ def build(out_path: str) -> str:
     p.add_run("{%p endfor %}")          # blk
     p = doc.add_paragraph()
     p.add_run("{%p endfor %}")          # condition_sections
-
-    # ---- 3 规则结论与标定建议汇总（无任何命中/建议时整章省略）----
-    p = doc.add_paragraph()
-    p.add_run("{%p if has_findings %}")
-    doc.add_heading("3 规则结论与标定建议汇总", level=1)
-    _bold_par(doc, "规则结论（规则引擎确定性判定）")
-    tbl = _data_table(doc, ["章节/工况", "规则", "指标", "结论", "严重度"],
-                      [3.2, 3.0, 2.6, 6.0, 1.8])
-    _cell_text(tbl.rows[1], 0, "{%tr for v in verdict_rows %}")
-    body = tbl.rows[2]
-    for i, key in enumerate(["{{ v.cond }}", "{{ v.rule }}", "{{ v.metric }}",
-                             "{{ v.message }}", "{{ v.severity }}"]):
-        _cell_text(body, i, key)
-    _bold_par(doc, "标定建议（LLM 生成，区分于规则结论）")
-    tbl = _data_table(doc, ["章节/工况", "可标定量", "方向", "针对指标",
-                            "预期效果", "风险", "反馈"],
-                      [2.8, 2.2, 1.8, 2.8, 3.2, 2.4, 1.4])
-    _cell_text(tbl.rows[1], 0, "{%tr for s in suggestion_rows %}")
-    body = tbl.rows[2]
-    for i, key in enumerate(["{{ s.cond }}", "{{ s.param }}", "{{ s.direction }}",
-                             "{{ s.metric }}", "{{ s.effect }}", "{{ s.risk }}",
-                             "{{ s.feedback }}"]):
-        _cell_text(body, i, key)
-    p = doc.add_paragraph()
-    p.add_run("{%p endif %}")
-
-    # ---- 附录 ----
-    doc.add_heading("附录", level=1)
-    _bold_par(doc, "指标缺失成因图例")
-    p = doc.add_paragraph()
-    p.add_run("{%p for line in legend_lines %}")
-    _gray_par(doc, "· {{ line }}")
-    p = doc.add_paragraph()
-    p.add_run("{%p endfor %}")
-    _bold_par(doc, "数据文件清单")
-    p = doc.add_paragraph()
-    p.add_run("{%p for fl in files %}")
-    _gray_par(doc, "· {{ fl }}")
-    p = doc.add_paragraph()
-    p.add_run("{%p endfor %}")
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     doc.save(out_path)

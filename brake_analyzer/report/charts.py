@@ -57,7 +57,6 @@ def render_sample_chart(
     window: Optional[tuple],
     layout,
     out_png: str,
-    title: str = "",
     highlight_status: str = "ok",
     only: Optional[List[str]] = None,
     dpi: int = 150,
@@ -84,8 +83,6 @@ def render_sample_chart(
     if not plotted:
         plt.close(fig)
         return False
-    if title:
-        fig.suptitle(title, fontsize=10)
     fig.savefig(out_png, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     return True
@@ -111,6 +108,8 @@ def _build_figure(groups, signals, window, highlight_status):
     for i, (label, unit, sigs) in enumerate(groups):
         ax = axes[i][0]
         ax.grid(True, axis="y", alpha=0.3)
+        # 没有大标题后给坐标区上下留一点余量：曲线不贴边，图例也不顶着上框
+        ax.margins(y=0.10)
         ax.set_ylabel(f"{label}" + (f"\n({unit})" if unit else ""), fontsize=9)
         if window:
             t0, t1 = window
@@ -136,5 +135,5 @@ def _build_figure(groups, signals, window, highlight_status):
                       frameon=True, facecolor="white", edgecolor="none",
                       framealpha=0.85)
     if plotted:
-        axes[-1][0].set_xlabel("s", fontsize=9)
+        axes[-1][0].set_xlabel("time(s)", fontsize=9)
     return fig, axes, plotted

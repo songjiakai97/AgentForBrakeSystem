@@ -233,7 +233,6 @@ def _condition_blocks(d: dict, cfg: AppConfigs, cond, tpl: DocxTemplate,
                 miss = any(m.get("status") == "missing" for m in s.get("metrics", []))
                 if render_sample_chart(
                         signals, (win.t_start, win.t_end), cfg.chart_layout, png,
-                        title=f"{cname} · run{run}",
                         highlight_status="abnormal" if bad else "missing" if miss else "ok",
                         only=only):
                     image = InlineImage(tpl, png, width=Mm(160))

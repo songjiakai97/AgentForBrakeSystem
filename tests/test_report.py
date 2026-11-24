@@ -137,7 +137,7 @@ class FakeChat:
 def test_render_sample_chart_png(tmp_path):
     png = str(tmp_path / "c.png")
     ok = render_sample_chart(_signals(), (2.0, 5.5), CFG.chart_layout, png,
-                             title="测试窗口", highlight_status="abnormal",
+                             highlight_status="abnormal",
                              only=list(CFG.function("abs").signals))
     assert ok and os.path.isfile(png) and os.path.getsize(png) > 2000
 
@@ -194,6 +194,8 @@ def test_report_chart_global_palette_and_legend_per_axis():
         assert colors == CHART_PALETTE[:3]
         assert len(set(colors)) == 3
         assert fig.get_size_inches()[1] < 0.95 * 3 + 0.6, "行高应压缩，一张图不占满页"
+        assert fig._suptitle is None, "报告图不再画标题（信息由 docx 图注承担）"
+        assert axes[-1][0].get_xlabel() == "time(s)"
     finally:
         import matplotlib.pyplot as plt
         plt.close(fig)
@@ -243,17 +245,16 @@ def test_generate_report_tables_and_suggestion(tmp_path):
     assert res["ok"] is True and res["analyses"] == 1 and res["charts"] == 0
     assert res["warnings"], "无信号时应给出告警而不是静默"
     text = _docx_text(out)
-    assert "专项报告" in text and "1 分析总览" in text
+    assert "专项报告" in text
     # 编号与标题来自 conditions.yaml：file_ids + name（自带 ABS 前缀）
     assert "4.1.1 ABS 干沥青 100kph 全力制动" in text
     # 客观指标：名称+限值内联，顺序=conditions.yaml 声明顺序
     assert "客观指标" in text
     assert text.index("最大横摆角速度≤5°/s") < text.index("制动距离≤40m")
     assert "2.8 °/s" in text and "45.234 m（超限）" in text
-    # 规则结论与标定建议收进独立汇总章
-    assert "3 规则结论与标定建议汇总" in text
-    assert "R_dist_high" in text and "制动距离 45.2m 超过限值 40m" in text
-    assert "Cp_FA" in text and "已采纳：已试跑" in text
+    # 只保留工况小节：总览/汇总/附录都不再出现
+    assert "分析总览" not in text and "规则结论" not in text
+    assert "R_dist_high" not in text and "Cp_FA" not in text
 
 
 def test_config_declared_metrics_are_complete(tmp_path):
@@ -296,6 +297,25 @@ def test_same_condition_files_share_section(tmp_path):
     assert "a.mf4 · run1 · 窗口 [2.00, 5.50] s" in text
     assert "b.mf4 · run1 · 窗口 [2.00, 5.50] s" in text
     assert res["analyses"] == 2
+
+
+def test_blank_paragraph_between_table_and_chart(tmp_path):
+    """表格与时序图之间必须隔一个空行（用户定版）。"""
+    from docx.oxml.ns import qn
+
+    out = str(tmp_path / "r.docx")
+    generate_report([_analysis()], out, CFG, signals_of=lambda fid: _signals())
+    kinds = []
+    for ch in Document(out).element.body.iterchildren():
+        if ch.tag == qn("w:tbl"):
+            kinds.append("table")
+        elif ch.tag == qn("w:p"):
+            if ch.findall(".//" + qn("a:blip")):
+                kinds.append("image")
+            else:
+                kinds.append("text" if "".join(ch.itertext()).strip() else "blank")
+    assert any(kinds[i:i + 3] == ["table", "blank", "image"]
+               for i in range(len(kinds) - 2)), kinds
 
 
 def test_generate_report_with_charts_and_cleanup(tmp_path):
@@ -435,8 +455,8 @@ def test_template_tables_use_fixed_layout_and_repeat_header():
     path = os.path.join(ROOT, "brake_analyzer", "report", "report_template.docx")
     with zipfile.ZipFile(path) as z:
         xml = z.read("word/document.xml").decode("utf-8")
-    assert xml.count('w:type="fixed"') >= 4          # 4 张数据表都固定列宽
-    assert xml.count("<w:tblHeader") >= 4            # 表头行都跨页重复
+    assert xml.count('w:type="fixed"') == 1          # 只剩客观指标表，固定列宽
+    assert xml.count("<w:tblHeader") == 1            # 表头行跨页重复
 
 
 def test_report_tool_survives_failure(tmp_path):
