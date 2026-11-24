@@ -319,6 +319,7 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
               <div v-for="(c,i) in (m.data&&m.data.candidates)||[]" :key="c.key"
                    class="rcRow" :class="{chosen: isChosen(m,c)}">
                 <span class="idx">{{i+1}}</span><span>{{c.name}}</span>
+                <span v-if="c.suspected" style="color:var(--accent);font-size:11px">文件名编号</span>
                 <span v-if="isChosen(m,c)" style="color:var(--accent);font-size:11px">✓ 所选</span>
                 <span class="score" v-if="c.score">{{c.score.toFixed(1)}}</span>
               </div>
@@ -418,6 +419,7 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
         <template v-if="pendingPanel.data && (pendingPanel.data.hop==='function'||pendingPanel.data.hop==='condition')">
           <div v-for="(c,i) in pendingPanel.data.candidates" :key="c.key" class="optrow" @click="choose(pendingPanel,c)">
             <span class="idx">{{i+1}}</span><span>{{c.name}}</span>
+            <span v-if="c.suspected" style="color:var(--accent);font-size:11px">文件名编号</span>
             <span class="score" v-if="c.score">{{c.score.toFixed(1)}}</span>
           </div>
         </template>
@@ -628,6 +630,9 @@ createApp({
   },
   async mounted(){
     try{ this.meta = await (await fetch('/api/meta')).json(); }catch(e){}
+    // 顶栏的「可达/不可达」是实测值且服务端缓存 30s：首屏多半比模型端点先就绪，
+    // 只读一次会把这个瞬时结论冻结一整页（端点后来起来了也一直显示不可达）
+    this._metaTimer = setInterval(() => this.refreshMeta(), 20000);
     this.pollMcp();
     await this.loadChats();
     const h = location.hash.match(/^#\/chat\/(\w+)/);
@@ -635,8 +640,18 @@ createApp({
     else if(this.chats.length) this.openChat(this.chats[0].chat_id);
     else await this.newChat();
   },
-  beforeUnmount(){ if(this._mcpTimer) clearTimeout(this._mcpTimer); },
+  beforeUnmount(){
+    if(this._mcpTimer) clearTimeout(this._mcpTimer);
+    if(this._metaTimer) clearInterval(this._metaTimer);
+  },
   methods:{
+    async refreshMeta(){
+      try{
+        const fresh = await (await fetch('/api/meta')).json();
+        // 合并而不是覆盖：MCP 轮询期间写进去的探测状态不能被一次 meta 刷新抹掉
+        this.meta = Object.assign({}, this.meta, fresh);
+      }catch(e){}
+    },
     // 外部 MCP 是后台连的（§6.11：web 启动不等第三方进程），首屏 meta 里 tools=0
     // 不代表"连不上"。不刷的话"还在连"会永远显示成"未连上"，那是个谎。
     // 每 3 秒读一次 GET /api/mcp 的 servers[].status，全部进入终态（ok/error/disabled）

@@ -308,6 +308,48 @@ def test_system_prompt_requires_conclusion_after_analysis():
     assert "总体判定" in SYSTEM_CHAT
 
 
+def test_suspected_file_id_short_circuits_condition_panel(cfg, tmp_path):
+    """文件名编号唯一指向某工况、用户没另指时，不该再弹候选让人选一次。
+
+    实测 4.1.1-39.46.blf：上传时已识别 4.1.1，模型仍按 resolve 的 hop=condition
+    弹面板，且 4.1.1 不在第一位——编号是配置事实，这一问没有信息量。
+    用户原话点名别的工况（4.1.3 / 湿沥青）时不得抢答，仍交确认。
+    """
+    from types import SimpleNamespace
+
+    from brake_analyzer.agent.engine import ChatEngine
+    from brake_analyzer.llm.kb import KnowledgeBase
+    from web.store import Store
+
+    eng = ChatEngine(cfg, SimpleNamespace(available=False), KnowledgeBase("knowledge"),
+                     Store(upload_dir=str(tmp_path / "up"),
+                           persist_dir=str(tmp_path / "sessions")))
+    chat = eng.store.create_chat()
+    eng.store.add_file(chat, "4.1.1-39.46.blf", b"x" * 8, batch_id="b1",
+                       file_id_no="4.1.1",
+                       cond_hint="abs_full_brake_dry_asphalt_100kph")
+    res = {"hop": "condition", "function": "abs", "candidates": [
+        {"key": "abs_full_brake_wet_asphalt_60kph", "name": "ABS 湿沥青 60kph 全力制动"},
+        {"key": "abs_full_brake_dry_asphalt_100kph", "name": "ABS 干沥青 100kph 全力制动"},
+    ]}
+
+    out = eng._apply_suspected_condition(res, chat, "分析数据")
+    assert out["hop"] == "resolved"
+    assert out["target"]["key"] == "abs_full_brake_dry_asphalt_100kph"
+    assert out["via"] == "file_id"
+
+    # 用户点名别的具体工况 → 不抢，继续让用户确认
+    assert eng._apply_suspected_condition(res, chat, "按 4.1.4 算")["hop"] == "condition"
+    assert eng._apply_suspected_condition(res, chat, "看湿沥青的表现")["hop"] == "condition"
+    # 只说功能名（命中该功能全部工况）不算指定具体工况
+    assert eng._apply_suspected_condition(res, chat, "分析 ABS 数据")["hop"] == "resolved"
+
+    # 仍有歧义时（多文件不同编号）候选里把疑似工况排第一并打标
+    ranked = eng._rank_suspected_conditions(res, chat)
+    assert ranked["candidates"][0]["key"] == "abs_full_brake_dry_asphalt_100kph"
+    assert ranked["candidates"][0]["suspected"] is True
+
+
 def test_turn_context_carries_uploaded_file_id(cfg):
     """上传时识别出的编号/工况要出现在本轮清单里。
 

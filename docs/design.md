@@ -2526,7 +2526,10 @@ surface_code + function + 功能名` 做归一化包含比对（`_norm_text` 去
 - 工具参数 JSON 解析失败回喂模型自纠（不再静默空参数）；
 - 工具轮数上限 AGENT_MAX_TOOL_ROUNDS（默认 10），耗尽走软收尾轮（禁工具出结论），
   不兜底离线；离线回退有可见步骤行；
-- LLM 健康实测 check_reachable（缓存 30s）进 /api/meta 与前端顶栏；
+- LLM 健康实测 check_reachable（缓存 30s）进 /api/meta 与前端顶栏；判定按错误
+  类型区分（/models 404/405 说明端点没实现该接口，仍算可达；连接/超时/401/5xx
+  才算不可达），前端每 20s 重读一次 meta——首屏读到的是瞬时值，不轮询就会把
+  「启动时还没起来」冻结成整页的「不可达」；
 - trace 记录每轮 usage（in/out tokens、耗时）与坏参数数，/debug 行内展示；
 - 会话持久化：JSONL 追加日志（SESSION_DIR，默认 data/sessions/），启动重放；
   信号缓存与 analyses 活对象不持久化（重启后图表/反馈需重跑）；
@@ -2569,6 +2572,10 @@ surface_code + function + 功能名` 做归一化包含比对（`_norm_text` 去
   `is_injected` 排除的 kind，不回灌 prompt，只写在那里模型看不到，会误以为
   「没识别工况」并白调一次 `list_files`；
 - `list_files` 工具每行同样带 `file_id_no` / `suspected_condition`（模型据此选工况）；
+- 编号参与路由：本批文件唯一指向一个工况、且用户原话没有点名别的工况（编号/
+  路面特征词/别的功能）时，`resolve_condition` 直接把 hop 升级为 `resolved`
+  （`via=file_id`），不再弹面板让用户二次确认；多文件不同编号或存在冲突时，
+  疑似工况在候选里排第一并打「文件名编号」标；
 - 分析前逐文件弱校验：文件名编号指向别的工况时卡片 warn（§18.5），不阻止分析；
 - 识别不出编号不猜：文件照旧可上传可分析，只是没有提示。
 

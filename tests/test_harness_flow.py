@@ -209,6 +209,49 @@ def test_health_check_cache(monkeypatch):
     assert llm._reach_until == first_ts
 
 
+def test_health_check_models_404_is_still_reachable(monkeypatch):
+    """只实现 chat/completions 的兼容网关：GET /models 404，但端点活着 → 可达。
+
+    旧实现把所有异常都判成不可达，顶栏会出现「能聊却显示不可达」。
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:1")
+    llm = LlmClient()
+
+    class Http404(Exception):
+        status_code = 404
+
+    class Models:
+        def list(self):
+            raise Http404("not found")
+
+    class Client:
+        def with_options(self, **kw):
+            return self
+
+        @property
+        def models(self):
+            return Models()
+
+    llm._client = Client()
+    assert llm.check_reachable(force=True) is True
+
+    class Http500(Exception):
+        status_code = 500
+
+    class Models500(Models):
+        def list(self):
+            raise Http500("boom")
+
+    class Client500(Client):
+        @property
+        def models(self):
+            return Models500()
+
+    llm._client = Client500()
+    assert llm.check_reachable(force=True) is False, "5xx 是服务端故障，不该判可达"
+
+
 def test_store_persist_roundtrip_file_id_hint(tmp_path):
     """编号识别字段随 JSONL 日志持久化，重启后恢复。"""
     pd = str(tmp_path / "sessions")

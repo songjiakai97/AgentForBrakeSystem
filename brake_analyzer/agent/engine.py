@@ -915,6 +915,115 @@ class ChatEngine:
                 warns.append(f"{name}：量程异常（{vals.min():.1f}~{vals.max():.1f} m/s²）")
         return warns[:4]
 
+    def suspected_conditions(self, chat) -> List[str]:
+        """本批文件「文件名编号」唯一指向的工况（去重保序，跨批次不算）。
+
+        上传时就写进了 FileEntry.cond_hint（cfg.match_file_id），这里只做收集：
+        它是配置事实，不是模型推断，可以参与路由决策。
+        """
+        out: List[str] = []
+        for f in chat.latest_batch():
+            cid = getattr(f, "cond_hint", "") or ""
+            if cid and cid not in out:
+                out.append(cid)
+        return out
+
+    def _explicit_condition_ids(self, text: str) -> set:
+        """用户原话里点名的工况编号（4.1.4 / 4-1-4 → 对应工况 id）。"""
+        ids = set()
+        for m in re.finditer(r"\d+(?:[.\-]\d+){1,}", text or ""):
+            cid = (self.cfg.file_ids.condition_id(m.group(0))
+                   if self.cfg.file_ids is not None else None)
+            if cid:
+                ids.add(cid)
+        return ids
+
+    def _mentions_other_condition(self, text: str, cid: str) -> bool:
+        """原话是否点到了别的工况（用于禁止「文件名编号」抢答）。
+
+        conditions_by_text 要求整句就是关键词，只会回答「干沥青」，遇到
+        「看湿沥青的表现」就漏判；这里反过来：把每个工况名称按空格切成特征词，
+        看句子里是否出现（归一化后子串匹配）。「ABS」这种该功能所有工况共有的
+        词不算特征词，所以「分析 ABS 数据」不会被误判成指定了别的工况。
+        """
+        from ..configs import _norm_text
+
+        norm = _norm_text(text)
+        if not norm:
+            return False
+        cond = self.cfg.condition(cid)
+        fn = self.cfg.function(cond.function)
+        # 1) 点到别的功能（ABS 文件 + 用户说 TCS）
+        for key, other in self.cfg.functions.items():
+            if key == fn.key:
+                continue
+            for alias in [key, other.name] + list(getattr(other, "aliases", []) or []):
+                if alias and _norm_text(alias) in norm:
+                    return True
+        # 2) 同功能下其它工况的特征词（湿沥青 / 玄武岩 / 50kph / 对开路面 …）
+        own = set((cond.name or "").split())
+        for other in self.cfg.conditions_of(fn.key):
+            if other.id == cid:
+                continue
+            for tok in (other.name or "").split():
+                if tok and tok not in own and _norm_text(tok) in norm:
+                    return True
+        return False
+
+    def _apply_suspected_condition(self, res: dict, chat, text: str) -> dict:
+        """文件名编号唯一指向某工况时，把「信息不足」升级为 resolved。
+
+        动机：文件名 4.1.1-39.46.blf 已经唯一确定了工况，模型却还要按
+        resolve_condition 的面板让用户再选一次——编号是配置事实、用户没另指
+        工况时没有任何歧义，这一问纯属多余。只在下列条件全部成立时升级：
+        - 本批文件识别出的工况恰好 1 个；
+        - resolve 没给出 resolved/error（模型已精确命中或已报错就不干预）；
+        - 用户原话没有点到别的具体工况（「按 4.1.4 算」「湿沥青」「TCS」等）。
+        """
+        sus = self.suspected_conditions(chat)
+        if len(sus) != 1 or res.get("hop") in ("resolved", "error"):
+            return res
+        cond = self.cfg.condition(sus[0])
+        if cond is None:
+            return res
+        cid = cond.id
+        named = self._explicit_condition_ids(text)
+        if (named and cid not in named) or self._mentions_other_condition(text, cid):
+            return res
+        item = {"key": cid, "name": cond.name}
+        out = dict(res)
+        out.update({
+            "hop": "resolved",
+            "function": cond.function,
+            "candidates": [item],
+            "target": item,
+            "via": "file_id",
+            "reason": f"本批文件名编号唯一指向 {cid}（{cond.name}），用户未另行指定工况",
+        })
+        return out
+
+    def _rank_suspected_conditions(self, res: dict, chat) -> dict:
+        """候选面板把文件名编号指向的工况排到最前（多文件/有歧义时才用得到）。"""
+        sus = self.suspected_conditions(chat)
+        cands = res.get("candidates")
+        if not sus or not isinstance(cands, list) or not cands:
+            return res
+        if isinstance(cands[0], dict) and cands[0].get("key") in sus:
+            return res
+        first, rest = [], []
+        for c in cands:
+            if isinstance(c, dict) and c.get("key") in sus:
+                c2 = dict(c)
+                c2["suspected"] = True
+                first.append(c2)
+            else:
+                rest.append(c)
+        if not first:
+            return res
+        out = dict(res)
+        out["candidates"] = first + rest
+        return out
+
     def _file_id_mismatch(self, f_name: str, cond) -> Optional[str]:
         """逐文件工况弱校验：文件名编号指向别的工况时提示（不阻止分析）。
 

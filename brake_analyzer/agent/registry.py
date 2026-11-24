@@ -406,7 +406,7 @@ def _spec_generate_report(c: SpecCtx) -> dict:
 # 签名统一 (engine, chat, args, ctx)；ctx 见模块 docstring。
 
 def _ex_resolve_condition(eng, chat, args, ctx) -> dict:
-    return resolve_condition(
+    res = resolve_condition(
         eng.cfg,
         function_key=args.get("function_key") or chat.selected_function or None,
         maneuver=args.get("maneuver"),
@@ -417,6 +417,10 @@ def _ex_resolve_condition(eng, chat, args, ctx) -> dict:
         # 槽位证据源：用户原话 + 文件名（文件名是合法的工况线索）
         evidence=ctx["text"] + " " + " ".join(f.name for f in chat.files),
     )
+    # 上传时识别出的编号是配置事实：本批唯一指向某工况且用户没另指时直接
+    # resolved，不再弹面板让用户二次确认；有歧义时把它排到候选第一位
+    res = eng._apply_suspected_condition(res, chat, ctx["text"])
+    return eng._rank_suspected_conditions(res, chat)
 
 
 def _ex_list_conditions(eng, chat, args, ctx) -> dict:

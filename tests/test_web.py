@@ -640,3 +640,18 @@ def test_upload_filename_condition_hint(client):
     assert hints and "4.1.1" in hints[0] and "ABS" in hints[0]
     assert not [m["content"] for m in msgs if "no_id_here" in m["content"]
                 and "疑似工况" in m["content"]]
+
+
+def test_topbar_reachability_is_polled_and_suspected_candidates_are_tagged():
+    """顶栏「可达/不可达」必须轮询，候选面板要标出「文件名编号」。
+
+    可达性是带 30s 缓存的实测值：只读一次 meta，首屏在模型端点起来之前打开
+    就会把「不可达」冻结一整页（能正常对话却一直显示不可达）。
+    """
+    path = os.path.join(ROOT, "web", "frontend", "index.html")
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
+    assert "setInterval(() => this.refreshMeta(), 20000)" in src
+    assert "this._metaTimer" in src and "clearInterval(this._metaTimer)" in src
+    # 两个面板（消息内候选 + 待选遮罩）都要显示疑似标记
+    assert src.count('v-if="c.suspected"') == 2
