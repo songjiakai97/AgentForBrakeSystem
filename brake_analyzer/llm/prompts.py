@@ -128,6 +128,20 @@ def summarize_request(transcript: str, budget_tokens: int) -> List[dict]:
     ]
 
 
+def _file_hint(f: dict) -> str:
+    """文件名后拼上上传时识别出的编号/工况。
+
+    识别结果此前只写进 FileEntry 和 attachment 消息，而 attachment 属于
+    is_injected 排除的 kind——模型在清单里看到的仍只有「4.1.1-39.46.blf」，
+    于是「似乎没识别工况」，还得再调一次 list_files 才看得到。这里直接摆出来。
+    """
+    fid = (f.get("file_id_no") or "").strip()
+    if not fid:
+        return ""
+    cond = (f.get("cond_name") or "").strip()
+    return f"（疑似工况 {fid}{' ' + cond if cond else ''}）"
+
+
 def _files_context(files: List) -> str:
     """本轮的文件清单正文（不带标签），并说明本轮默认分析哪一批。
 
@@ -141,13 +155,16 @@ def _files_context(files: List) -> str:
         return "（无，用户还没上传）"
     batches = {f.get("batch_id") for f in files}
     if len(batches) == 1:
-        return (", ".join(f["name"] for f in files)
-                + "（本会话只上传过这一批，即本轮默认分析对象）")
+        names = ", ".join(f["name"] + _file_hint(f) for f in files)
+        batch_note = "（本会话只上传过这一批，即本轮默认分析对象）"
+        # 文件名已带括号括注时用分号隔开，避免「…制动）（本会话…」两个括号贴在一起
+        return names + ("；" + batch_note if any(_file_hint(f) for f in files)
+                        else batch_note)
     new_batch = files[-1].get("batch_id")
     lines = []
     for i, f in enumerate(files, start=1):
         fresh = " ← 本轮默认对象" if f.get("batch_id") == new_batch else ""
-        lines.append(f"{i}. {f['name']}{fresh}")
+        lines.append(f"{i}. {f['name']}{_file_hint(f)}{fresh}")
     return ("（编号即 run_analysis_on_files 的 file_indexes 取值，1 起）\n"
             + "\n".join(lines))
 

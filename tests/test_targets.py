@@ -296,6 +296,36 @@ def test_run_analysis_scopes_to_latest_upload(cfg):
     assert "x.mf4" in tail and tail.endswith("分析一下")
 
 
+def test_turn_context_carries_uploaded_file_id(cfg):
+    """上传时识别出的编号/工况要出现在本轮清单里。
+
+    attachment 消息属于 is_injected 排除的 kind，模型看不到；清单只写裸文件名时
+    模型会误以为「没识别工况」（实测 4.1.1-39.46.blf 就是这样），只能再调一次
+    list_files 才拿得到——白烧一轮。
+    """
+    from brake_analyzer.llm.prompts import build_chat_messages
+
+    def last(files):
+        return build_chat_messages(cfg, [], "分析数据", [], {}, files=files)[-1]["content"]
+
+    one = last([{"name": "4.1.1-39.46.blf", "batch_id": "b1",
+                 "file_id_no": "4.1.1", "cond_name": "ABS 干沥青 100kph 全力制动"}])
+    assert ("4.1.1-39.46.blf（疑似工况 4.1.1 ABS 干沥青 100kph 全力制动）"
+            in one)
+
+    # 识别不出编号的文件不加括号噪音
+    unresolved = last([{"name": "no_id_here.mf4", "batch_id": "b1", "file_id_no": ""}])
+    assert "no_id_here.mf4（本会话" in unresolved
+    assert "疑似工况" not in unresolved
+
+    # 多批清单里同样逐行带上，且不影响「本轮默认对象」标注位置
+    multi = last([{"name": "a.mf4", "batch_id": "b1", "file_id_no": "4.1",
+                   "cond_name": "ABS 干沥青 100kph 全力制动"},
+                  {"name": "b.blf", "batch_id": "b2", "file_id_no": ""}])
+    assert "1. a.mf4（疑似工况 4.1 " in multi
+    assert "2. b.blf ← 本轮默认对象" in multi
+
+
 # ---------------------------------------------------------------- transient 折叠
 
 def _unit(payload, transient=True, tail=""):

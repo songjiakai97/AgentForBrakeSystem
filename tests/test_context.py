@@ -315,6 +315,19 @@ def test_engine_no_compression_when_within_budget():
     assert "上下文压缩" not in labels
 
 
+def test_engine_sends_uploaded_file_id_in_turn_context():
+    """上传登记里的编号/工况必须进本轮 prompt：附件消息不回灌，模型只看清单。"""
+    eng, llm = _engine()
+    chat = eng.store.create_chat()
+    eng.store.add_file(chat, "4.1.1-39.46.blf", b"x" * 16, batch_id="b1",
+                       file_id_no="4.1.1",
+                       cond_hint="abs_full_brake_dry_asphalt_100kph")
+    for _ in eng.events(chat, "分析数据"):
+        pass
+    last = llm.calls[0][-1]["content"]
+    assert "4.1.1-39.46.blf（疑似工况 4.1.1 ABS 干沥青 100kph 全力制动）" in last
+
+
 def test_engine_stays_within_budget_across_tool_hops():
     """多跳工具循环：每次请求都必须有界，且 tool_calls 与 tool 结果始终配对。"""
     eng, llm = _engine(tool_rounds=4)

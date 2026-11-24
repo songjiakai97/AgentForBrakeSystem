@@ -284,7 +284,15 @@ class ChatEngine:
     def _run_llm_stream(self, chat, text: str, state: Dict[str, bool],
                         stop_event=None):
         file_names = [f.name for f in chat.files]
-        files = [{"name": f.name, "batch_id": f.batch_id} for f in chat.files]
+        # 带上上传时识别出的编号/工况：attachment 消息不回灌 prompt（is_injected），
+        # 不在这里带上，模型就只能看到裸文件名，误以为没识别
+        files = []
+        for f in chat.files:
+            cond = (self.cfg.condition(f.cond_hint)
+                    if getattr(f, "cond_hint", "") else None)
+            files.append({"name": f.name, "batch_id": f.batch_id,
+                          "file_id_no": getattr(f, "file_id_no", ""),
+                          "cond_name": cond.name if cond is not None else ""})
         selected = {
             "function": chat.selected_function,
             "condition": chat.selected_condition,
@@ -1115,7 +1123,7 @@ class ChatEngine:
             r = {"index": i + 1, "name": f.name,
                  "size_mb": round(f.size / 1048576, 2),
                  "latest_batch": f.file_id in latest}
-            # 文件名编号识别（§18.6）：上传时由 cfg.match_file_id 写入；
+            # 文件名编号识别（§18.4）：上传时由 cfg.match_file_id 写入；
             # 有编号就带上疑似工况——模型据此判断该用哪个工况分析
             if getattr(f, "file_id_no", ""):
                 r["file_id_no"] = f.file_id_no

@@ -620,7 +620,7 @@ def test_wait_notice_is_revocable():
 
 
 def test_upload_filename_condition_hint(client):
-    """文件名以试验编号开头时：上传管线识别并写入登记与 attachment 提示（§18.6）。"""
+    """文件名以试验编号开头时：上传管线识别并写入登记与 attachment 提示（§18.4）。"""
     chat = client.post("/api/chats").json()
     cid = chat["chat_id"]
     files = [

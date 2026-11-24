@@ -25,7 +25,7 @@ class FileEntry:
     # source=upload：文件已拷贝进 upload_dir，删除会话时一并删除；
     # source=local：只引用本机原路径（零拷贝），删除会话时绝不能动原文件
     source: str = "upload"
-    # 文件名编号识别（§18.6）：name 以试验编号开头（如 4.1.1_…）时，上传管线把
+    # 文件名编号识别（§18.4）：name 以试验编号开头（如 4.1.1_…）时，上传管线把
     # 识别结果写在这里（编号 + 对应工况 id），供 attachment 消息、list_files 与
     # 分析弱校验使用。识别不出来（文件名无编号）留空，不猜。
     file_id_no: str = ""

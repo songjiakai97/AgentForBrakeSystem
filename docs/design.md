@@ -2553,7 +2553,23 @@ surface_code + function + 功能名` 做归一化包含比对（`_norm_text` 去
 - **金标准回归**：demo 文件 × 标准工况的分析指标值固化（数值级护栏，物理计算
   漂移即失败，tests/test_golden_analysis.py）。
 
-### 18.4 扩展项（未做）
+### 18.4 上传管线的文件名编号识别（2026-11-24）
+
+识别口径与记录库导入同一套（§17.2，`records/naming.py` 的 `FileIdIndex.match`），
+索引在 `configs.py` 加载 conditions.yaml 时用 `file_ids` 建好。
+
+- 上传（`/api/chats/{cid}/files` 与 `files/by-path`）时调 `cfg.match_file_id(name)`，
+  编号与对应工况 id 写入 `FileEntry.file_id_no` / `cond_hint`，随 JSONL 会话日志
+  持久化、重放时恢复；
+- 同一结果必须出现在本轮 `<会话数据文件>` 清单里（文件名后括注
+  「（疑似工况 4.1.1 ABS 干沥青 100kph 全力制动）」）——attachment 消息属于
+  `is_injected` 排除的 kind，不回灌 prompt，只写在那里模型看不到，会误以为
+  「没识别工况」并白调一次 `list_files`；
+- `list_files` 工具每行同样带 `file_id_no` / `suspected_condition`（模型据此选工况）；
+- 分析前逐文件弱校验：文件名编号指向别的工况时卡片 warn（§18.5），不阻止分析；
+- 识别不出编号不猜：文件照旧可上传可分析，只是没有提示。
+
+### 18.6 扩展项（未做）
 
 - 记录库 × 报告联动：以 records 查询结果为数据源出历史对比报告
   （config 编号体系已就位，时序图需惰性解析路径）；
