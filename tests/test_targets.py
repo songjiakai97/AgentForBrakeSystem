@@ -548,6 +548,63 @@ def test_engine_blocks_analysis_when_profile_missing():
     assert "档位守卫：暂不分析" in labels, "拦截过程要在步骤里看得见"
 
 
+def test_engine_suppresses_panel_when_analysis_follows(tmp_path):
+    """实测 TCS：resolve_condition 先给候选，同轮模型自选工况并分析成功后，
+    不能再弹一次工况选择面板（结果都出来了还让用户选）。"""
+    data = os.path.join(ROOT, "tests", "data", "mf4", "abs_dry100_dist_abn.mf4")
+    if not os.path.exists(data):
+        pytest.skip("demo 数据未生成")
+    from brake_analyzer.agent.engine import ChatEngine
+    from brake_analyzer.llm.kb import KnowledgeBase
+    from web.store import Store
+
+    cond = "tcs_full_throttle_dry_asphalt_0to100kph"
+    llm = ToolLlm([
+        ("resolve_condition", {}),        # 信息不足 → 候选面板（挂起）
+        ("run_analysis_on_files", {"condition_id": cond, "profile": "4WD|TCS"}),
+    ])
+    eng = ChatEngine(load_configs(CONFIG_DIR), llm,
+                     KnowledgeBase(os.path.join(ROOT, "knowledge")),
+                     Store(upload_dir=str(tmp_path / "uploads")))
+    chat = eng.store.create_chat()
+    eng.store.add_file(chat, "tcs_run.mf4", open(data, "rb").read())
+    for _ in eng.events(chat, "4WD|TCS 跑一下这个工况"):
+        pass
+    kinds = _kinds(chat)
+    assert "analysis_result" in kinds
+    assert "target_options" not in kinds, "分析结果已出，不该再弹候选面板"
+
+
+def test_engine_suppresses_profile_panel_after_retry(tmp_path):
+    """档位守卫挂起面板后，模型同轮补全档位重跑成功：面板作废，不重复弹。"""
+    data = os.path.join(ROOT, "tests", "data", "mf4", "abs_dry100_dist_abn.mf4")
+    if not os.path.exists(data):
+        pytest.skip("demo 数据未生成")
+    from brake_analyzer.agent.engine import ChatEngine
+    from brake_analyzer.llm.kb import KnowledgeBase
+    from web.store import Store
+
+    cond = "tcs_full_throttle_dry_asphalt_0to100kph"
+    llm = ToolLlm([
+        ("run_analysis_on_files", {"condition_id": cond}),           # 缺档位 → 挂面板
+        ("run_analysis_on_files", {"condition_id": cond,
+                                   "profile": "4WD|TCS"}),           # 补全后重跑
+    ])
+    eng = ChatEngine(load_configs(CONFIG_DIR), llm,
+                     KnowledgeBase(os.path.join(ROOT, "knowledge")),
+                     Store(upload_dir=str(tmp_path / "uploads")))
+    chat = eng.store.create_chat()
+    eng.store.add_file(chat, "tcs_run.mf4", open(data, "rb").read())
+    for _ in eng.events(chat, "4WD TCS 跑一下"):
+        pass
+    kinds = _kinds(chat)
+    assert "analysis_result" in kinds
+    assert "target_options" not in kinds
+    labels = [it["label"] for m in chat.messages if m.kind == "steps"
+              for it in (m.data or {}).get("items", [])]
+    assert "档位守卫：暂不分析" in labels
+
+
 def test_engine_allows_analysis_with_profile_or_no_profiles():
     """没声明档位的功能（abs）命中即分析；带档位的 TCS 给了**完整** profile 就放行
     （只给一维会被缺维守卫拦下，见 test_cond_index.py）。"""

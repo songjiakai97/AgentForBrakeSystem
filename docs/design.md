@@ -610,7 +610,10 @@ LLM 可选/降级。`AnalysisResult` 一次生成，Web 各视图共用。
 - 工具 `hop` 的落库规则：`function`/`condition`/`profile` → 落 `target_options` 面板；
   `catalog`（工况清单）与 `resolved` 只作为 `tool` 应答回灌模型，不弹面板；`error` 交还
   模型组织措辞。面板只出现在"信息不足"时，且候选层级由工具保证（`function` 的候选一律是
-  功能，不会出现别的功能的工况）。
+  功能，不会出现别的功能的工况）。**面板延迟到本轮收尾才落库**：模型可能在同一轮里
+  自行补全槽位/档位并直接分析（实测 TCS：resolve 先给候选、随后 run_analysis 已出结果），
+  此时一律丢弃挂起的面板，否则用户在结果出来后还要再选一次；后续轮次 `resolved`
+  也会作废此前挂起的面板。用户点停止时不补弹面板。
 - **分析结果必须回灌数值**（`digest_from_analysis` / `digest_payload` / `digest_line`，
   `llm/prompts.py`）：`run_analysis_on_files` 的 `tool` 应答带 `results`——每个指标的
   实测值（3 位）、单位、限值串（`≤40` / `≥1.6` / `1.6~10`）、`ok/abnormal/missing` 判定、

@@ -329,6 +329,11 @@ class ChatEngine:
                 "info")]))
         previewed = False   # 是否已向用户流出了正文预览
         preview_buf: List[str] = []   # 已流出的正文，停止时按方案 (a) 落库
+        # 候选面板延迟到本轮收尾再弹：模型可能在同轮里自行补全槽位并直接分析
+        # （实测 TCS：resolve_condition 先给候选，接着 run_analysis 出了结果，
+        # 面板却还挂着再让用户选一次）。analysis_done 之后一律不弹。
+        pending_panel = None
+        analysis_done = False
         try:
             rnd = 0
             wrap_up = False    # 工具轮次耗尽后的收尾轮：禁用工具，只出结论
@@ -389,6 +394,10 @@ class ChatEngine:
                         m = self._msg(chat, "text", content)
                         state["claimed"] = True
                         yield self._mevent(m)
+                    # 本轮收尾：只有没出过分析结果，才把挂起的候选/档位面板弹出来
+                    if pending_panel is not None and not analysis_done:
+                        state["claimed"] = True
+                        yield self._mevent(self._options(chat, pending_panel))
                     return
 
                 if wrap_up:
@@ -410,6 +419,9 @@ class ChatEngine:
                                       "（工具轮次已用尽且未生成结论——请拆分提问重试。）")
                         state["claimed"] = True
                         yield self._mevent(m)
+                    if pending_panel is not None and not analysis_done:
+                        state["claimed"] = True
+                        yield self._mevent(self._options(chat, pending_panel))
                     return
 
                 asst = {"role": "assistant", "content": reply.content or ""}
@@ -491,17 +503,18 @@ class ChatEngine:
                         # 缺维守卫：没给 profile 或只给了部分维度（如仅 "4WD"）都拦下——
                         # 部分档位的其余维度指标会静默走 default 条目（§10.8）
                         if spec.guard_profile:
-                            missing = self._profile_guard(chat, args.get("condition_id"),
-                                                          args.get("profile"))
+                            missing = self._profile_gap(args.get("condition_id"),
+                                                        args.get("profile"))
                             if missing is not None:
-                                # 与离线路径同一约束：声明了档位的功能没选档就不分析
+                                # 与离线路径同一约束：声明了档位的功能没选档就不分析。
+                                # 面板先挂起：同轮里模型可能补全档位再调一次
                                 cond = self.cfg.condition(args.get("condition_id") or "")
                                 state["claimed"] = True
                                 yield self._mevent(self._step_on(chat, [(
                                     "档位守卫：暂不分析",
                                     f"工况 {cond.id if cond else args.get('condition_id')} "
                                     "所属功能需先选档位", "warn")]))
-                                yield self._mevent(missing)
+                                pending_panel = missing
                                 payload = {"ok": False, "hop": "profile",
                                            "note": "该功能需先选档位，已把档位面板给用户"}
                                 messages.append({
@@ -515,6 +528,11 @@ class ChatEngine:
                             for m in msgs:
                                 state["claimed"] = True
                                 yield self._mevent(m)
+                            if any(m.kind == "analysis_result" for m in msgs):
+                                # 本轮已经出结果：此前挂起的候选/档位面板作废，
+                                # 不能再让用户选一遍
+                                analysis_done = True
+                                pending_panel = None
                             failed = " / ".join(
                                 (m.content or "") for m in msgs if m.kind == "error")[:400]
                             if digests:
@@ -600,11 +618,14 @@ class ChatEngine:
                                 row["hits"] = hits
                             yield self._mevent(self._step_on(chat, [row]))
                             # 面板只在信息不足时弹；hop=function 的候选由工具保证是功能级，
-                            # 工况清单（catalog）不会走到这里，不混进用户可见选项
+                            # 工况清单（catalog）不会走到这里，不混进用户可见选项。
+                            # 先记下来，本轮收尾时若没出分析结果再弹（见 pending_panel）
                             if hop in ("function", "condition", "profile"):
-                                state["claimed"] = True
-                                yield self._mevent(self._options(chat, result))
-                            elif hop in ("catalog", "resolved", "error"):
+                                pending_panel = result
+                            elif hop == "resolved":
+                                # 后续轮次已定位到唯一工况：之前的候选面板作废
+                                pending_panel = None
+                            elif hop in ("catalog", "error"):
                                 # 清单/命中结果只作为 tool 应答回灌给 LLM；
                                 # error 也交还 LLM 组织措辞，不直接落用户可见消息
                                 pass
@@ -656,7 +677,7 @@ class ChatEngine:
         state["stopped"] = True
 
     def _profile_guard(self, chat, condition_id: str, profile: Optional[str] = None):
-        """声明了档位的功能未选档或档位缺维 → 返回档位面板；不需要拦时返回 None。
+        """声明了档位的功能未选档或档位缺维 → 落一条档位面板；不需要拦时返回 None。
 
         `hop=resolved` 只保证工况唯一，不保证档位唯一；离线路径本来就是"先选档再分析"，
         在线路径不给这个例外的话，同一个问题会有两套结论口径。
@@ -664,6 +685,15 @@ class ChatEngine:
         缺维守卫：多维功能只给一维（如仅 "4WD"）时，其余维度的指标会静默走 default
         条目（§10.8）——结果里看不出"这个值不是用户选的档位算出来的"。面板把已给的
         维度预选上，用户只需确认剩余维度。
+        """
+        rec = self._profile_gap(condition_id, profile)
+        return None if rec is None else self._options(chat, rec)
+
+    def _profile_gap(self, condition_id: str, profile: Optional[str] = None):
+        """档位面板的原始载荷（不落库）；档位完整/不适用时返回 None。
+
+        工具循环先拿到它挂起，本轮收尾时确认没有出分析结果再落成面板——模型可能
+        在同一轮里补全档位直接分析（实测 TCS），此时不能再弹。
         """
         cond = self.cfg.condition(condition_id or "")
         if cond is None:
@@ -678,7 +708,7 @@ class ChatEngine:
             if complete:
                 return None
         preset = [t for t in given if any(t in d for d in (fn.profile_dims or []))]
-        return self._options(chat, {
+        return {
             "hop": "profile", "function": fn.key,
             "target": {"key": cond.id, "name": cond.name},
             "candidates": [{"key": cond.id, "name": cond.name}],
@@ -686,7 +716,7 @@ class ChatEngine:
             **({"preset": preset} if preset else {}),
             "hint": ("档位不完整：已按 " + "|".join(preset) + " 预选，请确认其余维度"
                      if preset else "该功能需先选档位再分析"),
-        })
+        }
 
     def _loader_for(self, path: str):
         """按扩展名取 Loader 实例（同一实例复用，DBC 只解析一次）。"""
