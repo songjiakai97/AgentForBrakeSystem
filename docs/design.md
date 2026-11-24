@@ -617,6 +617,9 @@ LLM 可选/降级。`AnalysisResult` 一次生成，Web 各视图共用。
   （`digest_line`）供跨轮追问引用。
   超预算时 `digest_payload` 按「结论原文 → verdicts → 最老的结果」逐级降级，
   **保证序列化后仍落在 `TOOL_PAYLOAD_CLIP_CHARS` 内**，不留半截坏 JSON。
+  工具应答的 `note` 与 system prompt 同时写明「只复述数值不算结论」：总体判定
+  （达标/哪些异常或缺失）→ 规则结论成因 → 标定方向或需补数据项；9B 实测会把
+  数值逐项念完就停，这一步不写死就等于没有结论。
   部分文件失败时另带 `failed` 字段，避免"有结果"掩盖"有些文件没跑出来"。
 - **missing 成因随结果给出图例**（`MISSING_REASON_LEGEND` / `reasons_present`，§10.1）：
   digest 里每个 missing 指标带 `reason`，工具应答只在**本次结果真的出现过该成因**时附

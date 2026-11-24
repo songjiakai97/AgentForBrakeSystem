@@ -296,6 +296,18 @@ def test_run_analysis_scopes_to_latest_upload(cfg):
     assert "x.mf4" in tail and tail.endswith("分析一下")
 
 
+def test_system_prompt_requires_conclusion_after_analysis():
+    """分析完只复述数值不算结论：提示词与工具应答都要把「必须下结论」写死。
+
+    9B 实测：拿到结果后按 digest_line 逐项念一遍就停，用户看不到达标/异常判定
+    与标定方向——模型不会自己把「已给数据」升级成「已给结论」。
+    """
+    from brake_analyzer.llm.prompts import SYSTEM_CHAT
+
+    assert "只复述指标不算结论" in SYSTEM_CHAT
+    assert "总体判定" in SYSTEM_CHAT
+
+
 def test_turn_context_carries_uploaded_file_id(cfg):
     """上传时识别出的编号/工况要出现在本轮清单里。
 
