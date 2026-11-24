@@ -218,7 +218,9 @@ brake-agent/
   唯一出处；`signals_mf4.yaml` 只能声明 `signal_maps`，引用未登记的逻辑名即报错，条目里
   再写 `unit`/`description` 也直接报错（两处口径早晚漂移，宁可启动期失败）。
 - `chart_layout` 同样只在 `signals.yaml` 里读：分组引用未登记信号、同一信号重复分组都报错；
-  未编排的信号各自补一个单信号分组，保证图表不静默丢通道。
+  未编排的信号各自补一个单信号分组，保证图表不静默丢通道。不同功能的状态量（如
+  `ABS_Active` / `TCS_Active`）各自成行、不共轴：叠在一起会互相压住，且 `only` 过滤后
+  整行消失，正好对应「一个功能只看自己那个激活信号」。
 - 搬运后残留的顶层段（如把 `chart_layout` 留在 `signals_mf4.yaml`）由 `_reject_unknown_sections`
   拒绝并指回 `signals.yaml` —— "看着还生效"的死配置比缺失更难查。
 - `required_signals`（参与计算的信号集）= 每个功能分段器读取的通道（`SEGMENTER_SIGNALS`，
@@ -2505,7 +2507,9 @@ surface_code + function + 功能名` 做归一化包含比对（`_norm_text` 去
   config 指标补「无值（未算出）」行，不静默丢指标；
 - 时序图：每个事件样本一张、紧跟其表居中；口径与网页端完全一致——只画
   functions.yaml 该功能的 signals，按 signals.yaml chart_layout 分组，
-  matplotlib hspace=0 紧贴、强制 Agg 后端（无头安全）；
+  matplotlib hspace=0 紧贴、强制 Agg 后端（无头安全）；配色沿用 ECharts 默认
+  调色板并**跨子图连续循环**（不让每根 axes 从同一个蓝色重启），每根子图都出
+  图例（单信号行也出）；行高 0.95in，一张六行图约 6.7×6.2in，不再占满一页；
 - 规则结论/标定建议不打散进工况小节，收进「3 规则结论与标定建议汇总」章
   （标定建议已合并为一次 LLM 请求、一条总建议文本消息，见 §6.9a）。
 

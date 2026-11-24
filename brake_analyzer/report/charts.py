@@ -30,6 +30,19 @@ RGBA_COLORS = {
     for key, v in STATUS_COLORS.items() if _RGBA_RE.match(v)
 }
 
+# 与前端 ECharts 默认调色板同序，并**跨子图全局循环**：如果交给 matplotlib
+# 每根 axes 自己的 Cycler，每行都会从同一个蓝色开始，多行图看起来像同一信号。
+CHART_PALETTE = ["#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de",
+                 "#3ba272", "#fc8452", "#9a60b4", "#ea7ccc"]
+
+# 版心宽约 6.7in（A4 去 2cm 边距）；行高给 0.95in：再高一张图就近乎占满一页
+ROW_HEIGHT_IN = 0.95
+FIG_PAD_IN = 0.45
+
+
+def _color_at(i: int) -> str:
+    return CHART_PALETTE[i % len(CHART_PALETTE)]
+
 
 def _setup_font() -> None:
     import matplotlib
@@ -67,14 +80,34 @@ def render_sample_chart(
     groups = _groups_from_layout(signals, layout, only=only) if layout else []
     if not groups:
         groups = _groups_by_unit(signals, only or DEFAULT_SERIES)
+    fig, axes, plotted = _build_figure(groups, signals, window, highlight_status)
+    if not plotted:
+        plt.close(fig)
+        return False
+    if title:
+        fig.suptitle(title, fontsize=10)
+    fig.savefig(out_png, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def _build_figure(groups, signals, window, highlight_status):
+    """按分组画多行一列子图，返回 (fig, axes, 曲线数)。
+
+    颜色跨行连续编号（_color_at），每根子图都出图例——单信号行也一样，
+    否则报告里「这条线是什么」只能靠 y 轴名猜。
+    """
+    import matplotlib
+    import matplotlib.pyplot as plt
+
+    matplotlib.use("Agg")
     n = max(1, len(groups))
-    # 行高按子图数走：版心宽约 6.7in（A4 去 2cm 边距），每行 1.4in 够放下 y 轴名+图例
     fig, axes = plt.subplots(
         n, 1, sharex=True, squeeze=False,
-        figsize=(6.7, 1.4 * n + 0.7),
+        figsize=(6.7, ROW_HEIGHT_IN * n + FIG_PAD_IN),
         gridspec_kw={"hspace": 0},
     )
-    plotted = 0
+    plotted = color_i = 0
     for i, (label, unit, sigs) in enumerate(groups):
         ax = axes[i][0]
         ax.grid(True, axis="y", alpha=0.3)
@@ -85,22 +118,23 @@ def render_sample_chart(
                 ax.axvspan(float(t0), float(t1),
                            color=RGBA_COLORS.get(highlight_status, RGBA_COLORS["ok"]),
                            zorder=0)
+        row_plotted = 0
         for name in sigs:
             data = _series_data(signals, name, window)
             if not data:
                 continue
             ts = [p[0] for p in data]
             vals = [float("nan") if p[1] is None else p[1] for p in data]
-            ax.plot(ts, vals, linewidth=1.0, label=name)
+            ax.plot(ts, vals, linewidth=1.0, color=_color_at(color_i), label=name)
+            color_i += 1
+            row_plotted += 1
             plotted += 1
-        if len(sigs) > 1 and plotted:
-            ax.legend(fontsize=7, frameon=False, loc="upper right", ncols=2)
-    if not plotted:
-        plt.close(fig)
-        return False
-    axes[-1][0].set_xlabel("s", fontsize=9)
-    if title:
-        fig.suptitle(title, fontsize=10)
-    fig.savefig(out_png, dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
-    return True
+        if row_plotted:
+            # 图例压在曲线上：给个半透明白底（无边框），静态图没有悬停可退让
+            ax.legend(fontsize=7, loc="upper right",
+                      ncols=1 if row_plotted == 1 else min(row_plotted, 3),
+                      frameon=True, facecolor="white", edgecolor="none",
+                      framealpha=0.85)
+    if plotted:
+        axes[-1][0].set_xlabel("s", fontsize=9)
+    return fig, axes, plotted

@@ -161,6 +161,44 @@ def test_render_sample_chart_respects_function_signals(tmp_path):
     assert os.path.getsize(png_all) != os.path.getsize(png)
 
 
+def test_activation_signals_occupy_separate_rows():
+    """激活标志各占一行：不同功能的状态量不共轴，only 过滤后另一行整行消失。"""
+    from brake_analyzer.charts.html import _groups_from_layout
+
+    rows = {g.label: g.signals for g in CFG.chart_layout}
+    assert rows["ABS 激活"] == ["ABS_Active"]
+    assert rows["TCS 激活"] == ["TCS_Active"]
+    labels = [g[0] for g in _groups_from_layout(
+        _signals(), CFG.chart_layout, only=list(CFG.function("abs").signals))]
+    assert "ABS 激活" in labels and "TCS 激活" not in labels
+
+
+def test_report_chart_global_palette_and_legend_per_axis():
+    """颜色跨子图连续循环（不每轴重置成第一个颜色），单信号行也出图例。"""
+    from brake_analyzer.charts.html import _groups_from_layout
+    from brake_analyzer.report.charts import CHART_PALETTE, _build_figure
+
+    sigs = _signals()
+    groups = _groups_from_layout(sigs, CFG.chart_layout,
+                                 only=["speed_vbox", "Ax", "yaw_rate"])
+    fig, axes, plotted = _build_figure(groups, sigs, (2.0, 5.5), "ok")
+    try:
+        import matplotlib.pyplot as plt
+        assert plotted == 3
+        colors = []
+        for ax in axes[:, 0]:
+            lines = ax.get_lines()                 # axvspan 是 Patch，不在 lines 里
+            assert len(lines) == 1
+            assert ax.get_legend() is not None, "单信号子图也要有图例"
+            colors.append(lines[0].get_color())
+        assert colors == CHART_PALETTE[:3]
+        assert len(set(colors)) == 3
+        assert fig.get_size_inches()[1] < 0.95 * 3 + 0.6, "行高应压缩，一张图不占满页"
+    finally:
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+
 # ---------------- collect_analyses ----------------
 
 def test_collect_analyses_order_dedupe_filter():

@@ -42,6 +42,11 @@ chart_layout:
   - label: 踏板开度
     unit: "%"
     signals: [BrakePedalPos, ThrottlePedalPos]
-  - label: 激活标志
+  # 激活标志各占一行：不同功能的状态量叠在同一 y 轴上会互相压住，
+  # 而且「一个功能只关心自己那个激活信号」，分开后 only 过滤直接整行消失。
+  - label: ABS 激活
     unit: ""
-    signals: [ABS_Active, TCS_Active]
+    signals: [ABS_Active]
+  - label: TCS 激活
+    unit: ""
+    signals: [TCS_Active]
