@@ -655,3 +655,19 @@ def test_suspected_candidates_are_tagged_without_reachability_badge():
     # 两个面板（消息内候选 + 待选遮罩）都要显示疑似标记
     assert src.count('v-if="c.suspected"') == 2
     assert "llm_reachable" not in src and "不可达" not in src
+
+
+def test_uploaded_files_are_not_pinned_above_composer():
+    """发送后文件只在对话里留登记气泡，输入框上方不再常驻文件列表。
+
+    历史行为把 chat.files 画成输入框上方的 chip 行：文件已发送、对话里已有
+    「已接收文件」气泡，上面还挂一份，用户会以为它还没发出去；删除入口改到
+    这条气泡里，避免功能缩水。
+    """
+    path = os.path.join(ROOT, "web", "frontend", "index.html")
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
+    assert 'class="uploaded"' not in src
+    assert 'class="uptag"' not in src
+    # attachment 气泡带就地移除入口（file_id 来自上传接口返回的 data）
+    assert "delFile(m.data.file_id)" in src

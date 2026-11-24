@@ -366,23 +366,16 @@ def _spec_generate_report(c: SpecCtx) -> dict:
         "function": {
             "name": "generate_report",
             "description": (
-                "把本会话已完成的分析结果汇总生成一份 Word（docx）分析报告："
-                "总览 + 每份分析的指标表（指标/限值/结果/判定）、规则结论、"
-                "标定建议与事件窗口时序图。用户要报告/导出 Word/汇总成文档时调用。"
+                "把本会话已完成的分析结果汇总生成一份 Word（docx）报告："
+                "按工况分节，每节含客观指标表与事件窗口时序图。"
+                "报告一律收录会话内已落库的全部分析结果（不按工况筛选，"
+                "避免只写进最后一份数据）。用户要报告/导出 Word/汇总成文档时调用。"
                 "报告数值全部取自已落库的分析结果，不要先编内容再生成；"
                 "会话里还没有任何分析结果时，先分析再出报告。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "condition_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "可选：只把指定工况的分析写进报告（工况 id）。"
-                            "省略即收录会话内全部分析结果"
-                        ),
-                    },
                     "title": {
                         "type": "string",
                         "description": "报告标题，可选；默认「制动数据分析报告」",
@@ -473,9 +466,10 @@ def _ex_compare_records(eng, chat, args, ctx) -> dict:
 
 
 def _ex_generate_report(eng, chat, args, ctx) -> Any:
+    # 不转发 condition_ids：模型会把 run_analysis_on_files 的同名参数带过来，
+    # 结果是多份分析只写进最后一份。报告口径固定为「会话内全部分析结果」。
     return eng._report_tool(
         chat,
-        condition_ids=args.get("condition_ids"),
         title=args.get("title") or "",
         charts=args.get("charts") or "all",
     )

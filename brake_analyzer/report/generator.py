@@ -58,6 +58,8 @@ def collect_analyses(chat, condition_ids: Optional[List[str]] = None) -> List[di
     condition_ids 给出时只保留指定工况；None/空 = 全部。消息 data 是落库时的
     深拷贝（含后续反馈同步过的 llm_suggestion），这里统一过 json_safe 防 NaN。
     """
+    if isinstance(condition_ids, str):
+        condition_ids = [condition_ids]     # 单个 id 误传成字符串时别按字符拆
     wanted = {str(c) for c in (condition_ids or []) if c}
     out: List[dict] = []
     seen = set()

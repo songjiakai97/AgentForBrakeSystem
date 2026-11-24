@@ -105,10 +105,9 @@ body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-ser
 .pending{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
 .fchip{background:var(--panel);border:1px solid #334155;border-radius:14px;padding:3px 10px;font-size:12px;display:flex;gap:6px;align-items:center}
 .fchip button{background:none;border:none;color:var(--abn);cursor:pointer;font-size:12px;padding:0}
-.uploaded{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
-/* 不在本轮默认分析范围内的历史文件：压暗但保留可删，配合 uptag 说明「没重跑」 */
-.fchip.out{opacity:.5;border-style:dashed}
-.uptag{align-self:center;font-size:11px;color:var(--warn,#fbbf24)}
+/* 文件登记在对话气泡里：历史文件弱化标注 + 就地移除（输入框上方不再常驻文件列表） */
+.histtag{color:var(--muted);font-size:11px;margin-left:6px}
+.delfile{background:none;border:none;color:var(--abn);cursor:pointer;font-size:12px;margin-left:8px;padding:0}
 .inputrow{display:flex;gap:8px;align-items:flex-end}
 .addbtn{width:38px;height:38px;border-radius:50%;border:1px solid #334155;background:var(--panel);color:var(--accent);font-size:20px;cursor:pointer;flex:none}
 textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:10px;color:var(--text);padding:9px 12px;font-size:14px;resize:none;height:38px;max-height:110px;font-family:inherit}
@@ -298,8 +297,14 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
           <template v-else>{{m.content}}</template>
         </div>
 
-        <!-- attachment note -->
-        <div v-else-if="m.kind==='attachment'" class="bubble">📎 {{m.content}}</div>
+        <!-- attachment note：文件只在对话里留一条登记记录（发送后不再在输入框上方常驻） -->
+        <div v-else-if="m.kind==='attachment'" class="bubble">📎 {{m.content}}<span
+             v-if="m.data && m.data.file_id && !fileAlive(m.data.file_id)"
+             class="histtag">（已从会话移除）</span><span
+             v-else-if="m.data && m.data.file_id && chat && chat.files.length > latestBatchIds.size && !latestBatchIds.has(m.data.file_id)"
+             class="histtag" title="本轮默认只分析最近一次上传的那批；要一起对比请对 Agent 说明">（历史文件，不在本轮默认分析范围）</span><button
+             v-if="m.data && m.data.file_id && fileAlive(m.data.file_id)" class="delfile"
+             title="从会话移除该文件" @click="delFile(m.data.file_id)">✕</button></div>
 
         <!-- target_options：待选的活面板一律搬到遮罩弹窗里；消息流只留历史占位或可展开的回执 -->
         <div v-else-if="m.kind==='target_options'" class="panel" :class="{used: !inModal(m)}">
@@ -439,13 +444,6 @@ textarea{flex:1;background:var(--panel);border:1px solid #334155;border-radius:1
     </div><!-- /msgsWrap -->
 
     <div class="composer">
-      <div class="uploaded" v-if="chat && chat.files.length">
-        <span class="uptag" v-if="chat.files.length > latestBatchIds.size">本轮默认分析：只有最后一批，其余未重跑</span>
-        <span v-for="f in chat.files" :key="f.file_id" class="fchip" :class="{out:!latestBatchIds.has(f.file_id)}"
-              :title="latestBatchIds.has(f.file_id)?'在本轮分析范围内':'不在本轮范围；想让 Agent 对比它，直接说「把 xxx 一起对比」'">
-          {{latestBatchIds.has(f.file_id)?'✅':'🗂'}} {{f.name}}
-          <button @click="delFile(f.file_id)">✕</button></span>
-      </div>
       <div class="pending" v-if="pending.length">
         <span v-for="(p,i) in pending" :key="i" class="fchip">📎 {{p.name}}<button @click="pending.splice(i,1)">✕</button></span>
       </div>
@@ -615,8 +613,8 @@ createApp({
       return null;
     },
     // 本轮默认分析范围 = 最后一次上传的那批（与后端 Chat.latest_batch 同口径）。
-    // 界面必须把它显示出来：默认范围收窄是看不见的行为，若还像原来那样给所有
-    // 文件打同一个 ✅，用户会以为历史文件也一起算了。
+    // 默认范围收窄是看不见的行为：attachment 气泡里对不在本批的历史文件弱化标注，
+    // 免得用户以为历史文件也一起算了。
     latestBatchIds(){
       const fs = (this.chat && this.chat.files) || [];
       if(!fs.length) return new Set();
@@ -755,6 +753,7 @@ createApp({
     },
     plain(t){ return String(t).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])).replace(/\n/g,'<br>'); },
     consumed(m){ return !!(m.meta && m.meta.consumed); },
+    fileAlive(fid){ return !!((this.chat && this.chat.files) || []).some(f => f.file_id === fid); },
     // 消息流里的面板：只有"不在弹窗里的那条"才画成历史占位/回执，
     // 待定那条由遮罩弹窗呈现，正文不在流里重复一遍
     inModal(m){ return !!(this.pendingPanel && m.message_id === this.pendingPanel.message_id); },

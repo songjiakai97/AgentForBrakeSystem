@@ -370,7 +370,32 @@ def test_tool_spec_registered():
     spec = next(s for s in build_tool_specs(CFG)
                 if s["function"]["name"] == "generate_report")
     props = spec["function"]["parameters"]["properties"]
-    assert "condition_ids" in props and "title" in props
+    assert "title" in props and "charts" in props
+    # 报告口径固定为「会话内全部分析结果」：不暴露 condition_ids，模型就不会把
+    # run_analysis_on_files 的同名参数带过来，导致多份分析只写进最后一份
+    assert "condition_ids" not in props
+
+
+def test_report_tool_includes_all_analyses_despite_stray_condition_ids(tmp_path):
+    """模型误带 condition_ids 时也必须收录全部分析（一轮多份数据的回归）。"""
+    from brake_analyzer.agent.registry import TOOLS
+
+    eng = _engine(tmp_path)
+    chat = eng.store.create_chat()
+    a_abs = _analysis(file_id="fx_1", file_name="a.mf4")
+    a_tcs = _analysis(analysis_id="an_2", condition_id=TCS_DRY_0100,
+                      condition_name="TCS 干沥青 0→100kph 全油门加速",
+                      function_key="tcs", profile="4WD|DTCS",
+                      file_id="fx_2", file_name="b.mf4")
+    for d in (a_abs, a_tcs):
+        eng.store.add_message(chat, "assistant", "analysis_result",
+                              content="x", data=d)
+    payload, msg = TOOLS["generate_report"].executor(
+        eng, chat, {"condition_ids": [TCS_DRY_0100], "title": "测试"}, {})
+    assert payload["ok"] is True and payload["analyses"] == 2
+    text = _docx_text(os.path.join(str(tmp_path), "reports",
+                                   chat.chat_id, payload["file"]))
+    assert "4.1.1 ABS" in text and "5.1.1 TCS" in text
 
 
 def test_history_injection_includes_report_kind():

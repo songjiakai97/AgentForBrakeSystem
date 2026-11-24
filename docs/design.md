@@ -1018,7 +1018,9 @@ list_files/query_records/read_record/compare_records/generate_report）
   显示）+ 新建对话按钮。知识库与外部工具是独立整页，不与聊天混排（信息架构参考主流
   agent：每类东西一个页面，聊天始终是一等公民）。
 - 对话视图：聊天主区 + 底部输入区（「+」上传、「路径」引用本机文件、多行输入、
-  发送/停止二合一按钮）。输入区上方：已上传文件 chips（✅=本轮默认范围）、notice 提示条。
+  发送/停止二合一按钮）。输入区上方只放**待发送**文件 chips 与 notice 提示条；
+  已发送文件只在对话里留一条 `attachment` 登记气泡（可就地移除），不再常驻输入框上方
+  ——文件已经进会话，再挂一份会让人以为没发出去（2026-11-24）。
   合成样例条带不上正式界面（演示数据，需要时走 /debug 或 API）。
 - 顶栏：引擎徽标（`LLM: <model>` / 离线模式）、外部 MCP 徽标（`.badge.mcp/.mcpoff`，
   逻辑见下）、**`ctx` 上下文徽标**（右对齐，hover 弹明细卡：总估算 tok、窗口、阈值进度条、
@@ -1155,7 +1157,8 @@ list_files/query_records/read_record/compare_records/generate_report）
   验证无效」按钮（验证类可附说明）→ `POST /api/analyses/{id}/feedback` 落反馈 →
   LLM 基于反馈+原建议+实测摘要生成 `followup`（下一步标定动作，可为空并说明理由）
   → 卡片就地追加展示。LLM 不可用时只落反馈，不阻塞。
-- 已上传文件在顶部 chips 展示，可移除，并按分析范围标记（§8.2 ①b）。
+- 已上传文件在对话的 `attachment` 登记气泡里展示、可就地移除；不在本轮默认分析范围的
+  历史文件在同一气泡内弱化标注（§8.2 ①b），不在输入框上方常驻。
 
 ### 8.4 分析状态
 
@@ -2504,6 +2507,10 @@ surface_code + function + 功能名` 做归一化包含比对（`_norm_text` 去
 - 报告正文只有「工况小节」：按工况分节（Heading 1），每节 = 小节标题 +
   客观指标两列表 + 空行 + 居中时序图；总览表、规则结论/标定建议汇总、附录
   都不再进报告（数据仍由 build_context 提供，自定义模板可用，§18.7）。
+- 报告范围固定为「会话内已落库的全部分析结果」：工具不再暴露 `condition_ids`
+  参数。原因是模型会把 `run_analysis_on_files` 的同名参数带进 `generate_report`，
+  一轮分析多份数据时报告只剩最后一份（2026-11-24 实测）；筛选能力保留在
+  `collect_analyses(chat, condition_ids)` 供程序调用，不走模型。
 - 编号/顺序全按 config：小节标题 = conditions.yaml 的 `file_ids`（4.1.1）+ `name`，
   顺序 = functions.yaml 功能序 × conditions.yaml 文件序；同工况多文件合并进同一
   编号小节，文件进块前导行（单文件单样本时前导行消失，即最小形态）；
