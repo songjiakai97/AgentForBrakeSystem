@@ -421,6 +421,17 @@ def test_client_stream_request_has_bounded_read_timeout():
     assert client._client.chat.completions.kwargs["timeout"] == REQUEST_TIMEOUT_SEC
 
 
+def test_client_non_stream_chat_returns_reply_with_usage():
+    """非流式 chat 的耗时统计（usage.elapsed_ms）依赖 t0；漏定义会被 except 吞成
+    llm_error，外观上和「连不上端点」一模一样。这里要求干净返回并带上用量。"""
+    stream = FakeStream(_tool_arg_chunks(3))
+    client = _client(stream)
+    reply = client.chat([{"role": "user", "content": "x"}])
+    assert not reply.error, reply.error
+    assert reply.content == "ok"
+    assert reply.usage["elapsed_ms"] >= 0
+
+
 class StoppedMidStreamLlm:
     """假客户端：流跑到一半就按契约返回 error="llm_stopped"（真实客户端的逐块自检）。"""
 

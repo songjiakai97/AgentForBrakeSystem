@@ -156,6 +156,7 @@ class LlmClient:
     ) -> LlmReply:
         if not self.available:
             return LlmReply(error="llm_unavailable")
+        t0 = time.time()
         try:
             resp = self._client.chat.completions.create(
                 model=self.model,
