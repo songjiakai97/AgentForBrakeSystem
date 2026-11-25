@@ -151,11 +151,20 @@ def drive_chart_groups(cfg, function_key: str, signals: dict,
     groups: List[ChartGroup] = []
     for axle in axles:
         actual = d.torque["actual"].get(axle)
-        target = info.target_signals.get(axle)
+        # 一根轴固定两条线：实际扭矩 + 当次请求（TCS 用 MMotTarFast，DTCS 用 DMC）。
+        # 选中的那类请求在本轴没数据时回退另一类，避免轴行只剩实际扭矩一条线
+        kind = "dtcs" if info.dtcs else "tcs"
+        target = d.torque[kind].get(axle)
+        if not (target and has_data(signals, target)):
+            other = "tcs" if kind == "dtcs" else "dtcs"
+            alt = d.torque[other].get(axle)
+            if alt and has_data(signals, alt):
+                target, kind = alt, other
         sigs = [s for s in (actual, target) if s and has_data(signals, s)]
         if not sigs:
             continue
-        label = f"{'前轴' if axle == 'front' else '后轴'}扭矩（{info.target_kind}）"
+        kind_label = "DTCS" if kind == "dtcs" else "TCS"
+        label = f"{'前轴' if axle == 'front' else '后轴'}扭矩（{kind_label}）"
         unit = str(cfg.signal_registry.get(actual or "", {}).get("unit") or "")
         groups.append(ChartGroup(label=label, unit=unit, signals=sigs))
     return groups

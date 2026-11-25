@@ -162,6 +162,39 @@ def test_other_drive_type_has_no_torque_rows(cfg):
     assert drive_chart_groups(cfg, "tcs", signals) == []
 
 
+def test_axle_row_is_actual_plus_one_request(cfg):
+    """一根轴两条线：实际扭矩在前 + 当次请求一条；TCS/DMC 两条请求不拆成两根轴。"""
+    signals = _signals("tcs_wet60_normal.mf4")
+    dtcs = drive_chart_groups(cfg, "tcs", signals, "4WD|DTCS")
+    assert [g.label for g in dtcs] == ["前轴扭矩（DTCS）", "后轴扭矩（DTCS）"]
+    assert [g.signals for g in dtcs] == [
+        ["FrontMotorTorque", "DMCTarTorqueFA"],
+        ["RearMotorTorque", "DMCTarTorqueRA"],
+    ]
+    tcs = drive_chart_groups(cfg, "tcs", signals, "4WD|TCS")
+    assert [g.label for g in tcs] == ["前轴扭矩（TCS）", "后轴扭矩（TCS）"]
+    assert [g.signals for g in tcs] == [
+        ["FrontMotorTorque", "MMotTarFastFA"],
+        ["RearMotorTorque", "MMotTarFastRA"],
+    ]
+    assert all(len(g.signals) == 2 for g in dtcs + tcs)
+
+
+def test_request_falls_back_to_other_kind_when_selected_empty(cfg):
+    """选的请求通道本轴没数据时用另一类补上，轴行仍保持两条线。"""
+    import numpy as np
+
+    from brake_analyzer.loaders.base import SignalData
+
+    signals = dict(_signals("tcs_wet60_normal.mf4"))
+    signals["DMCTarTorqueFA"] = SignalData(ts=np.array([]), values=np.array([]))
+    groups = drive_chart_groups(cfg, "tcs", signals, "4WD|DTCS")
+    front = groups[0]
+    assert front.label == "前轴扭矩（TCS）"          # 标签跟着实际画的那条走
+    assert front.signals == ["FrontMotorTorque", "MMotTarFastFA"]
+    assert groups[1].label == "后轴扭矩（DTCS）"      # 后轴 DMC 有数据，仍按 DTCS
+
+
 def _const_like(sig, value):
     import numpy as np
 
