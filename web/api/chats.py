@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 
 from brake_analyzer.charts.html import build_chart_option, timeseries_payload
+from brake_analyzer.drive import layout_with_drive
 from brake_analyzer.events.segment import is_valid
 from brake_analyzer.llm.prompts import digest_from_analysis
 from brake_analyzer.schemas import json_safe
@@ -242,21 +243,22 @@ def api_select(cid: str, body: SelectIn):
             raise HTTPException(400, f"未知工况 {body.target_key}")
         fn = st.CFG.function(cond.function)
         profile = (body.profile or "").strip() or None
-        chosen = f"{cond.name}（{profile}）" if profile else cond.name
-        if fn.profiles and not profile:
-            # 需要档位但未提供 → 返回档位选择面板
-            st.STORE.mark_panels_consumed(chat, chosen=chosen)
-            msg = st.ENGINE._options(chat, {
-                "hop": "profile", "function": fn.key,
-                "target": {"key": cond.id, "name": cond.name},
-                "profiles": fn.profiles, "profile_dims": fn.profile_dims,
-            })
-            return {"messages": [msg.to_dict()]}
         if profile:
             tokens = [t for t in profile.replace(",", "|").replace("_", "|").split("|") if t]
             bad = [t for t in tokens if fn.profiles and t not in fn.profiles]
             if bad:
                 raise HTTPException(400, f"档位 {bad} 不在功能 {fn.key} 允许列表 {fn.profiles}")
+        # 未选档/缺维时可先从数据识别（驱动形式 + DMC）；显式选择优先，识别只补空缺
+        if fn.profiles:
+            merged, note, gap = st.ENGINE._resolve_profile(chat, cond.id, profile)
+            if gap is not None:
+                st.STORE.mark_panels_consumed(chat, chosen=cond.name)
+                msg = st.ENGINE._options(chat, gap)
+                return {"messages": [msg.to_dict()]}
+            profile = merged
+            if note:
+                st.ENGINE._step_on(chat, [("驱动形式识别", note, "ok")])
+        chosen = f"{cond.name}（{profile}）" if profile else cond.name
         st.STORE.mark_panels_consumed(chat, chosen=chosen)
         st.STORE.note_selection(chat)
         added, _digests = st.ENGINE._analyze(chat, cond.id, profile)
@@ -369,7 +371,9 @@ def api_analysis_timeseries(analysis_id: str, signal: Optional[str] = Query(None
     # 默认只画该功能关心的通道（ABS 不画 TCS_Active），分组仍按 signals.yaml
     fn = st.CFG.function(res.function_key)
     names = [signal] if signal else (list(fn.signals) if fn and fn.signals else None)
-    layout = st.CFG.chart_layout
+    # 静态布局 + 本次驱动形式对应的轴扭矩行（四驱两根轴、两驱一根轴、其余不出）
+    layout = layout_with_drive(st.CFG, res.function_key, sess.signals,
+                               res.profile, st.CFG.chart_layout)
     payload = timeseries_payload(sess.signals, window=window, series_names=names, layout=layout)
     payload["file_name"] = sample.file_name
     payload["chart_option"] = build_chart_option(

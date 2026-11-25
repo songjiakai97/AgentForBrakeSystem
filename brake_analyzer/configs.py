@@ -148,6 +148,141 @@ def _profile_tokens(profile: str) -> List[str]:
     return out
 
 
+# ---------------------------------------------------------------- 驱动形式（§9.5）
+
+# 驱动形式只决定「看哪根轴」：前驱一根、后驱一根、四驱两根，其余不看扭矩轴。
+DRIVE_LAYOUTS = {"front", "rear", "awd", "other"}
+DRIVE_AXLES = ("front", "rear")
+
+
+@dataclass
+class DriveConfig:
+    """signals.yaml 的 drive 段：驱动类型编码 → 档位维度 / 轴扭矩信号。
+
+    扭矩信号是「按驱动形式动态出图」的：它们不进 chart_layout，
+    而是在每次分析时由 brake_analyzer/drive.py 按识别出的前后轴拼成子图。
+    """
+    function: str
+    signal: str
+    types: Dict[int, Dict[str, str]]      # 编码 → {name, layout}
+    layouts: Dict[str, str]               # layout → 档位维度取值（4WD/2WD）
+    assist: Dict[str, str]                # dtcs/tcs → 档位维度取值（DTCS/TCS）
+    torque: Dict[str, Dict[str, str]]     # actual/tcs/dtcs → {front, rear} 信号
+
+    def torque_signals(self) -> List[str]:
+        out: List[str] = []
+        for group in self.torque.values():
+            for sig in group.values():
+                if sig not in out:
+                    out.append(sig)
+        return out
+
+    def dynamic_signals(self) -> List[str]:
+        """不参与静态 chart_layout 的信号：驱动类型 + 全部轴扭矩。"""
+        return [self.signal] + self.torque_signals()
+
+
+def _drive_code(key: Any) -> int:
+    """驱动类型编码：YAML 的 0x1 / "0x1" / 1 都认。"""
+    if isinstance(key, bool):
+        raise ConfigError(f"drive.types 的编码非法: {key!r}")
+    try:
+        code = int(str(key), 0) if isinstance(key, str) else int(key)
+    except (TypeError, ValueError):
+        raise ConfigError(f"drive.types 的编码必须是整数或 0x 十六进制: {key!r}")
+    if code < 0:
+        raise ConfigError(f"drive.types 的编码不能为负: {key!r}")
+    return code
+
+
+def _parse_drive(raw: Any, registry: Dict[str, Dict[str, Any]]) -> DriveConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError("signals.yaml 的 drive 必须是映射")
+    extra = set(raw) - {"function", "signal", "types", "layouts", "assist", "torque"}
+    if extra:
+        raise ConfigError(f"signals.yaml 的 drive 不支持字段 {sorted(extra)}")
+    function = str(raw.get("function") or "").strip()
+    signal = str(raw.get("signal") or "").strip()
+    if not function or not signal:
+        raise ConfigError("drive 需要 function 与非空 signal")
+    if signal not in registry:
+        raise ConfigError(f"drive.signal {signal} 未在 logical_signals 登记")
+
+    types_raw = raw.get("types")
+    if not isinstance(types_raw, dict) or not types_raw:
+        raise ConfigError("drive.types 必须是非空映射（编码 → name/layout）")
+    types: Dict[int, Dict[str, str]] = {}
+    for key, item in types_raw.items():
+        code = _drive_code(key)
+        if code in types:
+            raise ConfigError(f"drive.types 编码重复: 0x{code:X}")
+        if not isinstance(item, dict):
+            raise ConfigError(f"drive.types.0x{code:X} 必须是 {{name, layout}}")
+        bad = set(item) - {"name", "layout"}
+        if bad:
+            raise ConfigError(f"drive.types.0x{code:X} 不支持字段 {sorted(bad)}")
+        layout = str(item.get("layout") or "other").strip()
+        if layout not in DRIVE_LAYOUTS:
+            raise ConfigError(
+                f"drive.types.0x{code:X}.layout 非法: {layout}（可用: {sorted(DRIVE_LAYOUTS)}）")
+        types[code] = {"name": str(item.get("name") or f"0x{code:X}"),
+                       "layout": layout}
+
+    layouts_raw = raw.get("layouts") or {}
+    if not isinstance(layouts_raw, dict):
+        raise ConfigError("drive.layouts 必须是 {layout: 档位取值} 映射")
+    layouts: Dict[str, str] = {}
+    for key, val in layouts_raw.items():
+        key = str(key).strip()
+        if key not in DRIVE_LAYOUTS or key == "other":
+            raise ConfigError(
+                f"drive.layouts 的键只能取 {sorted(DRIVE_LAYOUTS - {'other'})}: {key}")
+        layouts[key] = str(val).strip()
+    # awd 是「四驱看两根轴」的唯一入口，缺了它 0x1/0x2/0x3 就识别不出 4WD
+    if "awd" not in layouts:
+        raise ConfigError("drive.layouts 必须给出 awd 对应的档位取值（如 4WD）")
+
+    assist_raw = raw.get("assist") or {}
+    if not isinstance(assist_raw, dict):
+        raise ConfigError("drive.assist 必须是 {dtcs: ..., tcs: ...} 映射")
+    extra_a = set(assist_raw) - {"dtcs", "tcs"}
+    if extra_a:
+        raise ConfigError(f"drive.assist 不支持键 {sorted(extra_a)}")
+    assist: Dict[str, str] = {}
+    for kind in ("dtcs", "tcs"):
+        val = str(assist_raw.get(kind) or "").strip()
+        if not val:
+            raise ConfigError(f"drive.assist 缺少 {kind} 对应的档位取值")
+        assist[kind] = val
+
+    torque_raw = raw.get("torque")
+    if not isinstance(torque_raw, dict):
+        raise ConfigError("drive.torque 必须是 {actual/tcs/dtcs: {front, rear}} 映射")
+    extra_t = set(torque_raw) - {"actual", "tcs", "dtcs"}
+    if extra_t:
+        raise ConfigError(f"drive.torque 不支持键 {sorted(extra_t)}")
+    torque: Dict[str, Dict[str, str]] = {}
+    for kind in ("actual", "tcs", "dtcs"):
+        group = torque_raw.get(kind)
+        if not isinstance(group, dict):
+            raise ConfigError(f"drive.torque.{kind} 必须是 {{front, rear}} 映射")
+        extra_x = set(group) - set(DRIVE_AXLES)
+        if extra_x:
+            raise ConfigError(f"drive.torque.{kind} 不支持键 {sorted(extra_x)}")
+        torque[kind] = {}
+        for axle in DRIVE_AXLES:
+            sig = str(group.get(axle) or "").strip()
+            if not sig:
+                raise ConfigError(f"drive.torque.{kind} 缺少 {axle} 轴信号")
+            if sig not in registry:
+                raise ConfigError(
+                    f"drive.torque.{kind}.{axle} 的 {sig} 未在 logical_signals 登记")
+            torque[kind][axle] = sig
+
+    return DriveConfig(function=function, signal=signal, types=types,
+                       layouts=layouts, assist=assist, torque=torque)
+
+
 # ---------------------------------------------------------------- 运行时配置对象
 
 @dataclass
@@ -198,6 +333,8 @@ class AppConfigs:
     required_signals: List[str] = field(default_factory=list)
     # 逻辑信号登记表（signals.yaml）：名称 → {description, unit}
     signal_registry: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # 驱动形式识别（signals.yaml 的 drive 段）；未配置时为 None（不做按轴出图）
+    drive: Optional[DriveConfig] = None
     # 试验编号索引（conditions.yaml 的 file_ids → condition_id），文件名匹配见 §17
     file_ids: Optional[FileIdIndex] = None
 
@@ -317,7 +454,8 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
     # 名称/单位/描述只在这里定义一次；signals_mf4.yaml / signals_blf.yaml 只回答
     # 「该逻辑信号在这个格式里叫什么」。同一个物理量写两遍必然漂移，而漂移只有人眼能发现。
     reg_raw = _load_yaml(os.path.join(config_dir, "signals.yaml"))
-    _reject_unknown_sections(reg_raw, {"logical_signals", "chart_layout"}, "signals.yaml")
+    _reject_unknown_sections(reg_raw, {"logical_signals", "chart_layout", "drive"},
+                             "signals.yaml")
     registry = reg_raw.get("logical_signals") if isinstance(reg_raw, dict) else None
     if not isinstance(registry, dict) or not registry:
         raise ConfigError("signals.yaml 缺少非空 logical_signals 段")
@@ -326,6 +464,13 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             raise ConfigError(f"signals.yaml 逻辑信号 {name} 必须是映射（description/unit）")
     cfg.signal_registry = {k: dict(v) for k, v in registry.items()}
     logical_names = set(registry)
+
+    # ---- signals.yaml 的 drive 段：驱动形式 → 档位/轴扭矩（§9.5）----
+    # 先于 chart_layout 解析：轴扭矩是动态出图信号，静态布局必须把它们排除在外
+    drive_raw = reg_raw.get("drive") if isinstance(reg_raw, dict) else None
+    if drive_raw is not None:
+        cfg.drive = _parse_drive(drive_raw, cfg.signal_registry)
+    dynamic_signals = set(cfg.drive.dynamic_signals()) if cfg.drive else set()
 
     # ---- signals_mf4.yaml：只声明候选通道名 ----
     sig_raw = _load_yaml(os.path.join(config_dir, "signals_mf4.yaml"))
@@ -366,6 +511,11 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             unknown = [s for s in sigs if s not in logical_names]
             if unknown:
                 raise ConfigError(f"chart_layout[{i}] 引用未登记信号: {unknown}")
+            dynamic = [s for s in sigs if s in dynamic_signals]
+            if dynamic:
+                raise ConfigError(
+                    f"chart_layout[{i}] 不能收录驱动形式/轴扭矩信号 {dynamic}："
+                    "它们按识别出的驱动形式动态出图（四驱两根轴、两驱一根轴）")
             dup = [s for s in sigs if s in placed]
             if dup:
                 raise ConfigError(f"chart_layout 信号重复分组: {dup}")
@@ -376,7 +526,7 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
         # description：直接用逻辑名会让这根子图在一排中文标题里显得像漏配
         # （实测用户把 distance_vbox 那一行当成 bug 报了上来）
         for name in registry:
-            if name not in placed:
+            if name not in placed and name not in dynamic_signals:
                 desc = str(registry[name].get("description") or "").strip()
                 groups.append(ChartGroup(label=desc or name,
                                          unit=str(registry[name].get("unit") or ""),
@@ -423,6 +573,27 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             signals=sig_list,
         )
     fn_keys = set(cfg.functions)
+
+    # drive 段与功能的交叉校验：档位取值必须真实存在，轴扭矩必须在该功能的
+    # signals 里（否则图表的 only 过滤会把按轴出图的动态分组整个滤掉）
+    if cfg.drive is not None:
+        d = cfg.drive
+        fn = cfg.functions.get(d.function)
+        if fn is None:
+            raise ConfigError(f"drive.function 引用了未定义功能: {d.function}")
+        if not fn.profiles:
+            raise ConfigError(
+                f"drive.function {d.function} 没有声明 profiles，无法承载驱动形式识别")
+        bad_tokens = [t for t in list(d.layouts.values()) + list(d.assist.values())
+                      if t not in fn.profiles]
+        if bad_tokens:
+            raise ConfigError(
+                f"drive 的档位取值 {bad_tokens} 不在功能 {fn.key} 的 profiles {fn.profiles} 内")
+        outside = [s for s in d.torque_signals() if fn.signals and s not in fn.signals]
+        if outside:
+            raise ConfigError(
+                f"drive 的轴扭矩信号 {outside} 不在功能 {fn.key} 的 signals 里："
+                "图表按功能 signals 过滤，漏写会让按轴出图的分组整行消失")
 
     # 分段器读取的通道同样是计算必需：缺了就切不出事件窗口，指标全判 missing。
     for fn in cfg.functions.values():

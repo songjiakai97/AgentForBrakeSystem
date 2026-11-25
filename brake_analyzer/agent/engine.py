@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Tuple
 from ..agent.registry import TOOLS, STEP_HIT_TEXT_MAX, build_tool_specs
 from ..agent.tools import recommend_targets
 from ..configs import AppConfigs
+from ..drive import infer_tokens
 from ..llm.client import LlmClient
 from ..llm.context import ContextBudget, ContextCompressor
 from ..llm.kb import KnowledgeBase, SNIPPET_MIN_CHARS, CUT_NOTE_MAX_CHARS
@@ -249,13 +250,19 @@ class ChatEngine:
         self.store.note_selection(chat)
         chat.selected_condition = target["key"]
         if fn.profiles:
-            # 需先选档位 → 交给前端 /select 触发分析
-            yield self._mevent(self._msg(
-                chat, "text", f"已定位工况「{target['name']}」，该功能需选择档位后再分析。"))
-            yield self._mevent(self._options(chat, {
-                "hop": "profile", "function": fn.key, "target": target,
-                "candidates": [target], "profiles": fn.profiles,
-                "profile_dims": fn.profile_dims}))
+            # 先看数据能不能识别出档位（驱动形式 + DMC）；识别不出才让用户选
+            merged, note, gap = self._resolve_profile(chat, target["key"], None)
+            if gap is not None:
+                yield self._mevent(self._msg(
+                    chat, "text", f"已定位工况「{target['name']}」，该功能需选择档位后再分析。"))
+                yield self._mevent(self._options(chat, gap))
+                return
+            if note:
+                yield self._mevent(self._step_on(chat, [("驱动形式识别", note, "ok")]))
+            yield self._delta("reasoning", f"目标唯一命中「{target['name']}」，直接分析")
+            for m in self._analyze(chat, target["key"], profile=merged,
+                                   stop_event=stop_event)[0]:
+                yield self._mevent(m)
             return
         yield self._delta("reasoning", f"目标唯一命中「{target['name']}」，直接分析")
         # 分析阶段是离线路径最慢的一段，把停止标记传下去按文件自检
@@ -503,9 +510,9 @@ class ChatEngine:
                         # 缺维守卫：没给 profile 或只给了部分维度（如仅 "4WD"）都拦下——
                         # 部分档位的其余维度指标会静默走 default 条目（§10.8）
                         if spec.guard_profile:
-                            missing = self._profile_gap(args.get("condition_id"),
-                                                        args.get("profile"))
-                            if missing is not None:
+                            merged, auto_note, gap = self._resolve_profile(
+                                chat, args.get("condition_id"), args.get("profile"))
+                            if gap is not None:
                                 # 与离线路径同一约束：声明了档位的功能没选档就不分析。
                                 # 面板先挂起：同轮里模型可能补全档位再调一次
                                 cond = self.cfg.condition(args.get("condition_id") or "")
@@ -513,14 +520,20 @@ class ChatEngine:
                                 yield self._mevent(self._step_on(chat, [(
                                     "档位守卫：暂不分析",
                                     f"工况 {cond.id if cond else args.get('condition_id')} "
-                                    "所属功能需先选档位", "warn")]))
-                                pending_panel = missing
+                                    "所属功能需先选档位，且数据里识别不出驱动形式", "warn")]))
+                                pending_panel = gap
                                 payload = {"ok": False, "hop": "profile",
                                            "note": "该功能需先选档位，已把档位面板给用户"}
                                 messages.append({
                                     "role": "tool", "tool_call_id": tc["id"],
                                     "content": json.dumps(payload, ensure_ascii=False)})
                                 continue
+                            if auto_note:
+                                # 数据可识别：补全档位后照常分析，不再打扰用户
+                                args["profile"] = merged
+                                state["claimed"] = True
+                                yield self._mevent(self._step_on(chat, [(
+                                    "驱动形式识别", auto_note, "ok")]))
                         result = spec.executor(self, chat, args, tool_ctx)
                         kind = spec.result_kind
                         if kind == "analysis":
@@ -727,6 +740,78 @@ class ChatEngine:
             self._loaders[ext] = make_loader(path, self.cfg, blf_cfg=self.blf_cfg)
         return self._loaders[ext]
 
+    # ------------------------------------------------------------ 驱动形式识别
+    def _ensure_signals(self, chat, f) -> Optional[dict]:
+        """取文件信号（命中缓存则直接返回）；加载失败返回 None。"""
+        sess = self.store.session(f.file_id)
+        if sess.signals is not None:
+            return sess.signals
+        self._progress(chat, f"加载信号：{f.name}",
+                       "识别驱动形式需要读取底盘网通道，首次加载可能较慢", "run")
+        try:
+            sess.signals = self._loader_for(f.path).load(f.path)
+            self.store.note_signals_loaded(f.file_id)
+        except Exception:
+            log.exception("加载信号失败 %s", f.path)
+            return None
+        return sess.signals
+
+    def _infer_profile_tokens(self, chat, cond, targets=None) -> Dict[str, str]:
+        """从本轮数据识别档位维度；多文件识别冲突的维度不猜（同一档位会套到全部文件）。"""
+        drive = self.cfg.drive
+        if drive is None or cond.function != drive.function:
+            return {}
+        targets = targets if targets is not None else self._pick_files(chat, None)
+        seen: Dict[str, set] = {}
+        for f in targets:
+            signals = self._ensure_signals(chat, f)
+            if not signals:
+                continue
+            for key, token in infer_tokens(self.cfg, signals).items():
+                seen.setdefault(key, set()).add(token)
+        return {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
+
+    @staticmethod
+    def _merge_profile(fn, profile: Optional[str], inferred: Dict[str, str]) -> str:
+        """按维度合并：显式给的取值优先，识别结果只补空缺维度。"""
+        given = [t for t in re.split(r"[|,_\s]+", profile or "") if t]
+        if not fn.profile_dims:
+            return profile or ""
+        out: List[str] = []
+        for dim in fn.profile_dims:
+            token = next((t for t in given if t in dim), None)
+            if token is None:
+                token = next((v for v in inferred.values() if v in dim), None)
+            if token:
+                out.append(token)
+        return "|".join(out)
+
+    def _resolve_profile(self, chat, condition_id: str, profile: Optional[str],
+                         targets=None) -> Tuple[Optional[str], str, Optional[dict]]:
+        """档位补全：返回 (可用档位, 说明, 缺口面板)。
+
+        - 档位已完整（或不适用）→ (profile, "", None)；
+        - 能从数据识别出缺的那几维 → (合并后的档位, 说明, None)；
+        - 仍不完整 → (None, "", 带预选的面板)。
+        """
+        gap = self._profile_gap(condition_id, profile)
+        if gap is None:
+            return profile, "", None
+        cond = self.cfg.condition(condition_id or "")
+        if cond is None:
+            return None, "", gap
+        fn = self.cfg.function(cond.function)
+        if fn is None or self.cfg.drive is None or cond.function != self.cfg.drive.function:
+            return None, "", gap
+        inferred = self._infer_profile_tokens(chat, cond, targets)
+        if not inferred:
+            return None, "", gap
+        merged = self._merge_profile(fn, profile, inferred)
+        gap2 = self._profile_gap(condition_id, merged)
+        if gap2 is None:
+            return merged, f"按数据识别驱动形式 → 档位 {merged}", None
+        return None, "", gap2
+
     # ------------------------------------------------------------ 分析
     def _analyze(self, chat, condition_id, profile: Optional[str],
                  stop_event=None, file_indexes: Optional[List[int]] = None,
@@ -773,6 +858,13 @@ class ChatEngine:
                               "必须为 1（全部同工况）或与文件数一致（逐文件对齐）。")], []
 
         main_cond = conds[0]
+        # 档位未给全时先看数据：能识别出驱动形式/DMC 就自动补档，识别不出再让用户选
+        auto_note = ""
+        if self._profile_gap(main_cond.id, profile) is not None:
+            merged, auto_note, _gap = self._resolve_profile(
+                chat, main_cond.id, profile, targets=targets)
+            if merged:
+                profile = merged
         chat.selected_function = main_cond.function
         chat.selected_condition = main_cond.id
         chat.selected_profile = profile
@@ -788,7 +880,8 @@ class ChatEngine:
              f"文件 {len(targets)} 个"
              + (f"（会话内另有 {skipped} 个非本轮范围，未重跑）" if skipped else "")
              + f" · 工况 {cond_label}"
-             + (f" · 档位 {profile}" if profile else ""), "run")])
+             + (f" · 档位 {profile}" + ("（数据识别）" if auto_note else "")
+                if profile else ""), "run")])
         added: List = [step_msg]
 
         results: List[AnalysisResult] = []

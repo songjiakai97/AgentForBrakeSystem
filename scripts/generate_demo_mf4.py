@@ -99,6 +99,15 @@ def gen_abs_run(
         "wheelSpeed_FR": _add("wheelSpeed_FR", ts, np.maximum(speed + rng.normal(0, 0.3, ts.size), 0), "km/h"),
         "wheelSpeed_RL": _add("wheelSpeed_RL", ts, np.maximum(speed + rng.normal(0, 0.3, ts.size), 0), "km/h"),
         "wheelSpeed_RR": _add("wheelSpeed_RR", ts, np.maximum(speed + rng.normal(0, 0.3, ts.size), 0), "km/h"),
+        # ABS 场景不带驱动信息（0x0 系统故障），TCS 档位识别因此识别不出来 —
+        # 这正是「数据里没有就交用户选」那条路径的素材
+        "VehDriveType": _add("VehDriveType", ts, np.zeros_like(ts), ""),
+        "FrontMotorTorque": _add("FrontMotorTorque", ts, np.zeros_like(ts), "N.m"),
+        "RearMotorTorque": _add("RearMotorTorque", ts, np.zeros_like(ts), "N.m"),
+        "MMotTarFastFA": _add("MMotTarFastFA", ts, np.zeros_like(ts), "N.m"),
+        "MMotTarFastRA": _add("MMotTarFastRA", ts, np.zeros_like(ts), "N.m"),
+        "DMCTarTorqueFA": _add("DMCTarTorqueFA", ts, np.zeros_like(ts), "N.m"),
+        "DMCTarTorqueRA": _add("DMCTarTorqueRA", ts, np.zeros_like(ts), "N.m"),
     }
     return {"ts": ts, "sigs": sigs}
 
@@ -154,6 +163,18 @@ def gen_tcs_run(
         "wheelSpeed_FR": _add("wheelSpeed_FR", ts, wheel + rng.normal(0, 0.2, ts.size), "km/h"),
         "wheelSpeed_RL": _add("wheelSpeed_RL", ts, np.maximum(speed + slip_env * 0.2 + rng.normal(0, 0.2, ts.size), 0), "km/h"),
         "wheelSpeed_RR": _add("wheelSpeed_RR", ts, np.maximum(speed + slip_env * 0.2 + rng.normal(0, 0.2, ts.size), 0), "km/h"),
+        # 0x1 纯电动四驱 → 前后两根轴；DMC 目标扭矩非零 → 自动判 DTCS
+        "VehDriveType": _add("VehDriveType", ts, np.full_like(ts, 0x1), ""),
+        "FrontMotorTorque": _add("FrontMotorTorque", ts,
+                                 throttle / 100.0 * 180.0, "N.m"),
+        "RearMotorTorque": _add("RearMotorTorque", ts,
+                                throttle / 100.0 * 120.0, "N.m"),
+        "MMotTarFastFA": _add("MMotTarFastFA", ts, np.zeros_like(ts), "N.m"),
+        "MMotTarFastRA": _add("MMotTarFastRA", ts, np.zeros_like(ts), "N.m"),
+        "DMCTarTorqueFA": _add("DMCTarTorqueFA", ts,
+                               throttle / 100.0 * 170.0, "N.m"),
+        "DMCTarTorqueRA": _add("DMCTarTorqueRA", ts,
+                               throttle / 100.0 * 110.0, "N.m"),
     }
     return {"ts": ts, "sigs": sigs}
 

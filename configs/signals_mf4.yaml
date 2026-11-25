@@ -22,3 +22,10 @@ signal_maps:
   TCS_Active:      {candidates: [TCS_Active]}
   BrakePedalPos:   {candidates: [BrakePedalPos]}
   ThrottlePedalPos: {candidates: [ThrottlePedalPos]}
+  VehDriveType:     {candidates: [VehDriveType]}
+  MMotTarFastFA:    {candidates: [MMotTarFastFA]}
+  MMotTarFastRA:    {candidates: [MMotTarFastRA]}
+  DMCTarTorqueFA:   {candidates: [DMCTarTorqueFA]}
+  DMCTarTorqueRA:   {candidates: [DMCTarTorqueRA]}
+  FrontMotorTorque: {candidates: [FrontMotorTorque]}
+  RearMotorTorque:  {candidates: [RearMotorTorque]}

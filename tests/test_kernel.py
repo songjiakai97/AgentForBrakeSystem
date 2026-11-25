@@ -144,9 +144,11 @@ def test_chart_layout_lives_in_registry_file(cfg):
         open(os.path.join(CONFIG_DIR, "signals_mf4.yaml"), encoding="utf-8"))
     assert "chart_layout" not in mf4
     assert cfg.chart_layout[0].label == "车速 / 轮速"
-    # 未编排的信号自动补为独立行，图表不静默丢通道
+    # 未编排的信号自动补为独立行，图表不静默丢通道；
+    # 驱动形式/轴扭矩按数据动态出图，本就不该出现在静态布局里
     placed = {s for g in cfg.chart_layout for s in g.signals}
-    assert set(cfg.signal_registry) == placed
+    dynamic = set(cfg.drive.dynamic_signals()) if cfg.drive else set()
+    assert set(cfg.signal_registry) - dynamic == placed
     # 自动补的行用登记表里的中文描述做组名：一排中文标题里突然出现一根
     # distance_vbox，用户会当成漏配（实测报障）
     assert all(any("\u4e00" <= ch <= "\u9fff" for ch in g.label)

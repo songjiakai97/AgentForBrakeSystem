@@ -83,3 +83,25 @@ signal_maps:
   ThrottlePedalPos:
     candidates:
       - [BRAKE_MAIN, "0x103", ThrottlePedalPos]
+  # 底盘网：驱动形式在 0x105，轴扭矩按「实际 / TCS 快速降扭 / DTCS 目标」各一帧
+  VehDriveType:
+    candidates:
+      - [BRAKE_MAIN, "0x105", VehDriveType]
+  FrontMotorTorque:
+    candidates:
+      - [BRAKE_MAIN, "0x106", FrontMotorTorque]
+  MMotTarFastFA:
+    candidates:
+      - [BRAKE_MAIN, "0x106", MMotTarFastFA]
+  DMCTarTorqueFA:
+    candidates:
+      - [BRAKE_MAIN, "0x106", DMCTarTorqueFA]
+  RearMotorTorque:
+    candidates:
+      - [BRAKE_MAIN, "0x107", RearMotorTorque]
+  MMotTarFastRA:
+    candidates:
+      - [BRAKE_MAIN, "0x107", MMotTarFastRA]
+  DMCTarTorqueRA:
+    candidates:
+      - [BRAKE_MAIN, "0x107", DMCTarTorqueRA]

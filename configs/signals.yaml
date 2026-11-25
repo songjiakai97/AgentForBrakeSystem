@@ -25,6 +25,46 @@ logical_signals:
   TCS_Active:      {description: TCS 激活,      unit: ""}
   BrakePedalPos:   {description: 制动踏板深度,  unit: "%"}
   ThrottlePedalPos: {description: 油门踏板深度, unit: "%"}
+  # 驱动形式与轴扭矩：底盘网信号，只在 TCS/DTCS 场景按驱动形式动态出图，
+  # 不写进 chart_layout（否则 ABS 也会多出一排空子图）。
+  VehDriveType:     {description: 驱动类型,       unit: ""}
+  MMotTarFastFA:    {description: 前轴快速降扭请求, unit: N.m}
+  MMotTarFastRA:    {description: 后轴快速降扭请求, unit: N.m}
+  DMCTarTorqueFA:   {description: DMC 前轴目标扭矩, unit: N.m}
+  DMCTarTorqueRA:   {description: DMC 后轴目标扭矩, unit: N.m}
+  FrontMotorTorque: {description: 前轴实际扭矩,   unit: N.m}
+  RearMotorTorque:  {description: 后轴实际扭矩,   unit: N.m}
+
+# 驱动形式（design.md §9.5）：底盘网的 VehDriveType 决定「看哪根轴」，
+# 有 DMC 目标扭矩即 DTCS，否则 TCS。显式选择的档位优先于这里的识别结果。
+drive:
+  function: tcs              # 只有 TCS 功能需要按驱动形式选轴
+  signal: VehDriveType
+  types:
+    0x0: {name: 系统故障,               layout: other}
+    0x1: {name: 纯电动四驱,             layout: awd}
+    0x2: {name: HEV三动力四驱,          layout: awd}
+    0x3: {name: HEV四驱(后电机+发动机), layout: awd}
+    0x4: {name: HEV两驱(前电机+发动机), layout: front}
+    0x5: {name: 纯燃油,                 layout: other}
+    0x6: {name: 纯电动前驱,             layout: front}
+    0x7: {name: 纯电动后驱,             layout: rear}
+    0x8: {name: 动力系统未启用,         layout: other}
+    0x9: {name: 保留,                   layout: other}
+    0xA: {name: 保留,                   layout: other}
+    0xB: {name: 保留,                   layout: other}
+    0xC: {name: 保留,                   layout: other}
+    0xD: {name: 保留,                   layout: other}
+    0xE: {name: 保留,                   layout: other}
+    0xF: {name: 保留,                   layout: other}
+  # 驱动形式 → 档位维度取值；other 不产生档位识别
+  layouts: {awd: 4WD, front: 2WD, rear: 2WD}
+  # 有 DMC 目标扭矩 → DTCS，否则 TCS
+  assist: {dtcs: DTCS, tcs: TCS}
+  torque:
+    actual: {front: FrontMotorTorque, rear: RearMotorTorque}
+    tcs:    {front: MMotTarFastFA,    rear: MMotTarFastRA}
+    dtcs:   {front: DMCTarTorqueFA,   rear: DMCTarTorqueRA}
 
 # 图表布局约束：多行一列共享 x 轴（design.md §6.6）
 # 每个 group = 一行子图，组内信号共用一个 y 轴（同单位才有意义）

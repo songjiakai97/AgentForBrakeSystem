@@ -58,6 +58,19 @@ BO_ 259 PEDAL_STATUS_1: 8 VCU
 BO_ 260 VEH_DYN_2: 8 ESP
  SG_ yaw_rate : 0|16@1- (0.01,0.0) [-327.68|327.67] "deg/s"  TCU
 
+BO_ 261 DRIVE_TYPE: 8 VCU
+ SG_ VehDriveType : 0|8@1+ (1.0,0.0) [0|255] ""  TCU
+
+BO_ 262 AXLE_TORQUE_F: 8 MCU_F
+ SG_ DMCTarTorqueFA : 32|16@1- (0.1,0.0) [-3276.8|3276.7] "N.m"  TCU
+ SG_ MMotTarFastFA : 16|16@1- (0.1,0.0) [-3276.8|3276.7] "N.m"  TCU
+ SG_ FrontMotorTorque : 0|16@1- (0.1,0.0) [-3276.8|3276.7] "N.m"  TCU
+
+BO_ 263 AXLE_TORQUE_R: 8 MCU_R
+ SG_ DMCTarTorqueRA : 32|16@1- (0.1,0.0) [-3276.8|3276.7] "N.m"  TCU
+ SG_ MMotTarFastRA : 16|16@1- (0.1,0.0) [-3276.8|3276.7] "N.m"  TCU
+ SG_ RearMotorTorque : 0|16@1- (0.1,0.0) [-3276.8|3276.7] "N.m"  TCU
+
 
 
 

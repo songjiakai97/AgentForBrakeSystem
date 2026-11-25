@@ -425,6 +425,10 @@ phases: list[str]
     §9.6）：一行子图 = 一组同单位信号共用 y 轴；该段缺失时按 unit 自动分组。加载期已把
     未编排的信号补成单信号分组，所以这里不需要再判断"漏了谁"。分组内没有实际数据通道的行
     整行不生成（`_groups_from_layout` 先过滤），所以 grid / 轴 / `groupIndex` 三者始终同序。
+  - 轴扭矩行是**动态**的：`drive.layout_with_drive` 在静态分组之后按该样本识别出的驱动
+    形式追加 0/1/2 行（前驱一根、后驱一根、四驱两根，其余不追加），每行两条线 =
+    实际扭矩 + TCS/DTCS(DMC) 目标扭矩（§9.6 drive 段）。网页 `/timeseries`、记录库曲线
+    与报告出图都走同一个函数，三处看到的行数一致。
   - **游标读数列出全部信号**（§8.3）：读数与游标线都由前端 `web/frontend/chart.js`
     自己画，ECharts 的 tooltip / axisPointer 全部关掉。三个方案里只有自己画是对
     的：
@@ -637,9 +641,13 @@ LLM 可选/降级。`AnalysisResult` 一次生成，Web 各视图共用。
   一律丢弃；全部点空时**报错**「没有选中任何数据文件（file_indexes 与本会话文件对不上）」，
   绝不静默回退成"全跑一遍"。步骤行如实写明范围：
   `文件 1 个（会话内另有 1 个非本轮范围，未重跑）`——范围收窄对用户不可见就等于偷改需求。
-- 档位守卫：`run_analysis_on_files` 未带 `profile` 且该功能声明了 `profiles` 时，引擎不执行
-  分析，改落 `hop=profile` 面板并回一条 `tool` 应答。`hop=resolved` 只保证工况唯一、
-  不保证档位唯一，离线路径本来就是"先选档再分析"，两条路径口径必须一致。
+- 档位守卫：`run_analysis_on_files` 未带 `profile` 且该功能声明了 `profiles` 时，引擎先
+  读本轮数据尝试识别（驱动形式 → 4WD/2WD、DMC → DTCS/TCS，§9.6 drive 段）：
+  - 补齐后完整 → 直接分析，步骤行记 `驱动形式识别 → 档位 4WD|DTCS`；
+  - 仍缺维/识别不出 → 不执行分析，改落 `hop=profile` 面板（能识别的维度作 `preset`）
+    并回一条 `tool` 应答。
+  `hop=resolved` 只保证工况唯一、不保证档位唯一；离线路径与 `/select` 走同一个
+  `_resolve_profile`，两条路径口径一致。
 - 网络/额度错误自动回退离线路由。
 - 流式额外产出 `reasoning`、`tool_call`、`tool_result` 事件。
 - 统一消息类型：`text`、`target_options`、`analysis_result`、`attachment`、`error`。
@@ -1403,8 +1411,9 @@ configs/signals_blf.yaml 格式相关：这个逻辑信号在 BLF 里是哪条 C
    少一个即报错。
 3. 纯观测量允许只出现在一种格式里 —— MF4 常带额外测量通道，BLF 只有 CAN 上发布的信号。
    这类通道（demo 里如 `Ax`、`ABS_Active`、`TCS_Active`）只出现在一侧时不报错：另一侧的
-   Loader 返回空 `ts`/`values`，图表层跳过空通道。（当前 demo 的 DBC 恰好把 12 个都发了，
-   `tests/test_blf_demo.py::test_observation_only_signal_may_be_absent` 用"摘掉 Ax"验证规则本身。）
+   Loader 返回空 `ts`/`values`，图表层跳过空通道。（当前 demo 的 DBC 把全部 19 个逻辑
+   信号都发了，`tests/test_blf_demo.py::test_observation_only_signal_may_be_absent`
+   用"摘掉 Ax"验证规则本身。）
 
 #### signals.yaml
 
@@ -1428,6 +1437,40 @@ chart_layout:
   单信号分组，保证图表不静默丢通道。
 - 段落搬走后残留在格式文件里的顶层段由 `_reject_unknown_sections` 拒绝并指回本文件
   （"看着还生效"的死配置比缺失更难查）。
+
+#### drive 段（驱动形式识别，§9.6.1）
+
+```yaml
+drive:
+  function: tcs              # 只对该功能的分析生效
+  signal: VehDriveType       # 底盘网驱动类型编码
+  types:                     # 0x0~0xF → {name, layout}
+    0x1: {name: 纯电动四驱, layout: awd}
+    0x4: {name: HEV两驱(前电机+发动机), layout: front}
+    0x7: {name: 纯电动后驱, layout: rear}
+    0x5: {name: 纯燃油, layout: other}
+  layouts: {awd: 4WD, front: 2WD, rear: 2WD}
+  assist: {dtcs: DTCS, tcs: TCS}
+  torque:
+    actual: {front: FrontMotorTorque, rear: RearMotorTorque}
+    tcs:    {front: MMotTarFastFA,    rear: MMotTarFastRA}
+    dtcs:   {front: DMCTarTorqueFA,   rear: DMCTarTorqueRA}
+```
+
+驱动形式决定「看哪根轴」，DMC 目标扭矩决定「功能叫 TCS 还是 DTCS」：
+
+- **layout**：`awd`（含 0x1/0x2/0x3）看前后两根轴，`front`/`rear`（0x4/0x6/0x7）只看
+  对应一根轴；`other`（0x0 系统故障、0x5 纯燃油、0x8 未启用、0x9~0xF 保留）不看扭矩轴。
+- **TCS / DTCS**：轴扭矩信号里有 DMC 目标扭矩（且该序列非空）即为 DTCS，否则 TCS；
+  目标扭矩取 `tcs`（快速降扭请求 MMotTarFast）或 `dtcs`（DMCTarTorque）对应那一组。
+- **显式档位优先**：用户/模型明确给出的 4WD/2WD、TCS/DTCS 不会被识别结果覆盖；
+  识别只补缺的那一维。2WD 但数据看不出前后轴时，两根轴都画（不隐藏数据）。
+- **轴扭矩信号不进 `chart_layout`**：看几根轴取决于数据，静态布局写进任何一组都会让
+  另一种驱动形式多出空行。启动期因此拒绝把 `dynamic_signals()`（驱动类型 + 6 个扭矩）
+  写进 `chart_layout`，同时要求它们出现在该功能的 `signals` 里，否则 `only` 过滤会把
+  动态行整行滤掉。
+- **识别不出就交用户选**：`VehDriveType` 缺失/为 other、或没有任何扭矩通道时，
+  档位面板照常弹出（能识别出的那一维作为 `preset` 预选），不会瞎猜一个档位跑分析。
 
 #### signals_mf4.yaml
 
@@ -1780,10 +1823,9 @@ NaN 归一为 None、`_missing_reason` 三分法，§10.1），此处展示契�
 | `profile=None` 且无通用 | missing |
 | **部分档位**（多维功能只给一维，如仅 `4WD`） | 各指标按 `pick` 逐个解析：命中的维度用精确条目，**未给出的维度走 default 条目**（无 default → missing，成因 `no_matching_entry`） |
 
-部分档位的口径是**有意接受 default 兜底**（档位守卫只拦"完全没给 profile"），
-代价是"用默认控制模式算出的值"与"用户实测的档位"可能不一致且无人提示。
-若要收紧：`_profile_guard` 扩展为缺维守卫——解析 profile tokens 覆盖
-`profile_dims`，缺维时弹档位面板并预选已给维度（候选实现，未做，见 §16）。
+部分档位：档位守卫已升级为**缺维守卫**——`_resolve_profile` 先尝试用数据识别补齐
+（驱动形式/DMC，§9.6），补不齐就弹档位面板并预选已给维度，不会让"未给出的维度"
+静默走 default 条目。只有直接调用 `_analyze(profile=...)` 的脚本路径仍按上表兜底。
 
 ---
 
@@ -2100,7 +2142,7 @@ embedding 不可用时 `resolve_condition` 行为与本节描述的纯唯一键�
 | `function` | resolve / recommend | 功能待定或多功能候选（语义分数也不足） | 弹功能面板 |
 | `condition` | resolve / recommend | 某功能内多条候选、零命中兜底或语义候选（差距不足） | 弹工况面板（候选带分数） |
 | `catalog` | list_conditions | 工况清单，仅模型可见 | 不弹面板 |
-| `resolved` | resolve（唯一键 / 语义显著领先）/ recommend | 可直接分析（payload 带 via=exact_key/semantic 与 reason） | 直接分析（有 profiles 时先选档位） |
+| `resolved` | resolve（唯一键 / 语义显著领先）/ recommend | 可直接分析（payload 带 via=exact_key/semantic 与 reason） | 直接分析（有 profiles 时先按数据识别档位，识别不出才选档位） |
 | `error` | 两者 | 未知工况/功能 | 提示兜底 |
 
 ### 13.4 一次性内容的生命周期

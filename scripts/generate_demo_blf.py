@@ -72,6 +72,9 @@ def dbc_messages() -> List[Message]:
       踏板状态 0x103        两踏板 8bit × 0.5 %（覆盖段板 arm 阈值 80/95 %），
                             ABS/TCS 各 1 bit（bit16/17）
       横摆     0x104        单独一帧，便于构造「缺通道」场景（整帧不发即为 missing）
+      驱动形式 0x105        VehDriveType 8bit（0x0~0xF 原始编码）
+      轴扭矩   0x106/0x107  前/后轴：实际扭矩 + TCS 快速降扭 + DMC 目标扭矩，
+                           各 16bit 有符号 0.1 N.m（demo 值 ≤ 3276.7 N.m）
     """
     return [
         Message(frame_id=0x100, name="WHEEL_SPEED_1", length=8, senders=["ABS"], signals=[
@@ -97,6 +100,25 @@ def dbc_messages() -> List[Message]:
         Message(frame_id=0x104, name="VEH_DYN_2", length=8, senders=["ESP"], signals=[
             _num("yaw_rate", 0, 16, 0.01, signed=True, unit="deg/s",
                  minimum=-327.68, maximum=327.67),
+        ]),
+        Message(frame_id=0x105, name="DRIVE_TYPE", length=8, senders=["VCU"], signals=[
+            _num("VehDriveType", 0, 8, 1.0, unit="", minimum=0, maximum=255),
+        ]),
+        Message(frame_id=0x106, name="AXLE_TORQUE_F", length=8, senders=["MCU_F"], signals=[
+            _num("FrontMotorTorque", 0, 16, 0.1, signed=True, unit="N.m",
+                 minimum=-3276.8, maximum=3276.7),
+            _num("MMotTarFastFA", 16, 16, 0.1, signed=True, unit="N.m",
+                 minimum=-3276.8, maximum=3276.7),
+            _num("DMCTarTorqueFA", 32, 16, 0.1, signed=True, unit="N.m",
+                 minimum=-3276.8, maximum=3276.7),
+        ]),
+        Message(frame_id=0x107, name="AXLE_TORQUE_R", length=8, senders=["MCU_R"], signals=[
+            _num("RearMotorTorque", 0, 16, 0.1, signed=True, unit="N.m",
+                 minimum=-3276.8, maximum=3276.7),
+            _num("MMotTarFastRA", 16, 16, 0.1, signed=True, unit="N.m",
+                 minimum=-3276.8, maximum=3276.7),
+            _num("DMCTarTorqueRA", 32, 16, 0.1, signed=True, unit="N.m",
+                 minimum=-3276.8, maximum=3276.7),
         ]),
     ]
 

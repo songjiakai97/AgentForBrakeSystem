@@ -123,23 +123,23 @@ def test_condition_panel_then_select_profile(client):
     m = r["messages"][0]
     assert m["data"]["hop"] == "condition" and len(m["data"]["candidates"]) == 7
 
-    # 选工况但不给档位 → 返回 profile 面板
+    # 选工况不给档位 → 数据里能识别驱动形式（4WD）与 DMC（DTCS），直接分析
     key = "tcs_full_throttle_wet_basalt_0to60kph"
     r = client.post(f"/api/chats/{cid}/select",
                     json={"target_type": "condition", "target_key": key}).json()
-    m = r["messages"][0]
-    assert m["data"]["hop"] == "profile"
-
-    # 给两维档位 → 分析，DTCS 打滑超限命中
-    r = client.post(f"/api/chats/{cid}/select",
-                    json={"target_type": "condition", "target_key": key,
-                          "profile": "4WD|DTCS"}).json()
     msgs = [m for m in r["messages"] if m["kind"] == "analysis_result"]
-    assert msgs
+    assert msgs, r
+    assert msgs[0]["data"]["profile"] == "4WD|DTCS", "驱动形式应自动识别出档位"
     sample = msgs[0]["data"]["samples"][0]
     st = {mm["key"].rsplit(".", 1)[1]: mm["status"] for mm in sample["metrics"]}
     assert st["slip_max"] == "abnormal"
-    assert msgs[0]["data"]["profile"] == "4WD|DTCS"
+
+    # 显式给的档位优先于识别：换 2WD 另算一份，不被数据识别改回去
+    r = client.post(f"/api/chats/{cid}/select",
+                    json={"target_type": "condition", "target_key": key,
+                          "profile": "2WD|DTCS"}).json()
+    msgs = [m for m in r["messages"] if m["kind"] == "analysis_result"]
+    assert msgs and msgs[0]["data"]["profile"] == "2WD|DTCS"
 
     # 非法档位拒绝
     r = client.post(f"/api/chats/{cid}/select",
@@ -302,6 +302,25 @@ def test_steps_and_chart_groups(client):
     maxs = {ax["max"] for ax in opt["xAxis"]}
     assert len(mins) == 1 and len(maxs) == 1
     assert all(s.get("markArea") for s in opt["series"] if s["name"] == "speed_vbox")
+
+
+def test_timeseries_includes_axle_torque_rows(client):
+    """四驱 TCS：静态分组之后补齐前后轴扭矩行，每行「实际 + TCS/DTCS 目标」。"""
+    chat = client.post("/api/chats").json()
+    cid = chat["chat_id"]
+    _upload(client, cid, "tcs_wet60_normal.mf4")
+    key = "tcs_full_throttle_wet_basalt_0to60kph"
+    r = client.post(f"/api/chats/{cid}/select",
+                    json={"target_type": "condition", "target_key": key}).json()
+    msg = [m for m in r["messages"] if m["kind"] == "analysis_result"][0]
+    assert msg["data"]["profile"] == "4WD|DTCS"
+    sid = msg["data"]["samples"][0]["sample_id"]
+    groups = client.get(f"/api/analyses/{sid}/timeseries").json()["groups"]
+    labels = [g["label"] for g in groups]
+    assert labels[-2:] == ["前轴扭矩（DTCS）", "后轴扭矩（DTCS）"]
+    rows = {g["label"]: g["signals"] for g in groups}
+    assert rows["前轴扭矩（DTCS）"] == ["FrontMotorTorque", "DMCTarTorqueFA"]
+    assert rows["后轴扭矩（DTCS）"] == ["RearMotorTorque", "DMCTarTorqueRA"]
 
 
 def test_chart_option_carries_tooltip_contract(client):

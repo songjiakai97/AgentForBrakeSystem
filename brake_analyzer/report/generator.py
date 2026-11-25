@@ -30,6 +30,7 @@ from docx.shared import Mm
 from ..configs import AppConfigs, pick
 from ..events.segment import EventWindow, is_valid
 from ..schemas import json_safe
+from ..drive import layout_with_drive
 from .charts import render_sample_chart
 
 DEFAULT_TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -233,8 +234,12 @@ def _condition_blocks(d: dict, cfg: AppConfigs, cond, tpl: DocxTemplate,
                     chart_dir, f"chart_{d.get('analysis_id')}_{s.get('sample_id', run)}.png")
                 bad = any(m.get("status") == "abnormal" for m in s.get("metrics", []))
                 miss = any(m.get("status") == "missing" for m in s.get("metrics", []))
+                # 静态分组之外按该样本的驱动形式补轴扭矩行（四驱两根、两驱一根）
+                layout = layout_with_drive(
+                    cfg, cond.function if cond is not None else "",
+                    signals, d.get("profile"), cfg.chart_layout)
                 if render_sample_chart(
-                        signals, (win.t_start, win.t_end), cfg.chart_layout, png,
+                        signals, (win.t_start, win.t_end), layout, png,
                         highlight_status="abnormal" if bad else "missing" if miss else "ok",
                         only=only):
                     image = InlineImage(tpl, png, width=Mm(160))

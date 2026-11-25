@@ -5,6 +5,7 @@ from typing import List, Optional
 
 from brake_analyzer.charts.html import build_chart_option, timeseries_payload
 from brake_analyzer.configs import pick
+from brake_analyzer.drive import layout_with_drive
 from brake_analyzer.records import store as record_store
 from brake_analyzer.records.query import records_compare
 from brake_analyzer.records.service import RecordNotFound
@@ -156,11 +157,15 @@ def api_record_timeseries(record_id: str, signal: Optional[str] = Query(None)):
     highlight = ("abnormal" if "abnormal" in statuses
                  else "missing" if "missing" in statuses or not metric_rows else "ok")
     payload = timeseries_payload(signals, window=None, series_names=names,
-                                 layout=st.CFG.chart_layout)
+                                 layout=layout_with_drive(
+                                     st.CFG, fn.key if fn else "", signals,
+                                     None, st.CFG.chart_layout))
     payload["file_name"] = row["file_name"]
     payload["windows"] = windows
     payload["chart_option"] = build_chart_option(
-        signals, window=None, series_names=names, layout=st.CFG.chart_layout,
+        signals, window=None, series_names=names,
+        layout=layout_with_drive(st.CFG, fn.key if fn else "", signals,
+                                 None, st.CFG.chart_layout),
         highlight_status=highlight,
         highlight=window,
         title=f"{row['vehicle']} · {row['file_name']}",
