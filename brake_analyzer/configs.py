@@ -168,6 +168,8 @@ class DriveConfig:
     layouts: Dict[str, str]               # layout → 档位维度取值（4WD/2WD）
     assist: Dict[str, str]                # dtcs/tcs → 档位维度取值（DTCS/TCS）
     torque: Dict[str, Dict[str, str]]     # actual/tcs/dtcs → {front, rear} 信号
+    mode: Dict[str, str]                  # front/rear → DMC 工作模式信号
+    tcs_active: str                       # TCS 激活状态位（与 DMC 模式共用一行）
 
     def torque_signals(self) -> List[str]:
         out: List[str] = []
@@ -177,9 +179,15 @@ class DriveConfig:
                     out.append(sig)
         return out
 
+    def mode_signals(self) -> List[str]:
+        return [s for s in self.mode.values() if s]
+
     def dynamic_signals(self) -> List[str]:
-        """不参与静态 chart_layout 的信号：驱动类型 + 全部轴扭矩。"""
-        return [self.signal] + self.torque_signals()
+        """不参与静态 chart_layout 的信号：驱动类型、轴扭矩、DMC 模式与 TCS 激活位。"""
+        out = [self.signal] + self.mode_signals() + self.torque_signals()
+        if self.tcs_active:
+            out.append(self.tcs_active)
+        return out
 
 
 def _drive_code(key: Any) -> int:
@@ -195,10 +203,34 @@ def _drive_code(key: Any) -> int:
     return code
 
 
+def _parse_signal(value: Any, registry: Dict[str, Dict[str, Any]], field: str) -> str:
+    sig = str(value or "").strip()
+    if not sig:
+        raise ConfigError(f"drive.{field} 必须给出信号名")
+    if sig not in registry:
+        raise ConfigError(f"drive.{field} 的 {sig} 未在 logical_signals 登记")
+    return sig
+
+
+def _parse_axle_signals(value: Any, registry: Dict[str, Dict[str, Any]],
+                        field: str) -> Dict[str, str]:
+    """{front, rear} → 信号名；两轴都必须给（按驱动形式选一轴出图）。"""
+    if not isinstance(value, dict):
+        raise ConfigError(f"drive.{field} 必须是 {{front, rear}} 映射")
+    extra = set(value) - set(DRIVE_AXLES)
+    if extra:
+        raise ConfigError(f"drive.{field} 不支持键 {sorted(extra)}")
+    out: Dict[str, str] = {}
+    for axle in DRIVE_AXLES:
+        out[axle] = _parse_signal(value.get(axle), registry, f"{field}.{axle}")
+    return out
+
+
 def _parse_drive(raw: Any, registry: Dict[str, Dict[str, Any]]) -> DriveConfig:
     if not isinstance(raw, dict):
         raise ConfigError("signals.yaml 的 drive 必须是映射")
-    extra = set(raw) - {"function", "signal", "types", "layouts", "assist", "torque"}
+    extra = set(raw) - {"function", "signal", "types", "layouts", "assist",
+                        "torque", "mode", "tcs_active"}
     if extra:
         raise ConfigError(f"signals.yaml 的 drive 不支持字段 {sorted(extra)}")
     function = str(raw.get("function") or "").strip()
@@ -280,7 +312,10 @@ def _parse_drive(raw: Any, registry: Dict[str, Dict[str, Any]]) -> DriveConfig:
             torque[kind][axle] = sig
 
     return DriveConfig(function=function, signal=signal, types=types,
-                       layouts=layouts, assist=assist, torque=torque)
+                       layouts=layouts, assist=assist, torque=torque,
+                       mode=_parse_axle_signals(raw.get("mode"), registry, "mode"),
+                       tcs_active=_parse_signal(raw.get("tcs_active"), registry,
+                                                "tcs_active"))
 
 
 # ---------------------------------------------------------------- 运行时配置对象
@@ -594,6 +629,12 @@ def load_configs(config_dir: str = "configs") -> AppConfigs:
             raise ConfigError(
                 f"drive 的轴扭矩信号 {outside} 不在功能 {fn.key} 的 signals 里："
                 "图表按功能 signals 过滤，漏写会让按轴出图的分组整行消失")
+        outside_mode = [s for s in d.mode_signals() + [d.tcs_active]
+                        if fn.signals and s not in fn.signals]
+        if outside_mode:
+            raise ConfigError(
+                f"drive 的激活/模式信号 {outside_mode} 不在功能 {fn.key} 的 signals 里："
+                "它们与 TCS 激活位共用一行，漏写会让该行被过滤掉")
 
     # 分段器读取的通道同样是计算必需：缺了就切不出事件窗口，指标全判 missing。
     for fn in cfg.functions.values():

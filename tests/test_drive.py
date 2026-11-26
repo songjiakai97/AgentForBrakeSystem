@@ -111,19 +111,33 @@ def test_explicit_profile_wins_over_data(cfg):
     assert info2.layout == "both" and info2.target_kind == "TCS"
 
 
-def test_dtcs_requires_non_empty_dmc(cfg):
-    """DMC 信号存在但空序列 → 不能判 DTCS。"""
-    signals = {k: v for k, v in _signals("tcs_wet60_normal.mf4").items()}
+def test_assist_follows_dmc_operation_mode(cfg):
+    """TCS/DTCS 只看 DMC 工作模式：无信号或全 0 → TCS，任一非 0 → DTCS。"""
+    signals = _signals("tcs_wet60_normal.mf4")
+    assert infer_tokens(cfg, signals)["assist"] == "DTCS"      # demo 模式在起步后为 0x1
+
+    zeros = dict(signals)
+    zeros["DMCOperationModeFA"] = _const_like(signals["DMCOperationModeFA"], 0)
+    zeros["DMCOperationModeRA"] = _const_like(signals["DMCOperationModeRA"], 0)
+    assert infer_tokens(cfg, zeros)["assist"] == "TCS"          # 始终为 0 → TCS
+    assert drive_info(cfg, zeros).target_kind == "TCS"
+
+    edtc = dict(signals)
+    edtc["DMCOperationModeFA"] = _const_like(signals["DMCOperationModeFA"], 0x4)
+    edtc["DMCOperationModeRA"] = _const_like(signals["DMCOperationModeRA"], 0x4)
+    assert infer_tokens(cfg, edtc)["assist"] == "DTCS"          # EDTC On 也算 DTCS
 
     class Empty:
         ts = []
         values = []
-        unit = "N.m"
 
-    signals["DMCTarTorqueFA"] = Empty()
-    signals["DMCTarTorqueRA"] = Empty()
-    assert infer_tokens(cfg, signals)["assist"] == "TCS"
-    assert drive_info(cfg, signals).target_kind == "TCS"
+    absent = dict(signals)
+    absent["DMCOperationModeFA"] = Empty()
+    absent["DMCOperationModeRA"] = Empty()
+    assert infer_tokens(cfg, absent)["assist"] == "TCS"         # 无信号 → TCS
+
+    # 目标扭矩是否非零不再参与判断：有 DMC 扭矩但模式全 0 仍是 TCS
+    assert drive_info(cfg, zeros).target_kind == "TCS"
 
 
 # ---------------------------------------------------------------- 出图
@@ -180,6 +194,30 @@ def test_axle_row_is_actual_plus_one_request(cfg):
     assert all(len(g.signals) == 2 for g in dtcs + tcs)
 
 
+def test_assist_row_follows_drive_layout(cfg):
+    """TCS/DTCS 激活行：DTCS 画 DMC 模式（按驱动形式），TCS 只画 TCS_Active。"""
+    from brake_analyzer.drive import assist_chart_groups
+
+    signals = _signals("tcs_wet60_normal.mf4")
+    assert [g.signals for g in assist_chart_groups(cfg, "tcs", signals)] == \
+        [["DMCOperationModeFA", "DMCOperationModeRA"]]
+
+    front = dict(signals)
+    front["VehDriveType"] = _const_like(signals["VehDriveType"], 0x6)   # 纯电动前驱
+    groups = assist_chart_groups(cfg, "tcs", front)
+    assert groups[0].label == "DTCS 激活（DMC）"
+    assert groups[0].signals == ["DMCOperationModeFA"]
+
+    rear = dict(signals)
+    rear["VehDriveType"] = _const_like(signals["VehDriveType"], 0x7)    # 纯电动后驱
+    assert assist_chart_groups(cfg, "tcs", rear)[0].signals == ["DMCOperationModeRA"]
+
+    tcs = assist_chart_groups(cfg, "tcs", signals, "4WD|TCS")
+    assert [(g.label, g.signals) for g in tcs] == [("TCS 激活", ["TCS_Active"])]
+    # 非驱动功能不出这一行（ABS 自己只看 ABS_Active）
+    assert assist_chart_groups(cfg, "abs", signals) == []
+
+
 def test_request_falls_back_to_other_kind_when_selected_empty(cfg):
     """选的请求通道本轴没数据时用另一类补上，轴行仍保持两条线。"""
     import numpy as np
@@ -211,7 +249,13 @@ def test_layout_with_drive_keeps_static_rows_first(cfg):
     layout = layout_with_drive(cfg, "tcs", signals, "4WD|DTCS", cfg.chart_layout)
     assert layout[:len(cfg.chart_layout)] == list(cfg.chart_layout)
     assert [g.label for g in layout[len(cfg.chart_layout):]] == \
-        ["前轴扭矩（DTCS）", "后轴扭矩（DTCS）"]
+        ["DTCS 激活（DMC）", "前轴扭矩（DTCS）", "后轴扭矩（DTCS）"]
+    # 激活行：DTCS 画 DMC 模式，TCS 画 TCS_Active（同一行，只有一条）
+    assert layout[len(cfg.chart_layout)].signals == ["DMCOperationModeFA",
+                                                     "DMCOperationModeRA"]
+    tcs_layout = layout_with_drive(cfg, "tcs", signals, "4WD|TCS", cfg.chart_layout)
+    row = tcs_layout[len(cfg.chart_layout)]
+    assert row.label == "TCS 激活" and row.signals == ["TCS_Active"]
 
 
 # ---------------------------------------------------------------- 引擎接入
@@ -252,9 +296,9 @@ def test_engine_falls_back_to_panel_without_drive_info(cfg, tmp_path):
         chat, "tcs_full_throttle_dry_asphalt_0to100kph", None)
     assert profile is None
     assert gap and gap["hop"] == "profile"
-    # 驱动形式（0x0）识别不出 4WD/2WD；但 ABS 数据里也带 DMC 通道，
-    # 按「有 DMC 即 DTCS」预选这一维，用户只需补驱动形式
-    assert gap.get("preset") == ["DTCS"]
+    # 驱动形式（0x0）识别不出 4WD/2WD；DMC 模式全 0 → 按规则判 TCS 并预选这一维，
+    # 用户只需补驱动形式
+    assert gap.get("preset") == ["TCS"]
 
 
 class _ScriptLlm:

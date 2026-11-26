@@ -197,6 +197,9 @@ class AnalysisResult:
     samples: List[RunSample] = field(default_factory=list)
     llm_suggestion: Optional[dict] = None   # calibration_actions 等，缺 Key 时为 None
     degraded: bool = False                  # LLM 降级标记
+    # 未切出有效事件时的具体成因（缺通道 / 门限没到 / 穿越缺失 / 区间过短），
+    # 回灌给 LLM 与卡片：只给 no_valid_event 一个代码，说不清「为什么没切出来」
+    segment_note: Optional[str] = None
 
     def to_dict(self, include_samples: bool = True) -> dict:
         d = {
@@ -210,6 +213,8 @@ class AnalysisResult:
             "sample_count": len(self.samples),
             "degraded": self.degraded,
         }
+        if self.segment_note:
+            d["segment_note"] = self.segment_note
         if self.llm_suggestion is not None:
             d["llm_suggestion"] = self.llm_suggestion
         if include_samples:

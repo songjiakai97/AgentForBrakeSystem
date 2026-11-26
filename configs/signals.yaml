@@ -34,9 +34,11 @@ logical_signals:
   DMCTarTorqueRA:   {description: DMC 后轴目标扭矩, unit: N.m}
   FrontMotorTorque: {description: 前轴实际扭矩,   unit: N.m}
   RearMotorTorque:  {description: 后轴实际扭矩,   unit: N.m}
+  DMCOperationModeFA: {description: 前轴 DMC 工作模式, unit: ""}
+  DMCOperationModeRA: {description: 后轴 DMC 工作模式, unit: ""}
 
 # 驱动形式（design.md §9.5）：底盘网的 VehDriveType 决定「看哪根轴」，
-# 有 DMC 目标扭矩即 DTCS，否则 TCS。显式选择的档位优先于这里的识别结果。
+# DMC 工作模式决定 TCS/DTCS。显式选择的档位优先于这里的识别结果。
 drive:
   function: tcs              # 只有 TCS 功能需要按驱动形式选轴
   signal: VehDriveType
@@ -59,8 +61,13 @@ drive:
     0xF: {name: 保留,                   layout: other}
   # 驱动形式 → 档位维度取值；other 不产生档位识别
   layouts: {awd: 4WD, front: 2WD, rear: 2WD}
-  # 有 DMC 目标扭矩 → DTCS，否则 TCS
   assist: {dtcs: DTCS, tcs: TCS}
+  # TCS/DTCS 判据（唯一依据）：DMCOperationMode 无信号或始终为 0x0(Init) → TCS，
+  # 否则 DTCS。编码：0x0 Init / 0x1 On(DTCS 激活) / 0x2 Off / 0x3 Fault /
+  # 0x4 EDTC On(EDTC 激活，限制回馈扭矩)。该信号只用于判断，不参与档位指标。
+  mode: {front: DMCOperationModeFA, rear: DMCOperationModeRA}
+  # TCS 激活位：与 DMC 模式共用同一行子图（TCS 画它，DTCS 画两根轴上的模式）
+  tcs_active: TCS_Active
   torque:
     actual: {front: FrontMotorTorque, rear: RearMotorTorque}
     tcs:    {front: MMotTarFastFA,    rear: MMotTarFastRA}
@@ -91,6 +98,5 @@ chart_layout:
   - label: ABS 激活
     unit: ""
     signals: [ABS_Active]
-  - label: TCS 激活
-    unit: ""
-    signals: [TCS_Active]
+  # TCS 激活位不写在这里：TCS/DTCS 共用一行，由 drive 段在分析时按识别结果
+  # 动态拼（TCS 画 TCS_Active；DTCS 画 DMCOperationModeFA/RA），见 §9.5。

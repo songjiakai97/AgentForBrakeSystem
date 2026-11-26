@@ -71,6 +71,10 @@ BO_ 263 AXLE_TORQUE_R: 8 MCU_R
  SG_ MMotTarFastRA : 16|16@1- (0.1,0.0) [-3276.8|3276.7] "N.m"  TCU
  SG_ RearMotorTorque : 0|16@1- (0.1,0.0) [-3276.8|3276.7] "N.m"  TCU
 
+BO_ 264 DMC_MODE: 8 DMC
+ SG_ DMCOperationModeRA : 8|8@1+ (1.0,0.0) [0|255] ""  TCU
+ SG_ DMCOperationModeFA : 0|8@1+ (1.0,0.0) [0|255] ""  TCU
+
 
 
 

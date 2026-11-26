@@ -448,6 +448,28 @@ def test_degenerate_window_card_says_not_signal_absence(cfg):
     assert "信号缺失" not in line
 
 
+def test_segment_note_explains_why_no_event(cfg):
+    """未切出事件要带回具体成因：缺通道、门限没到、穿越缺失，各有各的说法。"""
+    from brake_analyzer.llm.prompts import digest_from_analysis, digest_line
+
+    # 初速不足：制动踏板到量了，但车速从未穿越 100 km/h（给的是实测最高车速）
+    no_v0 = _analyze(cfg, "abs_dry100_no_v0.mf4", ABS100)
+    assert no_v0.segment_note and "100" in no_v0.segment_note
+    assert "穿越" in no_v0.segment_note and "实测最高" in no_v0.segment_note
+    d = digest_from_analysis(no_v0.to_dict())
+    assert d["segment_note"] == no_v0.segment_note
+    assert "切窗：" in digest_line(no_v0.to_dict())
+
+    # TCS 起步车速没到：油门踩了但车速没上升到 0.8 km/h 以上
+    never = _analyze(cfg, "tcs_wet60_never_starts.mf4", TCS60)
+    assert never.segment_note and "车速未上升穿越 0.8 km/h" in never.segment_note
+
+    # 正常切出窗口的分析不带 segment_note
+    ok = _analyze(cfg, "abs_dry100_normal.mf4", ABS100)
+    assert ok.segment_note is None
+    assert "segment_note" not in ok.to_dict()
+
+
 def test_missing_reason_omitted_when_computable(cfg):
     res = _analyze(cfg, "abs_dry100_dist_abn.mf4", ABS100)
     d = res.to_dict()

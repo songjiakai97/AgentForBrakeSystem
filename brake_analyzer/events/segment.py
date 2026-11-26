@@ -283,6 +283,92 @@ def degenerate_window(reason: str) -> EventWindow:
     return EventWindow(t_start=nan, t_end=nan, anchor=nan, phases=[reason])
 
 
+# ---------------------------------------------------------------- 未切出事件的原因
+
+def _stat(signals: dict, name: str):
+    """(点数, 最小值, 最大值)；通道缺失/空序列返回 None。"""
+    ts, vals = _series(signals, name)
+    if len(ts) == 0:
+        return None
+    return len(ts), float(np.min(vals)), float(np.max(vals))
+
+
+def _explain_speed_cross(signals: dict, gate: str, arm: float, v0: float, v1: float,
+                         direction: str, gate_label: str) -> str:
+    speed = _stat(signals, "speed_vbox")
+    if speed is None:
+        return "缺少 speed_vbox（车速），无法按车速穿越定位事件"
+    pedal = _stat(signals, gate)
+    if pedal is None:
+        return f"缺少 {gate}（{gate_label}），无法判断操作请求"
+    if not _gate_intervals(signals, gate, arm):
+        return (f"{gate_label}全程未达到 {arm:g}%（实测最大 {pedal[2]:.1f}%），"
+                "没有可用请求段")
+    ts, sv = _series(signals, "speed_vbox")
+    starts = _crossings(ts, sv, v0, direction)
+    ends = _crossings(ts, sv, v1, direction)
+    verb = "上升" if direction == "up" else "下降"
+    if not starts:
+        # 起点穿越失败总是「没到过 v0」：下降穿越要求先在 v0 之上，上升穿越要求先低后高
+        return (f"车速未{verb}穿越 {v0:g} km/h（实测最高 {speed[2]:.2f} km/h），"
+                "事件起点缺失")
+    if not ends:
+        # 终点缺失：下降穿越看最低速度没降下去，上升穿越看最高速度没升上去
+        edge = speed[1] if direction == "down" else speed[2]
+        edge_cn = "最低" if direction == "down" else "最高"
+        return (f"车速未{verb}穿越 {v1:g} km/h（实测{edge_cn} {edge:.2f} km/h），"
+                "事件终点缺失")
+    if not _pair_windows(_gate_intervals(signals, gate, arm), starts, ends):
+        return (f"找到 {len(starts)} 个起点、{len(ends)} 个终点，但起点之后没有"
+                "可配对的终点（请求段内事件不完整）")
+    return "切窗参数找到了起止点，但窗口时长无效（起止顺序异常）"
+
+
+def _explain_high(signals: dict, name: str, level: float, label: str,
+                  min_dur: float = 0.0) -> str:
+    st = _stat(signals, name)
+    if st is None:
+        return f"缺少 {name}（{label}），无法按激活区间切窗"
+    raw = _high_intervals(signals, name, level=level)
+    if not raw:
+        return (f"{label}全程未置位（{name} 实测最大 {st[2]:.2f}），"
+                "没有可切分的激活区间")
+    if min_dur and not _high_intervals(signals, name, level=level, min_dur=min_dur):
+        return (f"共 {len(raw)} 段{label}区间，但每段都短于 {min_dur:g}s，"
+                "未形成有效事件（疑似瞬时毛刺）")
+    return f"切出 {len(raw)} 段{label}区间，但都未通过有效性检查"
+
+
+def explain_no_event(seg_name: str, signals: dict, params: dict,
+                     raw_windows: List[EventWindow] = ()) -> str:
+    """未切出有效事件时的可读成因（回灌给 LLM，也写进结果卡片）。
+
+    只解释「为什么没切出来」：缺通道、操作量没到门限、车速没穿越判定点、
+    配对失败、区间过短。措辞刻意区分「试验没做出来」与「通道缺失」，
+    因为给用户的建议是相反的（design.md §10.1）。
+    """
+    if raw_windows:
+        return f"切出 {len(raw_windows)} 个候选窗口，但起止顺序异常（时长≤0）"
+    params = params or {}
+    if seg_name == "seg_abs_full_brake":
+        return _explain_speed_cross(
+            signals, "BrakePedalPos", float(params.get("pedal_arm_pct", 80.0)),
+            float(params.get("v0_kph", 100.0)), float(params.get("v_stop_kph", 0.8)),
+            "down", "制动踏板")
+    if seg_name == "seg_tcs_full_throttle":
+        return _explain_speed_cross(
+            signals, "ThrottlePedalPos", float(params.get("pedal_arm_pct", 95.0)),
+            float(params.get("v_start_kph", 0.8)),
+            float(params.get("v_target_kph", 60.0)), "up", "油门踏板")
+    if seg_name == "seg_abs_active":
+        return _explain_high(signals, "ABS_Active", ABS_ACTIVE_LEVEL, "ABS 激活",
+                             ABS_ACTIVE_MIN_DUR_S)
+    if seg_name == "seg_tcs_pedal_time":
+        return _explain_high(signals, "ThrottlePedalPos",
+                             float(params.get("pedal_arm_pct", 95.0)), "全油门")
+    return "分段器没有切出有效事件窗口"
+
+
 def is_valid(window: EventWindow) -> bool:
     return (
         not np.isnan(window.t_start)

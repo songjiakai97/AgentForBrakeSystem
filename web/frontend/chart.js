@@ -235,8 +235,11 @@
       var html = '<div style="opacity:.75;margin-bottom:2px">t = ' + Number(t).toFixed(3) + ' s</div>';
       order.forEach(function (gi) {
         var label = groupLabels[gi] ? groupLabels[gi] : ('#' + (gi + 1));
-        html += '<div style="color:#38bdf8;margin-top:2px">' + label + '</div>' +
-                '<div style="display:grid;grid-template-columns:1fr 1fr;column-gap:12px">' +
+        // 轴名 → 信号名做层级：信号行整体内缩并画一条竖线，读的时候一眼能看出
+        // 这些读数属于上面那一轴，而不是与轴名同级
+        html += '<div style="color:#38bdf8;margin-top:4px">' + label + '</div>' +
+                '<div style="display:grid;grid-template-columns:1fr 1fr;column-gap:12px;' +
+                'margin:1px 0 2px 14px;padding-left:8px;border-left:1px solid #1e3a5f">' +
                 byGroup[gi].join('') + '</div>';
       });
       readout.innerHTML = html;

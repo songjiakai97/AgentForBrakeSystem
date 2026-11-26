@@ -221,8 +221,8 @@ brake-agent/
   未编排的信号各自补一个单信号分组，保证图表不静默丢通道；这一行的组名取
   `logical_signals` 的中文 `description`（缺描述才退回逻辑名）——一排中文子图标题里
   突然出现裸的 `distance_vbox`，用户会当成漏配（2026-11-24 报障）。不同功能的状态量（如
-  `ABS_Active` / `TCS_Active`）各自成行、不共轴：叠在一起会互相压住，且 `only` 过滤后
-  整行消失，正好对应「一个功能只看自己那个激活信号」。
+  `ABS_Active`）静态各占一行；`TCS_Active` 例外——它与 DMC 工作模式共用一行、按识别结果
+  动态选择（§9.6 drive 段），所以不写进 `chart_layout`。
 - 搬运后残留的顶层段（如把 `chart_layout` 留在 `signals_mf4.yaml`）由 `_reject_unknown_sections`
   拒绝并指回 `signals.yaml` —— "看着还生效"的死配置比缺失更难查。
 - `required_signals`（参与计算的信号集）= 每个功能分段器读取的通道（`SEGMENTER_SIGNALS`，
@@ -427,8 +427,9 @@ phases: list[str]
     整行不生成（`_groups_from_layout` 先过滤），所以 grid / 轴 / `groupIndex` 三者始终同序。
   - 轴扭矩行是**动态**的：`drive.layout_with_drive` 在静态分组之后按该样本识别出的驱动
     形式追加 0/1/2 行（前驱一根、后驱一根、四驱两根，其余不追加），每行两条线 =
-    实际扭矩 + TCS/DTCS(DMC) 目标扭矩（§9.6 drive 段）。网页 `/timeseries`、记录库曲线
-    与报告出图都走同一个函数，三处看到的行数一致。
+    实际扭矩 + TCS/DTCS(DMC) 目标扭矩（§9.6 drive 段）。同一函数还会追加一行激活子图：
+    TCS 画 `TCS_Active`，DTCS 画 `DMCOperationModeFA/RA`（按驱动形式选轴）。网页
+    `/timeseries`、记录库曲线与报告出图都走同一个函数，三处看到的行数一致。
   - **游标读数列出全部信号**（§8.3）：读数与游标线都由前端 `web/frontend/chart.js`
     自己画，ECharts 的 tooltip / axisPointer 全部关掉。三个方案里只有自己画是对
     的：
@@ -439,10 +440,11 @@ phases: list[str]
       link 之后每个联动行还会各画一个 x label 和标记点——一屏好几个「3.68」，
       看起来像「点不在游标的 x 上」。
     现在读数按 `groupIndex` 分组、两列排版（6 行 12 条约 280px），贴指针显示并做边界
-    翻转；信号名用该信号在 ECharts 调色板里的实际颜色（按 `seriesIndex` 取，与曲线
-    同色）；游标是一条自己画的竖线，只由 x 决定、跨行贯通、不带数值标签；
-    隐藏的组（前端 legend.selected 勾掉）整组不进读数。formatter 是函数进不了 JSON
-    option，所以这一层只能在前端。
+    翻转；轴名（子图名）与信号名做出层级——信号行整体内缩 14px 并带左侧竖线，一眼
+    能看出这些读数属于上面那一轴；信号名用该信号在 ECharts 调色板里的实际颜色（按
+    `seriesIndex` 取，与曲线同色）；游标是一条自己画的竖线，只由 x 决定、跨行贯通、
+    不带数值标签；隐藏的组（前端 legend.selected 勾掉）整组不进读数。formatter 是函数
+    进不了 JSON option，所以这一层只能在前端。
 - 本期无静态图/报告导出，Markdown/HTML 报告与 PDF/Excel 导出列入 §15 后续扩展。
 
 ### 6.7 编排流水线（`pipeline.py`）
@@ -1411,7 +1413,7 @@ configs/signals_blf.yaml 格式相关：这个逻辑信号在 BLF 里是哪条 C
    少一个即报错。
 3. 纯观测量允许只出现在一种格式里 —— MF4 常带额外测量通道，BLF 只有 CAN 上发布的信号。
    这类通道（demo 里如 `Ax`、`ABS_Active`、`TCS_Active`）只出现在一侧时不报错：另一侧的
-   Loader 返回空 `ts`/`values`，图表层跳过空通道。（当前 demo 的 DBC 把全部 19 个逻辑
+   Loader 返回空 `ts`/`values`，图表层跳过空通道。（当前 demo 的 DBC 把全部 21 个逻辑
    信号都发了，`tests/test_blf_demo.py::test_observation_only_signal_may_be_absent`
    用"摘掉 Ax"验证规则本身。）
 
@@ -1451,26 +1453,35 @@ drive:
     0x5: {name: 纯燃油, layout: other}
   layouts: {awd: 4WD, front: 2WD, rear: 2WD}
   assist: {dtcs: DTCS, tcs: TCS}
+  mode: {front: DMCOperationModeFA, rear: DMCOperationModeRA}
+  tcs_active: TCS_Active
   torque:
     actual: {front: FrontMotorTorque, rear: RearMotorTorque}
     tcs:    {front: MMotTarFastFA,    rear: MMotTarFastRA}
     dtcs:   {front: DMCTarTorqueFA,   rear: DMCTarTorqueRA}
 ```
 
-驱动形式决定「看哪根轴」，DMC 目标扭矩决定「功能叫 TCS 还是 DTCS」：
+驱动形式决定「看哪根轴」，DMC 工作模式决定「功能叫 TCS 还是 DTCS」：
 
 - **layout**：`awd`（含 0x1/0x2/0x3）看前后两根轴，`front`/`rear`（0x4/0x6/0x7）只看
   对应一根轴；`other`（0x0 系统故障、0x5 纯燃油、0x8 未启用、0x9~0xF 保留）不看扭矩轴。
-- **TCS / DTCS**：轴扭矩信号里有 DMC 目标扭矩（且该序列非空）即为 DTCS，否则 TCS；
-  目标扭矩取 `tcs`（快速降扭请求 MMotTarFast）或 `dtcs`（DMCTarTorque）对应那一组。
+- **TCS / DTCS**：只看 `DMCOperationModeFA/RA`——无信号或始终为 0x0(Init) 即 TCS，
+  任一采样非 0 即 DTCS。编码：0x0 Init / 0x1 On（DTCS 激活）/ 0x2 Off / 0x3 Fault /
+  0x4 EDTC On（EDTC 激活，限制回馈扭矩）。目标扭矩是否非零**不再**参与判断。
+  这两条模式信号只用于判断，指标不读它们。
+- **激活子图与判断同源**：`TCS_Active` 与 DMC 模式共用一行（不共存在同一份图里）。
+  判为 TCS → 该行只画 `TCS_Active`；判为 DTCS → 画 `DMCOperationModeFA/RA`
+  （按驱动形式选前轴、后轴或两根）。轴扭矩目标行同理取 `tcs`（MMotTarFast）
+  或 `dtcs`（DMCTarTorque）。
 - **显式档位优先**：用户/模型明确给出的 4WD/2WD、TCS/DTCS 不会被识别结果覆盖；
   识别只补缺的那一维。2WD 但数据看不出前后轴时，两根轴都画（不隐藏数据）。
-- **轴扭矩信号不进 `chart_layout`**：看几根轴取决于数据，静态布局写进任何一组都会让
-  另一种驱动形式多出空行。启动期因此拒绝把 `dynamic_signals()`（驱动类型 + 6 个扭矩）
-  写进 `chart_layout`，同时要求它们出现在该功能的 `signals` 里，否则 `only` 过滤会把
-  动态行整行滤掉。
-- **识别不出就交用户选**：`VehDriveType` 缺失/为 other、或没有任何扭矩通道时，
-  档位面板照常弹出（能识别出的那一维作为 `preset` 预选），不会瞎猜一个档位跑分析。
+- **这些信号不进 `chart_layout`**：看几根轴、画哪一种激活取决于数据，静态布局写进
+  任何一组都会让另一种驱动形式多出空行。启动期因此拒绝把 `dynamic_signals()`
+  （驱动类型 + 2 个 DMC 模式 + 6 个扭矩 + `TCS_Active`）写进 `chart_layout`，同时
+  要求它们出现在该功能的 `signals` 里，否则 `only` 过滤会把动态行整行滤掉。
+- **识别不出就交用户选**：`VehDriveType` 缺失/为 other 时驱动形式识别不出（TCS/DTCS
+  这一维总能判出来），档位面板照常弹出（能识别出的那一维作为 `preset` 预选），
+  不会瞎猜一个档位跑分析。
 
 #### signals_mf4.yaml
 
@@ -1583,7 +1594,7 @@ config 的子集，拿 DBC 全集当分母会惩罚只在 config 里引用少数
 
 demo 约定（`configs/signals_blf.yaml` + `configs/dbc/brake_demo.dbc`）：
 
-- **一份 DBC 管全部 12 个逻辑信号**，总线名 = `BRAKE`、别名 = `BRAKE_MAIN`，`channels: auto`；
+- **一份 DBC 管全部 21 个逻辑信号**，总线名 = `BRAKE`、别名 = `BRAKE_MAIN`，`channels: auto`；
   所有 BLF 帧都发在通道 0，识别阶段从 candidates 里的 msg_id 反推出「通道 0 = BRAKE」。
 - DBC 由 `scripts/generate_demo_blf.py` 用 cantools 定义后 `dump_file` 生成，**入库**（4 KB，
   是数据契约的一部分）；BLF 输出到 `tests/data/blf/`，与 MF4 一样不入库、可再生。
@@ -1596,6 +1607,9 @@ demo 约定（`configs/signals_blf.yaml` + `configs/dbc/brake_demo.dbc`）：
   | 0x102 | speed_vbox / distance_vbox / Ax | 0.01 km/h、0.05 m、有符号 0.01 m/s² |
   | 0x103 | BrakePedalPos / ThrottlePedalPos / ABS_Active / TCS_Active | 8bit × 0.5 %、1bit × 1 |
   | 0x104 | yaw_rate | 16bit 有符号 × 0.01 deg/s |
+  | 0x105 | VehDriveType | 8bit 原始编码 0x0~0xF |
+  | 0x106 / 0x107 | 前/后轴：实际扭矩 + MMotTarFast + DMCTarTorque | 3 × 16bit 有符号 × 0.1 N.m |
+  | 0x108 | DMCOperationModeFA/RA（TCS/DTCS 判据） | 2 × 8bit 原始编码 |
 
 - factor 的选择原则是「不改变 demo 判定」：distance 0.05 m 相对 40 m 阈值、踏板 0.5 % 相对
   80/95 % 的 `pedal_arm_pct`、速度 0.01 km/h 相对滑移量阈值都留了数量级余量。
@@ -1630,7 +1644,6 @@ ok | abnormal | missing | info
 
 **missing 必须带成因**（`MetricResult.missing_reason`，由 `_missing_reason(signals, window, tmpl)`
 在置 missing 的同一处判定，`metrics/engine.py`）：
-
 | reason | 判据（顺序即优先级） | 该怎么办 |
 | --- | --- | --- |
 | `no_valid_event` | 事件窗口退化（`t_start`/`t_end` 缺失或 NaN，或 `t_end <= t_start`），且切窗通道有数据 | 补做该工况试验 / 换工况，**不是查信号映射** |
@@ -1644,6 +1657,13 @@ digest 只带 status —— 模型手里没有成因数据，只能猜，于是�
 「yaw_rate 信号缺失」。现在成因是一等字段，一路传到规则 `direction`（§6.5）、工具应答
 `reason` + 按需 `reason_legend`（§6.9）、卡片正文短注与前端 chip（§8.3）；
 `to_dict()` 只在非空时导出，可算的指标不多付一个字段。
+
+`no_valid_event` 只说明「没切出事件」，说不清是哪一步断的。段层因此额外产出
+`AnalysisResult.segment_note`（`events/segment.py::explain_no_event`）：缺哪个通道、
+操作量实测最大多少（对比门限）、车速实测极值（对比穿越速度）、找到几个起止点、
+区间是否短于最小时长。它随 `to_dict()`、digest（`segment_note`）与卡片正文
+（`（切窗：…）`）一起给到模型，模型的建议才能落到「补做该工况 / 踏板没到量 /
+换判定车速」而不是泛泛的「数据缺失」。
 
 ### 10.2 MetricResult
 

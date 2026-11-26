@@ -108,6 +108,9 @@ def gen_abs_run(
         "MMotTarFastRA": _add("MMotTarFastRA", ts, np.zeros_like(ts), "N.m"),
         "DMCTarTorqueFA": _add("DMCTarTorqueFA", ts, np.zeros_like(ts), "N.m"),
         "DMCTarTorqueRA": _add("DMCTarTorqueRA", ts, np.zeros_like(ts), "N.m"),
+        # DMC 模式全 0（Init）→ 判 TCS
+        "DMCOperationModeFA": _add("DMCOperationModeFA", ts, np.zeros_like(ts), ""),
+        "DMCOperationModeRA": _add("DMCOperationModeRA", ts, np.zeros_like(ts), ""),
     }
     return {"ts": ts, "sigs": sigs}
 
@@ -163,8 +166,10 @@ def gen_tcs_run(
         "wheelSpeed_FR": _add("wheelSpeed_FR", ts, wheel + rng.normal(0, 0.2, ts.size), "km/h"),
         "wheelSpeed_RL": _add("wheelSpeed_RL", ts, np.maximum(speed + slip_env * 0.2 + rng.normal(0, 0.2, ts.size), 0), "km/h"),
         "wheelSpeed_RR": _add("wheelSpeed_RR", ts, np.maximum(speed + slip_env * 0.2 + rng.normal(0, 0.2, ts.size), 0), "km/h"),
-        # 0x1 纯电动四驱 → 前后两根轴；DMC 目标扭矩非零 → 自动判 DTCS
+        # 0x1 纯电动四驱 → 前后两根轴；DMC 模式在起步后置 0x1(On) → 自动判 DTCS
         "VehDriveType": _add("VehDriveType", ts, np.full_like(ts, 0x1), ""),
+        "DMCOperationModeFA": _add("DMCOperationModeFA", ts, (ts >= t_launch).astype(float), ""),
+        "DMCOperationModeRA": _add("DMCOperationModeRA", ts, (ts >= t_launch).astype(float), ""),
         "FrontMotorTorque": _add("FrontMotorTorque", ts,
                                  throttle / 100.0 * 180.0, "N.m"),
         "RearMotorTorque": _add("RearMotorTorque", ts,

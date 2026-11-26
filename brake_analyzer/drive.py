@@ -77,11 +77,23 @@ def _base_layout(d: DriveConfig, code: Optional[int]) -> str:
 
 
 def infer_assist_dtcs(cfg, signals: dict) -> bool:
-    """有 DMC 目标扭矩信号且有数据 → DTCS，否则 TCS。"""
+    """DMC 工作模式无信号或始终为 0x0(Init) → TCS，否则 DTCS（design.md §9.5）。
+
+    编码：0x0 Init / 0x1 On（DTCS 激活）/ 0x2 Off / 0x3 Fault /
+    0x4 EDTC On（EDTC 激活，限制回馈扭矩）。只看有没有非零模式，不用目标扭矩
+    是否非零判断——扭矩为 0 也可能只是当前请求为 0。
+    """
     d = cfg.drive
     if d is None:
         return False
-    return any(has_data(signals, sig) for sig in d.torque.get("dtcs", {}).values())
+    for name in d.mode.values():
+        sig = _data(signals, name)
+        if sig is None:
+            continue
+        vals = _values(sig)
+        if vals.size and np.any(np.rint(vals).astype(int) != 0):
+            return True
+    return False
 
 
 def infer_tokens(cfg, signals: dict) -> Dict[str, str]:
@@ -95,11 +107,9 @@ def infer_tokens(cfg, signals: dict) -> Dict[str, str]:
     token = d.layouts.get(layout)
     if token:
         out["layout"] = token
-    # 一条扭矩信号都没有时连 TCS/DTCS 都判不了：宁可不猜，让面板去问
-    dtcs = infer_assist_dtcs(cfg, signals)
-    tcs_present = any(has_data(signals, sig) for sig in d.torque.get("tcs", {}).values())
-    if dtcs or tcs_present or token:
-        out["assist"] = d.assist["dtcs"] if dtcs else d.assist["tcs"]
+    # TCS/DTCS 只看 DMC 模式：无信号或全 0 → TCS，所以这一维总能判出来
+    out["assist"] = d.assist["dtcs"] if infer_assist_dtcs(cfg, signals) else d.assist["tcs"]
+    return out
     return out
 
 
@@ -137,6 +147,32 @@ def drive_info(cfg, signals: dict, profile: Optional[str] = None) -> Optional[Dr
                      target_signals=dict(d.torque[kind]))
 
 
+def assist_chart_groups(cfg, function_key: str, signals: dict,
+                        profile: Optional[str] = None) -> List[ChartGroup]:
+    """TCS/DTCS 激活行：TCS 画 TCS_Active；DTCS 画 DMC 工作模式（按驱动形式选轴）。
+
+    两者共用同一行子图——同一份图里不会同时出现两种控制的激活状态，
+    分开成两行只会让另一行永远是空的。
+    """
+    d = cfg.drive
+    if d is None or not function_key or function_key != d.function:
+        return []
+    info = drive_info(cfg, signals, profile)
+    if info is None:
+        return []
+    if not info.dtcs:
+        if d.tcs_active and has_data(signals, d.tcs_active):
+            return [ChartGroup(label="TCS 激活", unit="", signals=[d.tcs_active])]
+        return []
+    axles = {"front": ["front"], "rear": ["rear"],
+             "awd": ["front", "rear"], "both": ["front", "rear"]}.get(
+                 info.layout, ["front", "rear"])
+    sigs = [d.mode[a] for a in axles if d.mode.get(a) and has_data(signals, d.mode[a])]
+    if not sigs:
+        return []
+    return [ChartGroup(label="DTCS 激活（DMC）", unit="", signals=sigs)]
+
+
 def drive_chart_groups(cfg, function_key: str, signals: dict,
                        profile: Optional[str] = None) -> List[ChartGroup]:
     """按驱动形式生成轴扭矩子图；不适用（非驱动功能/其他驱动形式）返回 []。"""
@@ -172,5 +208,10 @@ def drive_chart_groups(cfg, function_key: str, signals: dict,
 
 def layout_with_drive(cfg, function_key: str, signals: dict,
                       profile: Optional[str] = None, layout=None) -> list:
-    """静态 chart_layout + 本次驱动形式对应的轴扭矩分组（保持静态行在前）。"""
-    return list(layout or []) + drive_chart_groups(cfg, function_key, signals, profile)
+    """静态 chart_layout + 激活行 + 本次驱动形式对应的轴扭矩分组。
+
+    顺序固定：静态行在前，随后 TCS/DTCS 激活行，最后是轴扭矩行。
+    """
+    return (list(layout or [])
+            + assist_chart_groups(cfg, function_key, signals, profile)
+            + drive_chart_groups(cfg, function_key, signals, profile))

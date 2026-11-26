@@ -29,3 +29,5 @@ signal_maps:
   DMCTarTorqueRA:   {candidates: [DMCTarTorqueRA]}
   FrontMotorTorque: {candidates: [FrontMotorTorque]}
   RearMotorTorque:  {candidates: [RearMotorTorque]}
+  DMCOperationModeFA: {candidates: [DMCOperationModeFA]}
+  DMCOperationModeRA: {candidates: [DMCOperationModeRA]}

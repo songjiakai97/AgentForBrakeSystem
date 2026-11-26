@@ -83,7 +83,8 @@ signal_maps:
   ThrottlePedalPos:
     candidates:
       - [BRAKE_MAIN, "0x103", ThrottlePedalPos]
-  # 底盘网：驱动形式在 0x105，轴扭矩按「实际 / TCS 快速降扭 / DTCS 目标」各一帧
+  # 底盘网：驱动形式在 0x105，轴扭矩按「实际 / TCS 快速降扭 / DTCS 目标」各一帧，
+  # DMC 工作模式在 0x108（TCS/DTCS 判据）
   VehDriveType:
     candidates:
       - [BRAKE_MAIN, "0x105", VehDriveType]
@@ -105,3 +106,9 @@ signal_maps:
   DMCTarTorqueRA:
     candidates:
       - [BRAKE_MAIN, "0x107", DMCTarTorqueRA]
+  DMCOperationModeFA:
+    candidates:
+      - [BRAKE_MAIN, "0x108", DMCOperationModeFA]
+  DMCOperationModeRA:
+    candidates:
+      - [BRAKE_MAIN, "0x108", DMCOperationModeRA]

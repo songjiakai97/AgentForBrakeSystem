@@ -27,5 +27,6 @@ functions:
     description: 低附路面起步全油门加速，评价横摆稳定性、加速能力与驱动轮打滑量
     signals: [speed_vbox, wheelSpeed_FL, wheelSpeed_FR, wheelSpeed_RL,
               wheelSpeed_RR, yaw_rate, Ax, ThrottlePedalPos, TCS_Active,
+              DMCOperationModeFA, DMCOperationModeRA,
               FrontMotorTorque, RearMotorTorque, MMotTarFastFA, MMotTarFastRA,
               DMCTarTorqueFA, DMCTarTorqueRA]

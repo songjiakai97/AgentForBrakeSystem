@@ -10,7 +10,8 @@ import uuid
 from typing import Dict, List, Optional
 
 from .configs import AppConfigs
-from .events.segment import SEGMENTERS, SEGMENTER_SIGNALS, degenerate_window, is_valid
+from .events.segment import (SEGMENTERS, SEGMENTER_SIGNALS, degenerate_window,
+                             explain_no_event, is_valid)
 from .loaders.base import Loader, SignalData
 from .metrics.engine import compute_metrics
 from .rules.engine import run_rules
@@ -39,13 +40,17 @@ def analyze_signals(
         raise NoDataError(f"分段模板未注册: {seg_name}")
 
     params = dict(cond.params)
-    windows: List[EventWindow] = segmenter(signals, fn, cond, params)
-    windows = [w for w in windows if is_valid(w)]
+    raw_windows: List[EventWindow] = segmenter(signals, fn, cond, params)
+    windows = [w for w in raw_windows if is_valid(w)]
+    segment_note: Optional[str] = None
     if not windows:
         # 切窗通道整条缺失 ≠ 试验没做出来：前者要查映射/补测通道，后者要重做工况。
         missing = [s for s in SEGMENTER_SIGNALS.get(seg_name, [])
                    if not signals.get(s) or len(signals[s].ts) == 0]
         windows = [degenerate_window("signal_absent" if missing else "no_valid_event")]
+        # 具体成因（哪个门限没到、哪次穿越没发生）回灌给 LLM 与卡片：
+        # 只有 no_valid_event 一个代码，模型说不清「为什么没切出来」
+        segment_note = explain_no_event(seg_name, signals, params, raw_windows)
 
     analysis_id = f"an_{uuid.uuid4().hex[:10]}"
     samples: List[RunSample] = []
@@ -76,6 +81,7 @@ def analyze_signals(
         file_id=file_id,
         file_name=file_name,
         samples=samples,
+        segment_note=segment_note,
     )
 
 

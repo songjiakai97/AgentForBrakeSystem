@@ -325,6 +325,10 @@ def digest_from_analysis(d: dict) -> dict:
     out = {"condition_name": d.get("condition_name"), "samples": samples}
     if d.get("profile"):
         out["profile"] = d["profile"]
+    # 未切出事件的具体成因（段层诊断）：没有它，模型只能说「没切出事件」，
+    # 说不出是踏板没到门限还是车速没穿越，给用户的下一步建议就落不了地
+    if d.get("segment_note"):
+        out["segment_note"] = d["segment_note"]
     if d.get("degraded"):
         out["note"] = "LLM 标定建议不可用，仅规则结论"
     return out
@@ -433,7 +437,10 @@ def digest_line(d: dict) -> str:
             for m in s["metrics"]
         )
         runs.append(f"run{s.get('run')}·{s.get('file')}：{seg}")
-    return "；".join(runs)
+    line = "；".join(runs)
+    if d.get("segment_note"):
+        line += f"（切窗：{d['segment_note']}）"
+    return line
 
 
 

@@ -162,15 +162,32 @@ def test_render_sample_chart_respects_function_signals(tmp_path):
 
 
 def test_activation_signals_occupy_separate_rows():
-    """激活标志各占一行：不同功能的状态量不共轴，only 过滤后另一行整行消失。"""
+    """激活标志各占一行：ABS 静态一行；TCS/DTCS 共用一行、按识别结果动态拼。"""
     from brake_analyzer.charts.html import _groups_from_layout
+    from brake_analyzer.drive import layout_with_drive
 
     rows = {g.label: g.signals for g in CFG.chart_layout}
     assert rows["ABS 激活"] == ["ABS_Active"]
-    assert rows["TCS 激活"] == ["TCS_Active"]
+    # TCS 激活位与 DMC 模式不进静态布局（同一行按分析结果动态选择）
+    assert "TCS 激活" not in rows
     labels = [g[0] for g in _groups_from_layout(
         _signals(), CFG.chart_layout, only=list(CFG.function("abs").signals))]
     assert "ABS 激活" in labels and "TCS 激活" not in labels
+
+    # TCS 数据（DMC 模式有非零）→ 激活行画 DMC 模式；显式 TCS → 画 TCS_Active
+    sig = _signals()
+    ts = next(iter(sig.values())).ts
+    from brake_analyzer.loaders.base import SignalData
+
+    sig["VehDriveType"] = SignalData(ts=ts, values=np.full_like(ts, 1.0))
+    sig["DMCOperationModeFA"] = SignalData(ts=ts, values=np.full_like(ts, 1.0))
+    sig["DMCOperationModeRA"] = SignalData(ts=ts, values=np.full_like(ts, 1.0))
+    dtcs = layout_with_drive(CFG, "tcs", sig, "4WD|DTCS", CFG.chart_layout)
+    row = next(g for g in dtcs if g.label.startswith("DTCS 激活"))
+    assert row.signals == ["DMCOperationModeFA", "DMCOperationModeRA"]
+    tcs = layout_with_drive(CFG, "tcs", sig, "4WD|TCS", CFG.chart_layout)
+    row = next(g for g in tcs if g.label == "TCS 激活")
+    assert row.signals == ["TCS_Active"]
 
 
 def test_distance_row_has_chinese_label():

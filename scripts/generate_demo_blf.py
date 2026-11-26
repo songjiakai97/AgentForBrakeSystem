@@ -75,6 +75,8 @@ def dbc_messages() -> List[Message]:
       驱动形式 0x105        VehDriveType 8bit（0x0~0xF 原始编码）
       轴扭矩   0x106/0x107  前/后轴：实际扭矩 + TCS 快速降扭 + DMC 目标扭矩，
                            各 16bit 有符号 0.1 N.m（demo 值 ≤ 3276.7 N.m）
+      DMC 模式 0x108        前/后轴工作模式 8bit（0 Init / 1 On / 2 Off / 3 Fault
+                           / 4 EDTC On），TCS/DTCS 判据
     """
     return [
         Message(frame_id=0x100, name="WHEEL_SPEED_1", length=8, senders=["ABS"], signals=[
@@ -119,6 +121,10 @@ def dbc_messages() -> List[Message]:
                  minimum=-3276.8, maximum=3276.7),
             _num("DMCTarTorqueRA", 32, 16, 0.1, signed=True, unit="N.m",
                  minimum=-3276.8, maximum=3276.7),
+        ]),
+        Message(frame_id=0x108, name="DMC_MODE", length=8, senders=["DMC"], signals=[
+            _num("DMCOperationModeFA", 0, 8, 1.0, unit="", minimum=0, maximum=255),
+            _num("DMCOperationModeRA", 8, 8, 1.0, unit="", minimum=0, maximum=255),
         ]),
     ]
 
